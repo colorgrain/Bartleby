@@ -1,0 +1,242 @@
+/*
+  themes/windows11.css — Bartleby skin: Windows 11 Fluent Design
+  ══════════════════════════════════════════════════════════════════════════════
+
+  This skin makes Bartleby look native on Windows 11 by implementing the core
+  visual patterns of the WinUI 3 / Fluent Design System.
+
+  ── WINDOWS 11 DESIGN LANGUAGE ───────────────────────────────────────────────
+
+  Windows 11 / Fluent Design is characterised by:
+
+  MICA MATERIAL:
+    The signature Windows 11 surface effect, Mica, blends the desktop wallpaper
+    with a tinted frosted-glass overlay. The resulting colour depends on the
+    user's wallpaper (typically a tinted light blue-grey in light mode,
+    a dark blue-grey in dark mode). We approximate Mica with a subtle off-white
+    tinted background (#f3f3f3 light / #202020 dark) without translucency,
+    since true Mica requires the Windows Composition API (not accessible from
+    a WebView without native code). Tauri's window-vibrancy plugin CAN enable
+    true Mica if added as a dependency — but that is out of scope here.
+
+  ACRYLIC:
+    Like Mica but more translucent and blurry. Used for menus and flyouts.
+    We approximate it with a semi-transparent card background.
+
+  COLOURS (WinUI 3 colour ramp):
+    • Accent: #0078d4 — the Windows 11 system default blue (identical in
+      both modes, as Windows uses the same accent colour across themes).
+    • Light background: #f3f3f3 (Mica light approximation)
+    • Dark background:  #202020 (Mica dark approximation)
+    • Card light:       rgba(255,255,255,0.70) — "Acrylic" panel
+    • Card dark:        rgba(44,44,44,0.90)    — "Acrylic" panel dark
+
+  GEOMETRY:
+    • Border radius: 4px for most controls (WinUI 3 uses very small radii).
+      Exception: buttons are 4px (squared feel, very different from macOS/Mint-Y).
+    • Subtle 1px borders with very low opacity (rgba).
+    • Controls feel "flat" — no gradients, minimal shadow.
+
+  TYPOGRAPHY:
+    `system-ui` in the font stack (defined in style.css) resolves to
+    "Segoe UI Variable" on Windows 11 — Microsoft's variable-weight system font.
+    This is the correct native font and requires no custom font loading.
+
+  TITLE BAR:
+    Windows 11 apps with custom title bars use a very dark area at the top that
+    blends with the Mica material. We use a slightly darker shade than --bg.
+    The Tauri window close/minimise/maximise buttons ("caption buttons") are
+    rendered natively by Windows even in custom decoration mode.
+
+  BUTTONS:
+    WinUI 3 uses "Acrylic" for the button background — a very slight white
+    tint over the background, not a solid fill. We approximate this with
+    rgba(255,255,255,0.75) over the background colour.
+    "Suggested" buttons use the full accent colour fill (#0078d4 on white).
+
+  ── COLOUR SOURCES ───────────────────────────────────────────────────────────
+  Values extracted from WinUI 3 Gallery app, Windows 11 design tokens, and
+  Microsoft's Fluent Design documentation:
+    https://learn.microsoft.com/en-us/windows/apps/design/style/color
+
+  WinUI 3 colour tokens used:
+    SolidBackgroundFillColorBase (light)    → #f3f3f3
+    SolidBackgroundFillColorBase (dark)     → #202020
+    LayerFillColorDefault (light)           → rgba(255,255,255,0.70)
+    LayerFillColorDefault (dark)            → rgba(44,44,44,0.90)
+    SystemAccentColor                       → #0078d4
+    TextFillColorPrimary (light)            → rgba(0,0,0,0.8956)
+    TextFillColorSecondary (light)          → rgba(0,0,0,0.60)
+    TextFillColorPrimary (dark)             → rgba(255,255,255,0.8956)
+    DividerStrokeColorDefault (light)       → rgba(0,0,0,0.0803)
+  ══════════════════════════════════════════════════════════════════════════════
+*/
+
+
+/* ── Light mode ─────────────────────────────────────────────────────────────*/
+:root {
+
+  /* ── Backgrounds ── */
+  --bg:          #f3f3f3;
+  /* WinUI3 SolidBackgroundFillColorBase (light) — Mica light approximation.
+     A warm neutral grey, distinct from macOS's cooler grey (#f2f2f7). */
+
+  --surface:     #ffffff;
+  /* SolidBackgroundFillColorSecondary (light) — dialogs and modals. */
+
+  --card-bg:     rgba(255, 255, 255, 0.70);
+  /* LayerFillColorDefault — the "Acrylic" surface for panels and cards.
+     70% white over the background gives a very slightly see-through panel
+     look — pure white would feel too solid for Fluent Design. */
+
+  --card-border: rgba(0, 0, 0, 0.0803);
+  /* WinUI3 CardStrokeColorDefaultSolid — extremely subtle border. */
+
+  /* ── Text ── */
+  --text:     rgba(0, 0, 0, 0.8956);
+  /* WinUI3 TextFillColorPrimary — their precise primary text opacity. */
+
+  --text-dim: rgba(0, 0, 0, 0.60);
+  /* WinUI3 TextFillColorSecondary. */
+
+  /* ── Accent — Windows 11 Blue ── */
+  --accent:       #0078d4;
+  /* The default Windows system accent colour (AccentColor in WinUI3).
+     Users can change it in Settings > Personalisation > Colours, but
+     #0078d4 is the factory default and design reference colour. */
+
+  --accent-fg:    #ffffff;
+
+  --accent-hover: #006cbe;
+  /* AccentDark1 from the WinUI3 accent colour ramp (~87% lightness). */
+
+  --accent-text:  #005a9e;
+  /* Darker for text contrast on white backgrounds. */
+
+  /* ── Title bar ── */
+  --titlebar-bg:     #e9e9e9;
+  /* Slightly darker than --bg, approximating the Windows 11 caption area
+     with Mica. In a native app, the caption area is part of the DWM frame. */
+
+  --titlebar-txt:    rgba(0, 0, 0, 0.8956);
+  --titlebar-border: rgba(0, 0, 0, 0.10);
+  --titlebar-shadow: none;
+  /* Windows 11 uses a very subtle elevation shadow below the caption area,
+     but it is part of the DWM rendering. We use none to avoid duplication. */
+
+  /* ── Inputs ── */
+  --input-bg:     #ffffff;
+
+  --input-border: rgba(0, 0, 0, 0.45);
+  /* WinUI3 TextControlElevationBorderFocused — slightly visible border.
+     Windows 11 inputs have a distinctive "bottom border" effect (a thin
+     accent-coloured line at the bottom of the text field). We cannot
+     reproduce the bottom-only border here without extra CSS on the input
+     element, but the overall appearance is close. */
+
+  --input-focus:  #0078d4;
+
+  /* ── Misc ── */
+  --separator: rgba(0, 0, 0, 0.0803);
+  /* WinUI3 DividerStrokeColorDefault — very subtle dividers. */
+
+  --scrollbar: rgba(0, 0, 0, 0.30);
+  --success:   #107c10;  /* WinUI3 SystemFillColorSuccess */
+  --error:     #c42b1c;  /* WinUI3 SystemFillColorCritical */
+  --shadow:    rgba(0, 0, 0, 0.10);
+
+  /* ── Geometry ── */
+  --radius:    4px;
+  /* WinUI3 uses 4px for most controls (TextBox, ComboBox, Button).
+     This is notably smaller than Mint-Y (20px pill) and macOS (10px).
+     The "squared" look is immediately recognisable as Windows-native. */
+
+  --radius-sm: 4px;
+  /* Same as --radius — Windows 11 applies consistent small rounding. */
+
+  --spacing:   16px;
+  --gap:       10px;
+}
+
+
+/* ── Dark mode ──────────────────────────────────────────────────────────────*/
+body.theme-dark {
+
+  --bg:          #202020;
+  /* WinUI3 SolidBackgroundFillColorBase (dark) — Mica dark approximation.
+     A near-black with a very slight warm tint. */
+
+  --surface:     #2c2c2c;
+  /* SolidBackgroundFillColorSecondary (dark). */
+
+  --card-bg:     rgba(44, 44, 44, 0.90);
+  /* LayerFillColorDefault (dark) — "Acrylic" dark panel. */
+
+  --card-border: rgba(255, 255, 255, 0.0837);
+  /* WinUI3 CardStrokeColorDefaultSolid (dark). */
+
+  --text:     rgba(255, 255, 255, 0.8956);
+  /* WinUI3 TextFillColorPrimary (dark). */
+
+  --text-dim: rgba(255, 255, 255, 0.60);
+
+  --accent:       #0078d4;
+  /* Windows accent colour is the SAME in dark and light mode.
+     This is a key difference from macOS (which has slightly different blues). */
+
+  --accent-fg:    #ffffff;
+  --accent-hover: #006cbe;
+
+  --accent-text:  #60cdff;
+  /* Lighter for text contrast on very dark backgrounds (#202020).
+     WinUI3 uses a desaturated, lighter blue for hyperlinks in dark mode. */
+
+  --titlebar-bg:     #202020;
+  /* Same as --bg — the title bar is indistinguishable from the window
+     background in Windows 11 dark mode (seamless Mica integration). */
+
+  --titlebar-txt:    rgba(255, 255, 255, 0.8956);
+  --titlebar-border: rgba(255, 255, 255, 0.08);
+  --titlebar-shadow: none;
+
+  --input-bg:     #2c2c2c;
+  /* TextControlBackgroundFocused (dark). */
+
+  --input-border: rgba(255, 255, 255, 0.45);
+  --input-focus:  #0078d4;
+
+  --separator: rgba(255, 255, 255, 0.0837);
+  --scrollbar: rgba(255, 255, 255, 0.30);
+  --success:   #6ccb5f;  /* Adjusted SystemFillColorSuccess for dark */
+  --error:     #ff99a4;  /* Adjusted SystemFillColorCritical for dark */
+  --shadow:    rgba(0, 0, 0, 0.50);
+}
+
+
+/* ── "Follow system" dark ───────────────────────────────────────────────────*/
+@media (prefers-color-scheme: dark) {
+  body.theme-default {
+    --bg:              #202020;
+    --surface:         #2c2c2c;
+    --card-bg:         rgba(44, 44, 44, 0.90);
+    --card-border:     rgba(255, 255, 255, 0.0837);
+    --text:            rgba(255, 255, 255, 0.8956);
+    --text-dim:        rgba(255, 255, 255, 0.60);
+    --accent:          #0078d4;
+    --accent-fg:       #ffffff;
+    --accent-hover:    #006cbe;
+    --accent-text:     #60cdff;
+    --titlebar-bg:     #202020;
+    --titlebar-txt:    rgba(255, 255, 255, 0.8956);
+    --titlebar-border: rgba(255, 255, 255, 0.08);
+    --titlebar-shadow: none;
+    --input-bg:        #2c2c2c;
+    --input-border:    rgba(255, 255, 255, 0.45);
+    --input-focus:     #0078d4;
+    --separator:       rgba(255, 255, 255, 0.0837);
+    --scrollbar:       rgba(255, 255, 255, 0.30);
+    --success:         #6ccb5f;
+    --error:           #ff99a4;
+    --shadow:          rgba(0, 0, 0, 0.50);
+  }
+}

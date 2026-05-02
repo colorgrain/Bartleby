@@ -1,0 +1,36 @@
+# .cargo/config.toml — Bartleby build configuration
+#
+# This file is read by Cargo for ALL builds (dev and release) in this project.
+# Place this file at: src-tauri/.cargo/config.toml
+#
+# ## target-cpu=native
+#
+# Instructs the Rust compiler to generate code optimised for the CPU of the
+# machine performing the compilation, rather than a generic x86_64 baseline.
+#
+# What this enables automatically:
+#   - AVX2  (256-bit SIMD) — available on Intel Haswell (2013+) and AMD Ryzen
+#   - SSE4.1 / SSE4.2      — available on Intel Penryn (2008+)
+#   - POPCNT, BMI1, BMI2   — bit manipulation instructions
+#
+# Impact on Bartleby:
+#   - twox-hash (XXH3) : the compiler vectorises the hash loop with AVX2
+#                         → theoretical speedup from ~1 GB/s to ~8–12 GB/s
+#   - md-5 fallback     : similar vectorisation benefit
+#   - General Rust code : loop unrolling, better register allocation
+#
+# ## Important limitation
+#
+# The compiled binary will only run on CPUs that support the same instruction
+# set as the build machine. Do NOT use this flag for distributed binaries
+# (e.g. the .deb / .exe / .dmg release packages) — they must target a
+# generic baseline to run on all user machines.
+#
+# For release distribution builds, remove this file or override with:
+#   RUSTFLAGS="" cargo build --release
+#
+# For development and personal use on a single machine, this is safe and
+# gives significantly better performance during testing.
+
+[build]
+rustflags = ["-C", "target-cpu=native"]

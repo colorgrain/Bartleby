@@ -1,0 +1,190 @@
+/*
+  themes/mint-y-aqua.css — Bartleby skin: Linux Mint / Cinnamon (Mint-Y Aqua)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  This file is the DEFAULT skin for Bartleby. It is loaded on startup and
+  makes the application look and feel native on Linux Mint / Cinnamon.
+
+  ── SOURCE ───────────────────────────────────────────────────────────────────
+  All colour values were extracted directly from the official Linux Mint GTK
+  theme source files:
+    /usr/share/themes/Mint-Y-Aqua/gtk-3.0/gtk.css          (light mode)
+    /usr/share/themes/Mint-Y-Aqua/gtk-3.0/gtk-dark.css     (dark mode)
+
+  The specific GTK selectors used as reference:
+    .background          → --bg
+    GtkPopover           → --card-bg
+    GtkHeaderBar         → --titlebar-bg
+    GtkEntry             → --input-bg, --input-border
+    @selected_bg_color   → --accent  (#1f9ede — the Aqua variant's blue)
+
+  ── DESIGN CHARACTER ─────────────────────────────────────────────────────────
+  Mint-Y Aqua is a flat, clean GTK theme with:
+    • Warm grey backgrounds (not pure white or cold blue-grey)
+    • A vibrant cyan-blue accent (#1f9ede) distinctive of the Aqua colour family
+    • Subtle 1px borders instead of heavy shadows
+    • Pill-shaped buttons (large border-radius) consistent with GTK 3 style
+    • Compact 46px header bar matching the Mint-Y minimum header height
+
+  ── THREE COLOUR CONTEXTS ────────────────────────────────────────────────────
+  1. :root                                     → Light mode (default)
+  2. body.theme-dark { … }                     → Explicit dark mode
+  3. @media (prefers-color-scheme: dark)
+       body.theme-default { … }                → "Follow system" dark mode
+
+  The media query in (3) is a CSS fallback. On Linux, Tauri's WebKit WebView
+  does not reliably receive the OS dark mode signal via CSS media queries.
+  main.js therefore also queries is_system_dark_mode() from Rust (which uses
+  gsettings / GTK_THEME) and applies body.theme-dark or body.theme-light
+  explicitly. The @media block handles the case where JS has not yet run.
+  ══════════════════════════════════════════════════════════════════════════════
+*/
+
+
+/* ── Light mode (default) ───────────────────────────────────────────────────*/
+:root {
+
+  /* ── Backgrounds ── */
+  --bg:          #f8f8f9;
+  /* Slightly off-white. GTK .background selector in Mint-Y Light. */
+
+  --surface:     #ffffff;
+  /* Pure white for modal dialogs and overlay panels. */
+
+  --card-bg:     #fefefe;
+  /* Almost-white card background. Subtly distinct from --surface. */
+
+  --card-border: #c8c8ce;
+  /* Border for cards, inputs, and icon buttons. */
+
+  /* ── Text ── */
+  --text:     rgba(0, 0, 0, 0.87);
+  /* High-emphasis text. GTK/Material Design standard: 87% black, not pure black. */
+
+  --text-dim: rgba(0, 0, 0, 0.47);
+  /* Secondary text: labels, placeholders, dimmed captions. */
+
+  /* ── Accent — Mint-Y Aqua blue #1f9ede ── */
+  --accent:       #1f9ede;
+  /* The signature Aqua accent. Used for progress bar, focus rings,
+     "suggested" buttons, active menu items, checkbox fill. */
+
+  --accent-fg:    #ffffff;
+  /* White text on the blue accent (sufficient contrast at this blue tone). */
+
+  --accent-hover: #197eb1;
+  /* ~20% darker via HSL lightness: used for button hover and border. */
+
+  --accent-text:  #1577a8;
+  /* Accent-coloured text on light backgrounds (e.g. "Add a destination" link).
+     Slightly darker than --accent to meet WCAG AA contrast on #fefefe. */
+
+  /* ── Title bar ── */
+  --titlebar-bg:     #ebebed;
+  /* GTK headerbar background for Mint-Y Light. */
+
+  --titlebar-txt:    rgba(0, 0, 0, 0.87);
+  --titlebar-border: #bdbdbd;
+  --titlebar-shadow: none;
+  /* No shadow on the title bar — matches the flat Mint-Y aesthetic. */
+
+  /* ── Inputs ── */
+  --input-bg:     #ffffff;
+  --input-border: #bababa;
+  --input-focus:  #1f9ede; /* matches --accent */
+
+  /* ── Misc ── */
+  --separator: rgba(0, 0, 0, 0.12);
+  --scrollbar: rgba(0, 0, 0, 0.20);
+  --success:   #2a8a3e;  /* GTK-compatible green for success messages */
+  --error:     #fc4138;  /* GTK-compatible red for error messages */
+  --shadow:    rgba(0, 0, 0, 0.08); /* Very light shadow for cards */
+
+  /* ── Geometry ── */
+  --radius:    8px;
+  /* Rounded rectangle — more compact than the original GTK3 pill shape. */
+
+  --radius-sm: 4px;
+  /* Smaller radius for inputs, icon buttons, and menu items. */
+
+  --spacing:   16px;
+  --gap:       10px;
+}
+
+
+/* ── Dark mode override — applied when JS sets body class="theme-dark" ──────*/
+body.theme-dark {
+
+  --bg:          #2e2e33;
+  /* GTK .background in Mint-Y Dark. */
+
+  --surface:     #2e2e33;
+  --card-bg:     #333338;
+  /* Slightly lighter than --bg to give cards visual depth. */
+
+  --card-border: #202023;
+
+  --text:     rgba(255, 255, 255, 0.87);
+  --text-dim: rgba(255, 255, 255, 0.47);
+
+  --accent:       #1f9ede; /* same accent in both modes */
+  --accent-fg:    #ffffff;
+  --accent-hover: #197eb1;
+
+  --accent-text:  #5ec4f0;
+  /* Lighter in dark mode to maintain contrast against #2e2e33 background. */
+
+  --titlebar-bg:     #222226;
+  --titlebar-txt:    rgba(255, 255, 255, 0.87);
+  --titlebar-border: #18181b;
+  --titlebar-shadow: none;
+
+  --input-bg:     #333338;
+  --input-border: #202023;
+  --input-focus:  #1f9ede;
+
+  --separator: rgba(255, 255, 255, 0.10);
+  --scrollbar: rgba(255, 255, 255, 0.18);
+
+  --success: #88c663;
+  /* Lighter green — #2a8a3e is too dark on #2e2e33 background. */
+
+  --error:   #f04a50;
+  /* Slightly adjusted red for dark background readability. */
+
+  --shadow:  rgba(0, 0, 0, 0.40);
+  /* Stronger shadow in dark mode (dark shadows need higher opacity to be visible). */
+}
+
+
+/* ── "Follow system" dark — CSS fallback for the @media query ───────────────
+   Applies the same dark palette as body.theme-dark when body class is
+   "theme-default" and the OS reports dark preference.
+   Note: main.js uses Rust's is_system_dark_mode() for more reliable detection
+   on Linux; this block is a backup for the case where JS hasn't run yet.    */
+@media (prefers-color-scheme: dark) {
+  body.theme-default {
+    --bg:              #2e2e33;
+    --surface:         #2e2e33;
+    --card-bg:         #333338;
+    --card-border:     #202023;
+    --text:            rgba(255, 255, 255, 0.87);
+    --text-dim:        rgba(255, 255, 255, 0.47);
+    --accent:          #1f9ede;
+    --accent-fg:       #ffffff;
+    --accent-hover:    #197eb1;
+    --accent-text:     #5ec4f0;
+    --titlebar-bg:     #222226;
+    --titlebar-txt:    rgba(255, 255, 255, 0.87);
+    --titlebar-border: #18181b;
+    --titlebar-shadow: none;
+    --input-bg:        #333338;
+    --input-border:    #202023;
+    --input-focus:     #1f9ede;
+    --separator:       rgba(255, 255, 255, 0.10);
+    --scrollbar:       rgba(255, 255, 255, 0.18);
+    --success:         #88c663;
+    --error:           #f04a50;
+    --shadow:          rgba(0, 0, 0, 0.40);
+  }
+}

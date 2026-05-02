@@ -1,0 +1,219 @@
+/*
+  themes/adwaita.css — Bartleby skin: GNOME Adwaita (libadwaita)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  This skin makes Bartleby look native on GNOME 45+ / Ubuntu 22.04+ by
+  implementing the libadwaita (Adwaita 2) colour palette and design tokens.
+
+  ── ADWAITA DESIGN LANGUAGE ──────────────────────────────────────────────────
+
+  libadwaita (GTK4 / GNOME 40+) is the successor to the original Adwaita theme
+  and represents a significant visual refresh. Key characteristics:
+
+  COLOURS:
+    • Very clean, desaturated backgrounds (almost neutral grey/white).
+    • The signature GNOME blue: #3584e4 (slightly more vibrant than macOS Blue).
+    • Strong contrast between background layers (clearly distinct elevation).
+    • Success green #26a269, error red #e01b24.
+
+  LAYERS (elevation model):
+    Adwaita uses a strict 3-layer elevation model:
+      Layer 0 (window):  #fafafa light / #242424 dark — main background
+      Layer 1 (view):    #ffffff light / #1e1e1e dark — content panels, cards
+      Layer 2 (header):  #ebebeb light / #303030 dark — header bars, popovers
+    This layering is the key visual difference from Mint-Y (which uses
+    less distinct layers).
+
+  GEOMETRY:
+    • Border radius: 12px for cards (libadwaita uses large radii for panels).
+    • Button radius: 9px for regular buttons.
+    • Buttons are NOT pill-shaped (unlike Mint-Y) but also not flat (unlike Win11).
+      They have a gentle rounded rectangle appearance.
+
+  HEADER BAR:
+    GNOME header bars are slightly darker than the window background and have
+    a 1px bottom border. libadwaita also uses a box-shadow for subtle depth.
+
+  TYPOGRAPHY:
+    GNOME uses "Cantarell" as its default interface font. This is already in
+    the font stack in style.css. On systems without Cantarell installed,
+    system-ui provides the next best native option.
+
+  ── COLOUR SOURCES ───────────────────────────────────────────────────────────
+  Values extracted from libadwaita source (gtk/theme/Adwaita):
+    @define-color window_bg_color                → --bg
+    @define-color window_fg_color                → --text
+    @define-color view_bg_color                  → --surface, --card-bg
+    @define-color headerbar_bg_color             → --titlebar-bg
+    @define-color accent_bg_color                → --accent
+    @define-color accent_fg_color                → --accent-fg
+    @define-color success_bg_color               → --success
+    @define-color error_bg_color                 → --error
+    @define-color borders                        → --card-border
+  Source: https://gitlab.gnome.org/GNOME/libadwaita/-/blob/main/src/stylesheet
+  ══════════════════════════════════════════════════════════════════════════════
+*/
+
+
+/* ── Light mode ─────────────────────────────────────────────────────────────*/
+:root {
+
+  /* ── Backgrounds ── */
+  --bg:          #fafafa;
+  /* @window_bg_color in libadwaita light — very light grey, not pure white.
+     Slightly cooler than Mint-Y (#f8f8f9) but similar in character. */
+
+  --surface:     #ffffff;
+  /* @view_bg_color — content areas, text views, list views. */
+
+  --card-bg:     #ffffff;
+  /* Cards use pure white over the fafafa background — creates clear elevation. */
+
+  --card-border: rgba(0, 0, 0, 0.12);
+  /* @borders in libadwaita — subtle semi-transparent border. */
+
+  /* ── Text ── */
+  --text:     rgba(0, 0, 0, 0.80);
+  /* @window_fg_color (light) — slightly softer than Mint-Y's 0.87. */
+
+  --text-dim: rgba(0, 0, 0, 0.45);
+  /* Secondary text — dim_label equivalent. */
+
+  /* ── Accent — GNOME Blue ── */
+  --accent:       #3584e4;
+  /* @accent_bg_color — the canonical GNOME blue.
+     Slightly more vibrant (saturated) than macOS Blue (#007aff). */
+
+  --accent-fg:    #ffffff;
+  /* @accent_fg_color — white text on blue. */
+
+  --accent-hover: #2b6dca;
+  /* Derived: ~15% darker via HSL. */
+
+  --accent-text:  #1c5eb5;
+  /* Text links and flat buttons — darker for WCAG AA contrast on #fafafa. */
+
+  /* ── Title bar ── */
+  --titlebar-bg:     #ebebeb;
+  /* @headerbar_bg_color — distinctly darker than --bg, creating the GTK4
+     "floating header bar" visual separation. */
+
+  --titlebar-txt:    rgba(0, 0, 0, 0.80);
+  --titlebar-border: rgba(0, 0, 0, 0.18);
+  /* @headerbar_border_color — slightly more visible than card borders. */
+
+  --titlebar-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  /* libadwaita headerbar has a subtle shadow at the bottom. */
+
+  /* ── Inputs ── */
+  --input-bg:     #ffffff;
+  --input-border: rgba(0, 0, 0, 0.22);
+  /* Entry widget border — slightly more visible than card borders. */
+
+  --input-focus:  #3584e4; /* matches --accent */
+
+  /* ── Misc ── */
+  --separator: rgba(0, 0, 0, 0.15);
+  --scrollbar: rgba(0, 0, 0, 0.25);
+
+  --success: #26a269;
+  /* @success_bg_color — GNOME green. Different from GTK3/Mint-Y (#2a8a3e). */
+
+  --error:   #e01b24;
+  /* @error_bg_color — GNOME red. */
+
+  --shadow:  rgba(0, 0, 0, 0.10);
+
+  /* ── Geometry ── */
+  --radius:    12px;
+  /* libadwaita uses 12px for cards, dialogs, and popovers — noticeably more
+     rounded than GTK3/Mint-Y, approaching but not quite reaching macOS (10px). */
+
+  --radius-sm: 9px;
+  /* Buttons and inputs in libadwaita also use generous rounding (6–10px). */
+
+  --spacing:   16px;
+  --gap:       10px;
+}
+
+
+/* ── Dark mode ──────────────────────────────────────────────────────────────*/
+body.theme-dark {
+
+  --bg:          #242424;
+  /* @window_bg_color (dark) — libadwaita's dark window background. */
+
+  --surface:     #1e1e1e;
+  /* @view_bg_color (dark) — content surfaces are DARKER than the window
+     background in Adwaita dark (inverse of the light mode relationship). */
+
+  --card-bg:     #303030;
+  /* Cards appear slightly elevated (lighter) above the surface. */
+
+  --card-border: rgba(255, 255, 255, 0.10);
+
+  --text:     rgba(255, 255, 255, 0.85);
+  --text-dim: rgba(255, 255, 255, 0.50);
+
+  --accent:       #78aeed;
+  /* @accent_bg_color (dark) — GNOME desaturates and lightens the accent in
+     dark mode for readability. Not the same blue as light mode. */
+
+  --accent-fg:    #ffffff;
+  --accent-hover: #5f9be0;
+
+  --accent-text:  #78aeed;
+  /* Text links use the same accent colour in dark mode (it's already light
+     enough for contrast on #242424). */
+
+  --titlebar-bg:     #303030;
+  /* @headerbar_bg_color (dark) — slightly lighter than --bg. */
+
+  --titlebar-txt:    rgba(255, 255, 255, 0.85);
+  --titlebar-border: rgba(255, 255, 255, 0.14);
+  --titlebar-shadow: 0 1px 3px rgba(0, 0, 0, 0.30);
+
+  --input-bg:     #383838;
+  --input-border: rgba(255, 255, 255, 0.18);
+  --input-focus:  #78aeed;
+
+  --separator: rgba(255, 255, 255, 0.12);
+  --scrollbar: rgba(255, 255, 255, 0.25);
+
+  --success: #57e389;
+  /* @success_bg_color (dark) — lighter, more vibrant green for dark backgrounds. */
+
+  --error:   #ff7b63;
+  /* @error_bg_color (dark) — coral-red, readable on very dark backgrounds. */
+
+  --shadow:  rgba(0, 0, 0, 0.50);
+}
+
+
+/* ── "Follow system" dark ───────────────────────────────────────────────────*/
+@media (prefers-color-scheme: dark) {
+  body.theme-default {
+    --bg:              #242424;
+    --surface:         #1e1e1e;
+    --card-bg:         #303030;
+    --card-border:     rgba(255, 255, 255, 0.10);
+    --text:            rgba(255, 255, 255, 0.85);
+    --text-dim:        rgba(255, 255, 255, 0.50);
+    --accent:          #78aeed;
+    --accent-fg:       #ffffff;
+    --accent-hover:    #5f9be0;
+    --accent-text:     #78aeed;
+    --titlebar-bg:     #303030;
+    --titlebar-txt:    rgba(255, 255, 255, 0.85);
+    --titlebar-border: rgba(255, 255, 255, 0.14);
+    --titlebar-shadow: 0 1px 3px rgba(0, 0, 0, 0.30);
+    --input-bg:        #383838;
+    --input-border:    rgba(255, 255, 255, 0.18);
+    --input-focus:     #78aeed;
+    --separator:       rgba(255, 255, 255, 0.12);
+    --scrollbar:       rgba(255, 255, 255, 0.25);
+    --success:         #57e389;
+    --error:           #ff7b63;
+    --shadow:          rgba(0, 0, 0, 0.50);
+  }
+}

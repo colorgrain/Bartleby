@@ -1,0 +1,401 @@
+# Cargo.toml — Bartleby package manifest
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# WHAT IS Cargo.toml?
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Cargo.toml is the manifest file for a Rust project. It is the equivalent of:
+#   • package.json in Node.js / JavaScript
+#   • pyproject.toml / setup.py in Python
+#   • pom.xml in Java (Maven)
+#   • Gemfile in Ruby
+#
+# It tells Cargo (Rust's build tool and package manager) everything it needs
+# to know about this crate:
+#   • Metadata: name, version, Rust edition, description, licence.
+#   • Where to find the source code.
+#   • What external libraries (crates) are needed, and which versions.
+#   • What features of those crates to enable or disable.
+#
+# Cargo resolves the dependency tree, downloads crates from crates.io (the Rust
+# package registry), compiles everything, and links it into the final binary.
+# The exact resolved versions are recorded in Cargo.lock (should be committed
+# to version control for applications to ensure reproducible builds).
+#
+# ── TOML format ──────────────────────────────────────────────────────────────
+#
+# TOML (Tom's Obvious, Minimal Language) is the configuration file format used
+# by Cargo. Key concepts:
+#   [section]       — a table (group of key-value pairs)
+#   key = "value"   — string value
+#   key = 1         — integer value
+#   key = true      — boolean value
+#   key = ["a", "b"] — array value
+#   key = { a = 1 } — inline table
+#   [[array]]       — array of tables (each [[array]] starts a new table in the array)
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Package metadata ──────────────────────────────────────────────────────────
+[package]
+
+# The crate name. Must be unique on crates.io if publishing.
+# Used in `cargo build` output and as the default binary name.
+# Convention: lowercase, hyphens or underscores (hyphens preferred for binaries).
+name = "bartleby"
+
+# Semantic versioning: MAJOR.MINOR.PATCH
+# Keep in sync with:
+#   • tauri.conf.json → "version"
+#   • pub const VERSION: &str in src/main.rs
+#   • The version displayed in the About modal (index.html)
+version = "0.1.0"
+
+# The Rust edition determines which language features and idioms are available.
+# "2021" is the current stable edition (previous: "2015", "2018").
+# Editions are backwards-compatible: code written for "2018" still compiles
+# under "2021". The edition only affects this crate, not its dependencies.
+# Rust 2021 improvements relevant to Bartleby:
+#   • Disjoint capture in closures (move closures capture only used fields, not
+#     the entire struct) — important for the `move ||` closures in main.rs.
+#   • IntoIterator for arrays — [T; N].into_iter() works correctly.
+#   • Resolver version 2 for features (better feature unification in deps).
+edition = "2021"
+
+# Human-readable description. Used in `cargo search`, crates.io listings,
+# and in the generated .deb package metadata (Description: field).
+description = "Multi-destination file copy with MD5 verification and metadata reports"
+
+# SPDX licence identifier. "GPL-3.0" is the GNU General Public Licence version 3.
+# Cargo uses this for informational purposes; it does not enforce the licence.
+# SPDX identifiers: https://spdx.org/licenses/
+license = "GPL-3.0"
+
+
+# ── Binary target ─────────────────────────────────────────────────────────────
+#
+# [[bin]] declares a binary (executable) to produce.
+# `[[double brackets]]` = an array of tables — multiple [[bin]] entries are valid.
+#
+# Without this section, Cargo automatically looks for src/main.rs as the default
+# binary entry point. We declare it explicitly for clarity, especially useful if
+# more binary targets are added in the future (e.g. a CLI companion tool).
+[[bin]]
+
+# Name of the produced binary. On Linux: `bartleby` (no extension).
+# On Windows: `bartleby.exe`. On macOS: `bartleby`.
+name = "bartleby"
+
+# Path to the entry point source file (the file containing `fn main()`).
+# Relative to the directory containing this Cargo.toml (the crate root).
+path = "src/main.rs"
+
+
+# ── Build-time dependencies ───────────────────────────────────────────────────
+#
+# [build-dependencies] lists crates used ONLY by build.rs.
+# They are compiled and run on the build machine at build time.
+# They are NOT included in the final binary that users run.
+#
+# This distinction exists because build tools may have very different
+# requirements than the target application. For example, a build tool might
+# need to parse JSON or XML (for code generation) without adding those parsers
+# to the production binary.
+[build-dependencies]
+
+# tauri-build: the Tauri build helper. See build.rs for a full explanation
+# of what it does (icon embedding, Windows manifest, capabilities validation, etc.).
+#
+# version = "2": use any compatible version in the Tauri 2.x series.
+# Cargo uses "compatible version" semantics by default:
+#   "2"   → any version >= 2.0.0 and < 3.0.0  (same major version)
+#   "2.1" → any version >= 2.1.0 and < 3.0.0
+#   "=2.1.3" → exactly version 2.1.3
+#
+# features = []: no optional features enabled. tauri-build's default features
+# are sufficient for Bartleby. Optional features might include e.g. code signing.
+tauri-build = { version = "2", features = [] }
+
+
+# ── Runtime dependencies ──────────────────────────────────────────────────────
+#
+# [dependencies] lists crates compiled into the final binary.
+# Every crate here adds to the binary size and compile time.
+# The `features` key selects optional functionality within a crate.
+#
+# DEFAULT FEATURES: each crate has a set of features enabled by default.
+# `default-features = false` disables all defaults, then `features = [...]`
+# selects exactly what is needed. This minimises binary size and compile time.
+[dependencies]
+
+# ── Tauri v2 — application framework ─────────────────────────────────────────
+#
+# Tauri provides:
+#   • The WebView window (WebKit2GTK on Linux, WebView2 on Windows, WKWebView on macOS)
+#   • The IPC bridge between Rust and JavaScript
+#   • The event system (win.emit, window.listen)
+#   • The State<T> dependency-injection system for shared app state
+#   • Application lifecycle management (startup, shutdown)
+#   • Asset embedding (the src/ directory is bundled into the binary)
+#
+# version = "2": Tauri 2.x series. Tauri v1 and v2 are NOT API-compatible.
+# features = []: no optional features selected.
+#   Notable optional features not needed here:
+#     "devtools"  — enables the WebInspector/DevTools panel (useful during dev)
+#     "tracing"   — structured logging integration
+#     "native-tls-vendored" — bundle OpenSSL instead of using the system library
+#
+# The Tauri crate provides the #[tauri::command] proc-macro, State<T>,
+# WebviewWindow, Emitter trait, Builder, etc. used throughout src/main.rs.
+tauri = { version = "2", features = [] }
+
+# tauri-plugin-dialog: the folder/file picker dialog plugin.
+#
+# In Tauri v2, the dialog API was extracted from the core into a separate plugin.
+# This plugin exposes window.__TAURI__.dialog.open() in JavaScript, which is how
+# the folder picker is invoked in main.js (see pickFolder() in main.js for the
+# full explanation of why the dialog is in JS rather than Rust).
+#
+# The plugin must also be registered in main.rs:
+#   .plugin(tauri_plugin_dialog::init())
+# And its permissions must be declared in capabilities/default.json.
+tauri-plugin-dialog        = "2"
+
+# tauri-plugin-notification: native OS notifications at end of copy.
+# - Linux   : D-Bus / libnotify (GNOME, KDE, Cinnamon, XFCE)
+# - macOS   : Notification Center
+# - Windows : Toast Notifications (Action Center)
+tauri-plugin-notification  = "2"
+
+# ── dirs: platform-appropriate config directory ───────────────────────────────
+#
+# The `dirs` crate provides functions that return the correct path for storing
+# user-specific data on each operating system, following platform conventions:
+#
+#   dirs::config_dir()  → the directory for application configuration files:
+#     Linux:   $XDG_CONFIG_HOME (~/.config) — XDG Base Directory Specification
+#     macOS:   ~/Library/Application Support
+#     Windows: %APPDATA% (C:\Users\<user>\AppData\Roaming)
+#
+# Used in settings.rs to locate ~/.config/bartleby/settings.json (on Linux).
+#
+# version = "5": the current major version. dirs has had several major revisions;
+# v5 is the stable, maintained version with a clean API.
+dirs = "5"
+
+# ── md5: MD5 hash computation ─────────────────────────────────────────────────
+#
+# The `md5` crate provides the MD5 hashing algorithm used for file integrity
+# verification (Phase 2 of the copy engine).
+#
+# Key API used in copy_engine.rs and metadata-adjacent code:
+#   md5::Context::new()      — initialise incremental hash state
+#   ctx.consume(&chunk)      — feed a chunk of bytes to the hash
+#   ctx.compute()            — finalise and return the Digest (16 bytes)
+#   format!("{:x}", digest)  — format as 32-character lowercase hex string
+#
+# Note: MD5 is cryptographically broken (collision vulnerabilities) and must NOT
+# be used for security. For accidental-corruption detection in media workflows
+# (the use case here), it is the industry standard and compatible with:
+#   • The `md5sum` Unix command (for re-verification by recipients)
+#   • Avid Pro Tools, DaVinci Resolve, and other professional tools
+#   • The AS-11 UK DPP broadcast delivery format
+#
+# version = "0.7": the stable, maintained version. The API has been stable for years.
+# md-5 (RustCrypto) replaces the old `md5 = "0.7"` crate.
+# Key differences:
+#   Old crate : generic Rust, no SIMD. API: Context::new() / .consume() / .compute()
+#   New crate : uses AVX2/SSE4 CPU instructions automatically when available,
+#               giving 2x-4x faster hashing on modern CPUs.
+#               API: Md5::new() / .update() / .finalize()
+# Output format is identical: 32-char lowercase hex string.
+# The `digest` feature enables the `Digest` trait required by the new API.
+md-5 = { version = "0.10", features = ["oid"] }
+
+# ── xxhash-rust: XXH3-128 hash algorithm ─────────────────────────────────────
+#
+# XXH3 is 3×–5× faster than MD5 on modern CPUs because it is designed to
+# exploit SIMD instructions (AVX2, SSE2, NEON) natively. Unlike the md-5
+# crate which uses CPU dispatch at runtime, xxhash-rust enables AVX2 at
+# compile time via the "xxh3" feature flag.
+#
+# Both MD5 and XXH3 are computed simultaneously on the same chunk in a single
+# read pass — zero extra I/O cost when both are enabled.
+#
+# The .xxh3 output format is compatible with `xxhsum -c` (the xxHash CLI tool)
+# for independent verification by recipients.
+twox-hash = "2.1"
+# aligned-vec removed — using libc::posix_memalign directly
+
+# ── printpdf: PDF generation ──────────────────────────────────────────────────
+#
+# `printpdf` is a pure-Rust PDF generation library. "Pure Rust" means no C
+# dependencies — no libpoppler, no libpdf, no external tools required.
+#
+# Used in pdf_report.rs to build the A4 landscape visual report:
+#   • PdfDocument::new() — create a PDF document
+#   • doc.add_builtin_font() — Helvetica, Helvetica-Bold (PDF standard fonts)
+#   • doc.add_page() — add additional pages when content overflows
+#   • layer.use_text() — render text at a specific position
+#   • layer.add_polygon() — draw filled rectangles (for row backgrounds, rules)
+#   • Image::from(ImageXObject) + img.add_to_layer() — embed thumbnail images
+#
+# IMPORTANT: version = "0.7" is PINNED.
+# printpdf has breaking API changes between minor versions (the Polygon/Line API
+# changed between 0.5, 0.6, and 0.7). If you upgrade, carefully review all
+# drawing calls in pdf_report.rs. In particular:
+#   • `add_rect` was removed in 0.6 → replaced with add_polygon
+#   • `add_shape(Line)` was renamed/restructured
+#   • PaintMode and WindingOrder moved to printpdf::path in 0.7
+printpdf = "0.7"
+
+# ── image: image loading and resizing ────────────────────────────────────────
+#
+# The `image` crate is used in pdf_report.rs for thumbnail generation:
+#   • image::open(path) — decode an image file into a DynamicImage
+#   • .resize(w, h, FilterType::Triangle) — resize to fit the thumbnail cell
+#   • .to_rgb8() — convert to 8-bit RGB (required by printpdf's ImageXObject)
+#
+# default-features = false: the image crate supports many formats via Cargo features.
+# We disable the defaults and select only what Bartleby needs:
+#
+#   "jpeg" — JPEG (most common camera still format: .jpg, .jpeg)
+#   "png"  — PNG (web, screenshots, some RAW preview images)
+#   "gif"  — GIF (rare, but simple to include)
+#   "bmp"  — BMP (Windows bitmap, uncommon but encountered)
+#   "webp" — WebP (modern format, Apple and Google devices)
+#
+# NOT enabled (and why):
+#   "tiff"   — TIFF support requires a large dependency (libtiff); we fall back
+#              to OS icon for TIFFs in pdf_report.rs.
+#   "heif"   — HEIF/HEIC (iPhone photos) has complex licensing issues.
+#   "ico"    — Windows icon files; no need in a media copy tool.
+#   "avif"   — Large dependency; not yet mainstream in professional cameras.
+#   "rayon"  — Parallel image processing (the image crate's own parallel decode);
+#              we use rayon separately for mediainfo parallelism.
+#
+# version = "0.25": the current stable series.
+image = { version = "0.25", default-features = false,
+          features = ["jpeg", "png", "gif", "bmp", "webp"] }
+
+# ── chrono: date and time ─────────────────────────────────────────────────────
+#
+# Used in pdf_report.rs and metadata.rs to generate the "Generated YYYY-MM-DD HH:MM:SS"
+# timestamp embedded in CSV and PDF report headers.
+#
+#   chrono::Local::now() — current local date and time (system timezone)
+#   .format("%Y-%m-%d  %H:%M:%S") — strftime-style formatting
+#
+# version = "0.4": the stable, widely-used API series.
+# `chrono` has no default features that need disabling for our use case.
+chrono = "0.4"
+
+# ── serde: serialisation framework ───────────────────────────────────────────
+#
+# `serde` (SERialisation/DEserialisation) is the de-facto standard for converting
+# Rust structs to and from data formats like JSON, TOML, YAML, MessagePack, etc.
+#
+# Used throughout the project:
+#   • settings.rs: #[derive(Serialize, Deserialize)] on Settings struct →
+#     converts to/from JSON for disk persistence.
+#   • main.rs: #[derive(Serialize)] on payload structs → Tauri serialises them
+#     to JSON to send as Tauri events to JavaScript.
+#   • main.rs: #[derive(Deserialize)] on StartCopyArgs → Tauri deserialises
+#     the JavaScript invoke() argument object into this struct.
+#
+# features = ["derive"]: enables the #[derive(Serialize, Deserialize)] proc-macro.
+# Without this feature, you'd have to implement the Serialize and Deserialize
+# traits manually (hundreds of lines of repetitive code). The `derive` feature
+# generates this code automatically at compile time.
+#
+# Note: `serde` itself only defines the traits. The actual serialisation format
+# is provided by a separate format crate (serde_json, toml, etc.).
+serde = { version = "1", features = ["derive"] }
+
+# ── serde_json: JSON serialisation ────────────────────────────────────────────
+#
+# Provides the JSON format implementation for serde.
+# Used in settings.rs:
+#   serde_json::to_string_pretty(&settings) — serialise Settings to indented JSON
+#   serde_json::from_str::<Settings>(&text) — deserialise JSON text into Settings
+#
+# "pretty" output means 4-space indentation, making settings.json human-readable
+# and editable by advanced users without a special tool.
+#
+# Tauri also uses serde_json internally for its IPC bridge, so this crate is
+# always present in a Tauri project regardless.
+serde_json = "1"
+
+# ── log + simplelog: persistent file logging ─────────────────────────────────
+#
+# `log` is the standard Rust logging facade: it provides the log::info!(),
+# log::error!() etc. macros, decoupled from the actual log destination.
+# `simplelog` is a lightweight backend that writes timestamped records to a file.
+# The log file lives next to settings.json:
+#   Linux:   ~/.config/bartleby/bartleby.log
+#   macOS:   ~/Library/Application Support/bartleby/bartleby.log
+#   Windows: %APPDATA%\bartleby\bartleby.log
+log       = "0.4"
+simplelog = "0.12"
+
+# ── rayon: data parallelism ───────────────────────────────────────────────────
+#
+# `rayon` enables easy, safe parallel iteration across CPU cores.
+# Used in copy_engine.rs for the metadata extraction step:
+#
+#   raw_entries.par_iter()
+#     .map(|(hash, rel, path)| (hash.clone(), rel.clone(), metadata::extract(path)))
+#     .collect()
+#
+# Each metadata::extract() call spawns a `mediainfo` subprocess (~100–200 ms).
+# rayon distributes these calls across all available CPU cores. On an 8-core
+# machine with 200 files, this reduces extraction time from ~40 s to ~5 s.
+#
+# How rayon works:
+#   • Creates a global thread pool (one thread per logical CPU core by default).
+#   • `.par_iter()` splits work into chunks and distributes them across threads.
+#   • Work stealing: idle threads "steal" tasks from busy threads for load balancing.
+#   • Results are collected in the ORIGINAL order, not completion order, so the
+#     output Vec matches the input Vec's ordering (important for verify_ok indexing).
+#
+# Thread safety: rayon's parallel iterators require items to be `Send` (safe to
+# transfer to another thread). The Rust borrow checker verifies this at compile
+# time — if you accidentally tried to share non-thread-safe data, the code would
+# not compile.
+rayon = "1"
+
+# ── base64: encoding binary data as ASCII text ────────────────────────────────
+#
+# Used in html_report.rs to embed thumbnail images as data URIs inside the
+# self-contained HTML report: `data:image/png;base64,<encoded bytes>`.
+# This eliminates external file dependencies — the HTML is fully portable.
+base64 = "0.22"
+
+# ── libc: POSIX system call bindings (Linux and macOS only) ──────────────────
+#
+# Used in copy_engine.rs for `posix_fadvise()` — a POSIX syscall that gives
+# the kernel a hint about how a file will be accessed:
+#
+#   POSIX_FADV_SEQUENTIAL (2): "I will read this file from start to end."
+#     → The kernel increases its read-ahead buffer for this file descriptor,
+#       prefetching upcoming data while we process the current chunk.
+#       Typical gain: 5–15% throughput improvement on NVMe SSDs.
+#
+#   POSIX_FADV_DONTNEED (4): "I am done with this data, you can evict it."
+#     → The kernel can release the source file pages from the page cache.
+#       For a write-only copy operation, the source data will never be
+#       re-read, so keeping it in cache wastes RAM.
+#
+# `[target.'cfg(unix)'.dependencies]` : a platform-specific dependency section.
+# `cfg(unix)` is true on Linux AND macOS (any POSIX-compatible system).
+# On Windows, this entire section is ignored — libc is not compiled in,
+# keeping the Windows binary free of unused code.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Security_Cryptography"] }

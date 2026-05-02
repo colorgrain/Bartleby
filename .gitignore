@@ -1,0 +1,28 @@
+# JS dependencies
+node_modules/
+
+# Rust build output (can be several GB)
+src-tauri/target/
+
+# Frontend build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tauri dev cache
+.tauri/

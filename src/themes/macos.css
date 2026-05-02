@@ -1,0 +1,225 @@
+/*
+  themes/macos.css — Bartleby skin: macOS Sequoia / Sonoma
+  ══════════════════════════════════════════════════════════════════════════════
+
+  This skin makes Bartleby look native on macOS by reproducing the visual
+  language of macOS Sequoia / Sonoma (2024) using only CSS custom properties.
+
+  ── macOS DESIGN LANGUAGE ────────────────────────────────────────────────────
+
+  macOS uses "Aqua" as its fundamental visual system. Key characteristics:
+
+  COLOURS:
+    • Light mode: cool light grey backgrounds (not warm like Mint-Y).
+      The main window is #f2f2f7 (iOS / macOS "grouped background").
+    • Dark mode: layered very dark greys. The main surface is #1c1c1e (Apple's
+      "system background" dark), cards are #2c2c2e ("secondary grouped").
+    • System accent: #0a84ff (iOS / macOS "Blue" — same in both modes).
+      macOS supports 8 accent colours; Blue is the system default.
+
+  TYPOGRAPHY:
+    The font stack in style.css includes `system-ui`, which on macOS resolves to
+    SF Pro Display / SF Pro Text — Apple's proprietary system font. No custom
+    font loading needed; native rendering happens automatically.
+
+  GEOMETRY:
+    • Border radius: 10–12px for cards and panels (more rounded than Mint-Y).
+    • Button radius: 8px for regular buttons, 20px for pill-shaped primary actions.
+    • Very minimal borders: macOS uses shadows and blur more than hard borders.
+
+  TITLE BAR:
+    On macOS, Tauri's custom title bar (decorations: false) should closely
+    match the standard macOS toolbar. The traffic-light close/minimise/maximise
+    buttons are handled by the OS even with custom decorations.
+    We use a very slightly darker grey than the content area, which matches
+    the appearance of the NSToolbar in most macOS apps.
+
+  SHADOWS:
+    macOS uses layered subtle shadows extensively. Cards use a larger blur
+    radius than other platforms. "Elevation" is conveyed via shadow, not colour.
+
+  VIBRANCY:
+    True macOS vibrancy (the frosted-glass blur effect) is not reproducible
+    in a Tauri WebView without native API hooks. We approximate it with a
+    slightly translucent card background using rgba() colours.
+
+  ── COLOUR SOURCES ───────────────────────────────────────────────────────────
+  Values extracted from Apple's Human Interface Guidelines and measured from
+  native macOS apps in Sequoia using a colour picker:
+    • NSColor.systemBackground (light)        → #ffffff
+    • NSColor.systemGroupedBackground (light) → #f2f2f7
+    • NSColor.secondarySystemBackground       → #f2f2f7
+    • NSColor.tertiarySystemBackground        → #ffffff
+    • NSColor.systemBlue                      → #007aff (light) / #0a84ff (dark)
+    • NSColor.label                           → rgba(0,0,0,0.85)
+    • NSColor.secondaryLabel                  → rgba(60,60,67,0.6)
+    • NSColor.separator                       → rgba(60,60,67,0.29)
+  ══════════════════════════════════════════════════════════════════════════════
+*/
+
+
+/* ── Light mode ─────────────────────────────────────────────────────────────*/
+:root {
+
+  /* ── Backgrounds ── */
+  --bg:          #f2f2f7;
+  /* NSColor.systemGroupedBackground — the macOS "inset grouped" background.
+     Used for the main window area and behind-card space. */
+
+  --surface:     #ffffff;
+  /* NSColor.systemBackground — pure white panels and modal dialogs. */
+
+  --card-bg:     rgba(255, 255, 255, 0.85);
+  /* Slightly transparent white — approximates macOS vibrancy (frosted glass).
+     In a native app this would be NSVisualEffectView; here rgba is our best
+     approximation without native API access from a WebView. */
+
+  --card-border: rgba(0, 0, 0, 0.08);
+  /* macOS uses very subtle separators — almost invisible borders on cards. */
+
+  /* ── Text ── */
+  --text:     rgba(0, 0, 0, 0.85);
+  /* NSColor.label in light mode. Slightly softer than pure black. */
+
+  --text-dim: rgba(60, 60, 67, 0.60);
+  /* NSColor.secondaryLabel — the exact value Apple uses for secondary text. */
+
+  /* ── Accent — macOS Blue ── */
+  --accent:       #007aff;
+  /* NSColor.systemBlue (light mode). The default macOS system accent.
+     Slightly different from dark mode (#0a84ff) to account for display gamma. */
+
+  --accent-fg:    #ffffff;
+
+  --accent-hover: #0062cc;
+  /* Pressed/hover state — roughly 20% darker. */
+
+  --accent-text:  #0055b3;
+  /* Text links and flat button colour. Darker for WCAG AA contrast on white. */
+
+  /* ── Title bar ── */
+  --titlebar-bg:     #e8e8ed;
+  /* Very slightly darker than --bg. Matches the NSToolbar background in
+     typical macOS apps (lighter than classic titlebars, blends with content). */
+
+  --titlebar-txt:    rgba(0, 0, 0, 0.85);
+  --titlebar-border: rgba(0, 0, 0, 0.12);
+  /* Subtle 1px separator below the title bar. */
+
+  --titlebar-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
+  /* A very soft shadow below the title bar — common in macOS toolbar rendering. */
+
+  /* ── Inputs ── */
+  --input-bg:     #ffffff;
+  --input-border: rgba(0, 0, 0, 0.20);
+  /* macOS text fields have a slightly more visible border than Mint-Y. */
+
+  --input-focus:  #007aff;
+
+  /* ── Misc ── */
+  --separator: rgba(60, 60, 67, 0.29);
+  /* NSColor.separator — Apple's exact separator opacity. */
+
+  --scrollbar: rgba(0, 0, 0, 0.25);
+  --success:   #34c759;  /* NSColor.systemGreen */
+  --error:     #ff3b30;  /* NSColor.systemRed   */
+  --shadow:    rgba(0, 0, 0, 0.12);
+  /* Larger, softer shadows are characteristic of macOS.
+     The blur radius on .card uses this value. */
+
+  /* ── Geometry ── */
+  --radius:    10px;
+  /* macOS uses 10–12px corner radius for most panels and cards.
+     Note: style.css uses --radius for .action-btn too, giving macOS-style
+     rounded (not pill-shaped) buttons. Pill buttons exist on macOS but are
+     reserved for CTA-level actions in dialogs — not toolbars. */
+
+  --radius-sm: 7px;
+  /* Input fields, smaller buttons. macOS uses generous rounding throughout. */
+
+  --spacing:   16px;
+  --gap:       10px;
+}
+
+
+/* ── Dark mode ──────────────────────────────────────────────────────────────*/
+body.theme-dark {
+
+  --bg:          #1c1c1e;
+  /* NSColor.systemBackground (dark) — Apple's darkest background layer. */
+
+  --surface:     #2c2c2e;
+  /* NSColor.secondarySystemBackground (dark) — modal dialogs. */
+
+  --card-bg:     rgba(44, 44, 46, 0.90);
+  /* Slightly transparent dark surface — approximates Dark vibrancy. */
+
+  --card-border: rgba(255, 255, 255, 0.08);
+
+  --text:     rgba(255, 255, 255, 0.85);
+  /* NSColor.label (dark). */
+
+  --text-dim: rgba(235, 235, 245, 0.60);
+  /* NSColor.secondaryLabel (dark) — Apple's exact value. */
+
+  --accent:       #0a84ff;
+  /* NSColor.systemBlue (dark) — brighter than light mode (#007aff) due to
+     display rendering differences on dark backgrounds. */
+
+  --accent-fg:    #ffffff;
+  --accent-hover: #0070d8;
+
+  --accent-text:  #409cff;
+  /* Even lighter for text links on very dark backgrounds (#1c1c1e). */
+
+  --titlebar-bg:     #1c1c1e;
+  /* Same as --bg in dark mode — title bar blends seamlessly with the window. */
+
+  --titlebar-txt:    rgba(255, 255, 255, 0.85);
+  --titlebar-border: rgba(255, 255, 255, 0.10);
+  --titlebar-shadow: none;
+
+  --input-bg:     #3a3a3c;
+  /* NSColor.tertiarySystemBackground (dark) — input field fill. */
+
+  --input-border: rgba(255, 255, 255, 0.15);
+  --input-focus:  #0a84ff;
+
+  --separator: rgba(84, 84, 88, 0.65);
+  /* NSColor.separator (dark). */
+
+  --scrollbar: rgba(255, 255, 255, 0.25);
+  --success:   #30d158;  /* NSColor.systemGreen (dark) */
+  --error:     #ff453a;  /* NSColor.systemRed   (dark) */
+  --shadow:    rgba(0, 0, 0, 0.50);
+  /* Deeper shadows in dark mode — needed for visual depth on dark backgrounds. */
+}
+
+
+/* ── "Follow system" dark ───────────────────────────────────────────────────*/
+@media (prefers-color-scheme: dark) {
+  body.theme-default {
+    --bg:              #1c1c1e;
+    --surface:         #2c2c2e;
+    --card-bg:         rgba(44, 44, 46, 0.90);
+    --card-border:     rgba(255, 255, 255, 0.08);
+    --text:            rgba(255, 255, 255, 0.85);
+    --text-dim:        rgba(235, 235, 245, 0.60);
+    --accent:          #0a84ff;
+    --accent-fg:       #ffffff;
+    --accent-hover:    #0070d8;
+    --accent-text:     #409cff;
+    --titlebar-bg:     #1c1c1e;
+    --titlebar-txt:    rgba(255, 255, 255, 0.85);
+    --titlebar-border: rgba(255, 255, 255, 0.10);
+    --titlebar-shadow: none;
+    --input-bg:        #3a3a3c;
+    --input-border:    rgba(255, 255, 255, 0.15);
+    --input-focus:     #0a84ff;
+    --separator:       rgba(84, 84, 88, 0.65);
+    --scrollbar:       rgba(255, 255, 255, 0.25);
+    --success:         #30d158;
+    --error:           #ff453a;
+    --shadow:          rgba(0, 0, 0, 0.50);
+  }
+}
