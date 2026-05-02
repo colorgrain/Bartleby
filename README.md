@@ -114,3 +114,4 @@ Contributions are welcome — bug reports, feature requests, pull requests, and 
 - **On-set feedback**: if you use Bartleby in a real production context, your experience is valuable — please share it in the issues
 
 The codebase is intentionally straightforward: the frontend is plain HTML/CSS/JS, the backend is Rust with Tauri v2. There is no framework to learn.
+
