@@ -115,3 +115,4 @@ Contributions are welcome — bug reports, feature requests, pull requests, and 
 
 The codebase is intentionally straightforward: the frontend is plain HTML/CSS/JS, the backend is Rust with Tauri v2. There is no framework to learn.
 
+# Correction déclencheur
