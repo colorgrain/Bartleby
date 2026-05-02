@@ -276,8 +276,7 @@ printpdf = "0.7"
 #              we use rayon separately for mediainfo parallelism.
 #
 # version = "0.25": the current stable series.
-image = { version = "0.25", default-features = false,
-          features = ["jpeg", "png", "gif", "bmp", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 
 # ── chrono: date and time ─────────────────────────────────────────────────────
 #
