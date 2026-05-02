@@ -48,8 +48,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # C'est ici que la magie opère : on dit à Tauri de ne pas utiliser npm/node
-          tauriScript: 'none' 
+          # On utilise cargo directement au lieu de npm ou d'un script inexistant
+          tauriScript: 'cargo'
           
           tagName: ${{ github.ref_name }}
           releaseName: 'Bartleby ${{ github.ref_name }}'
