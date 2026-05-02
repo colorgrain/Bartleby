@@ -37,6 +37,9 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -48,8 +51,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # On utilise cargo directement au lieu de npm ou d'un script inexistant
-          tauriScript: 'cargo'
+          # C'est la ligne magique : on dit où se trouve le dossier Rust
+          projectPath: 'src-tauri'
           
           tagName: ${{ github.ref_name }}
           releaseName: 'Bartleby ${{ github.ref_name }}'
