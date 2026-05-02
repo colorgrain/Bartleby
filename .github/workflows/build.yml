@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -41,7 +41,6 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          # Installation des dépendances système requises par Tauri v2 et votre Cargo.toml
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libxdo-dev
 
       - name: Build and Release (Tauri Action)
