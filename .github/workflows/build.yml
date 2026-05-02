@@ -1,9 +1,9 @@
-name: 'Publish Release'
+name: 'Build Bartleby'
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ "main" ]
+    tags: [ "v*" ]
 
 jobs:
   publish-release:
@@ -48,6 +48,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # C'est ici que la magie opère : on dit à Tauri de ne pas utiliser npm/node
+          tauriScript: 'none' 
+          
           tagName: ${{ github.ref_name }}
           releaseName: 'Bartleby ${{ github.ref_name }}'
           releaseBody: 'Nouvelle version de Bartleby disponible.'
