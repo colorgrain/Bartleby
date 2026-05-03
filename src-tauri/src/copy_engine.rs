@@ -453,7 +453,7 @@ pub fn run(
         // `.collect()` gathers all results in original order (rayon guarantee).
         // On macOS: copyfile(). On Windows: CopyFileEx().
         let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter()
-            .map(|dst_path| fs::copy(src_path, dst_path))
+            .map(|dst_path| copy_file(src_path, dst_path))
             .collect();
 
         let mut any_error = false;
@@ -1373,6 +1373,34 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
 /// Without `let _ = …`, the compiler would emit an "unused Result" warning.
 fn log(tx: &Sender<Msg>, msg: &str) {
     let _ = tx.send(Msg::Log(msg.to_string()));
+}
+
+/// Copy a file with platform-specific read-ahead optimisation.
+///
+/// On Linux: opens the source fd explicitly and calls `posix_fadvise(SEQUENTIAL)`
+/// before copying. This tells the kernel to increase its read-ahead window
+/// (from the default 128 KB to several MB), which significantly improves
+/// throughput on high-latency storage like SD cards and USB drives.
+///
+/// On other platforms: delegates directly to `fs::copy` (which uses
+/// `copyfile` on macOS and `CopyFileEx` on Windows — already optimised).
+fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mut src_file = fs::File::open(src)?;
+        // POSIX_FADV_SEQUENTIAL = 2 : request aggressive read-ahead on this fd.
+        // Errors are silently ignored — this is a hint, not a requirement.
+        unsafe { libc::posix_fadvise(src_file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
+        let mut dst_file = fs::OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .open(dst)?;
+        io::copy(&mut src_file, &mut dst_file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        fs::copy(src, dst)
+    }
 }
 
 /// Returns bytes-per-second from a sliding 2-second window.
