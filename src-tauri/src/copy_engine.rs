@@ -470,7 +470,7 @@ pub fn run(
         // written to storage before we proceed to hash verification.
         // Runs in parallel across destinations.
         let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
-            .map(|dst_path| fs::File::open(dst_path)?.sync_all())
+            .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
             .collect();
 
         for (i, res) in sync_results.iter().enumerate() {
