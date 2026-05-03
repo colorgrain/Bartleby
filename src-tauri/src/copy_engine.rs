@@ -1383,16 +1383,14 @@ fn speed_bps(
     let elapsed = global.elapsed().as_secs_f64();
     if elapsed < 0.5 || done == 0 { return 0.0; }
     let snap_elapsed = snap_time.elapsed().as_secs_f64();
-    if snap_elapsed >= 2.0 && done > *snap_bytes {
-        let delta = done - *snap_bytes;
+    if snap_elapsed >= 1.5 {
+        let bps = done.saturating_sub(*snap_bytes) as f64 / snap_elapsed;
         *snap_bytes = done;
         *snap_time = Instant::now();
-        return delta as f64 / snap_elapsed;
+        return bps;
     }
-    if *snap_bytes == 0 {
-        return done as f64 / elapsed;
-    }
-    done.saturating_sub(*snap_bytes) as f64 / snap_elapsed.max(0.1)
+    // Fallback : moyenne cumulative — toujours correcte quelle que soit la taille des fichiers
+    done as f64 / elapsed
 }
 
 /// Formats a byte-per-second value as a human-readable speed string.
