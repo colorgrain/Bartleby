@@ -859,7 +859,7 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
 /// Errors are silently ignored — a missing notification is non-critical.
 /// The result is already visible in the Bartleby UI.
 #[tauri::command]
-fn send_notification(_app: tauri::AppHandle, title: String, body: String) {
+fn send_notification(app: tauri::AppHandle, title: String, body: String) {
     #[cfg(target_os = "linux")]
     {
         // notify-send is the standard CLI for libnotify on Linux.

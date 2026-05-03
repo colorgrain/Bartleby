@@ -885,10 +885,13 @@ fn hash_buffered_file(
 
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let (ptr, buf_len) = {
-                let mut v = vec![0u8; HASH_CHUNK];
-                let ptr = v.as_mut_ptr() as *mut libc::c_void;
-                std::mem::forget(v); // prevent double-free
-                (ptr, HASH_CHUNK)
+                let layout = std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap();
+                let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+                if raw.is_null() {
+                    tx.send(Err(io::Error::new(io::ErrorKind::OutOfMemory, "alloc failed"))).ok();
+                    break;
+                }
+                (raw, HASH_CHUNK)
             };
 
             // Wrap the raw pointer in a slice for reading.
@@ -901,19 +904,25 @@ fn hash_buffered_file(
 
             match read_result {
                 Ok(0) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
                     break; // EOF
                 }
                 Ok(n) => {
-                    // Copy the read bytes into a Vec<u8> for the channel.
-                    // This is the only copy in the pipeline — unavoidable
-                    // since Vec<u8> must own its memory for Send across threads.
                     let chunk = buf_slice[..n].to_vec();
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
                     if tx.send(Ok(chunk)).is_err() { break; }
                 }
                 Err(e) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
                     tx.send(Err(e)).ok();
                     break;
                 }

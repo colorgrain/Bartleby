@@ -48,7 +48,10 @@ const AUDIO_EXTS: &[&str] = &[
 
 fn no_window(cmd: &mut Command) -> &mut Command {
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000);
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
     cmd
 }
 
