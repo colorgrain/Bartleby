@@ -32,5 +32,5 @@
 # For development and personal use on a single machine, this is safe and
 # gives significantly better performance during testing.
 
-[build]
-rustflags = ["-C", "target-cpu=native"]
+#[build]
+#rustflags = ["-C", "target-cpu=native"]
