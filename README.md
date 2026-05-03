@@ -1,12 +1,12 @@
 # Bartleby
 <img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/82851c10-9c74-4bb5-ba11-b6f00c435657" />
 
-<img width="1440" height="1830" alt="Capture d’écran du 2026-05-03 09-01-04" src="https://github.com/user-attachments/assets/6226c31b-f898-479b-b05b-be885ef063b2" />
-<img width="1440" height="1718" alt="Capture d’écran du 2026-05-03 09-03-39" src="https://github.com/user-attachments/assets/2993fc88-de99-492b-9820-ff4645af3bdc" />
-<img width="1440" height="1718" alt="Capture d’écran du 2026-05-03 09-03-28" src="https://github.com/user-attachments/assets/afe720f4-e58e-4d76-a749-508e846404ef" />
-<img width="1440" height="1424" alt="Capture d’écran du 2026-05-03 09-02-41" src="https://github.com/user-attachments/assets/f014eb7e-d0ac-4863-b781-f7591b71ef44" />
-<img width="1440" height="1830" alt="Capture d’écran du 2026-05-03 09-02-20" src="https://github.com/user-attachments/assets/644c2ee8-a993-4c58-b886-2eec52e9eb8b" />
 
+<img width="720" height="915" alt="Capture d’écran du 2026-05-03 09-01-04" src="https://github.com/user-attachments/assets/6e46f43c-df60-4870-b0ef-95e4c37b329d" />
+<img width="720" height="915" alt="Capture d’écran du 2026-05-03 09-02-20" src="https://github.com/user-attachments/assets/2f38a4a7-2a8c-47bb-8c54-905196ea9ce1" />
+<img width="720" height="712" alt="Capture d’écran du 2026-05-03 09-02-41" src="https://github.com/user-attachments/assets/9722a986-4f2e-47b8-8c11-777f32457b4f" />
+<img width="720" height="859" alt="Capture d’écran du 2026-05-03 09-03-28" src="https://github.com/user-attachments/assets/1e3c1147-941d-4bd2-8d62-bdaaaa1ce399" />
+<img width="720" height="859" alt="Capture d’écran du 2026-05-03 09-03-39" src="https://github.com/user-attachments/assets/f703fddc-475d-44b0-9dd8-ae2fc3c8d963" />
 
 
 > **Beta software** — Bartleby is under active development. Expect rough edges, missing features, and breaking changes between releases. Use at your own risk in production workflows.
