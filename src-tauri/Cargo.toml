@@ -45,12 +45,12 @@
 # Convention: lowercase, hyphens or underscores (hyphens preferred for binaries).
 name = "bartleby"
 
-# Semantic versioning: MAJOR.MINOR.PATCH
+# Semantic versioning: MAJOR.MINOR.PATCH[-PRE]
 # Keep in sync with:
 #   • tauri.conf.json → "version"
 #   • pub const VERSION: &str in src/main.rs
 #   • The version displayed in the About modal (index.html)
-version = "0.1.0-beta.2"
+version = "0.1.0-2"
 
 # The Rust edition determines which language features and idioms are available.
 # "2021" is the current stable edition (previous: "2015", "2018").

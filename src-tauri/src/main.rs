@@ -113,8 +113,6 @@ use serde::{Serialize, Deserialize};
 // Both traits are derived (auto-implemented) via `#[derive(…)]` macros.
 
 use tauri::{State, Emitter};
-#[cfg(not(target_os = "linux"))]
-use tauri_plugin_notification::NotificationExt;
 //           ─────  ───────
 //           │      └─ The `Emitter` trait adds the `.emit()` method to `WebviewWindow`.
 //           │         Without this `use`, the method would not be in scope.
@@ -156,7 +154,7 @@ use settings::Settings;
 ///
 /// `&'static str` : a string slice with `'static` lifetime, meaning it lives
 /// for the entire duration of the program. String literals always have this type.
-pub const VERSION: &str = "0.1 Beta";
+pub const VERSION: &str = "0.1.0-2";
 
 // ── Shared application state ──────────────────────────────────────────────────
 
