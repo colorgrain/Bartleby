@@ -90,7 +90,7 @@
 // `std::sync::Mutex` every time. This is purely cosmetic — the compiler resolves
 // the full path regardless.
 
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 //              ─────  ───
 //              │      └─ "multiple producer / single consumer" channels (std::sync::mpsc)
 //              └─ Mutual exclusion lock — only one thread can hold a Mutex at a time.
@@ -197,6 +197,10 @@ struct AppState {
     /// this at compile time across threads, so the runtime lock does it instead.
     settings: Mutex<Settings>,
 
+    /// Pause/cancel handle for the active copy operation.
+    /// `None` when no copy is running.
+    pause_cancel: Mutex<Option<Arc<copy_engine::PauseCancel>>>,
+
     /// One-shot reply channel for interactive copy-engine prompts.
     ///
     /// ### Lifecycle
@@ -281,6 +285,8 @@ fn main() {
         .manage(AppState {
             // Load settings from disk at startup (falls back to defaults if absent).
             settings: Mutex::new(Settings::load()),
+            // No copy is running yet.
+            pause_cancel: Mutex::new(None),
             // No copy is running yet, so no reply channel exists.
             reply_tx: Mutex::new(None),
         })
@@ -293,6 +299,9 @@ fn main() {
             save_settings,
             start_copy,
             prompt_reply,
+            pause_copy,
+            resume_copy,
+            cancel_copy,
             is_system_dark_mode,
             open_destinations,
             send_notification,
@@ -441,6 +450,14 @@ struct DonePayload {
     summary: String,
 }
 
+/// One entry in the conflict table shown to the user.
+#[derive(Clone, Serialize)]
+struct ConflictItemPayload {
+    rel_path:   String,
+    size_match: bool,
+    date_match: bool,
+}
+
 /// Payload for `copy-prompt` events: requests the user to make a decision.
 ///
 /// The copy engine is **blocked** waiting for a reply when this event is emitted.
@@ -452,9 +469,12 @@ struct PromptPayload {
     /// - `"non_empty"` → one or more destinations already contain files.
     /// - `"conflicts"` → one or more source files already exist in the destination.
     kind:  String,
-    /// List of affected paths (destinations for `non_empty`, relative file paths
-    /// for `conflicts`). Shown in the dialog so the user can make an informed choice.
+    /// Destination paths for `non_empty` prompts. Empty for `conflicts`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     items: Vec<String>,
+    /// Structured conflict data for `conflicts` prompts. Absent for `non_empty`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict_items: Option<Vec<ConflictItemPayload>>,
 }
 
 // ── start_copy ────────────────────────────────────────────────────────────────
@@ -495,6 +515,10 @@ struct StartCopyArgs {
     gen_pdf:      bool,
     /// Generate a self-contained `{src_name}_report.html` report in each destination.
     gen_html:     bool,
+    /// Copy the source folder itself into the destination, not just its contents.
+    /// When true:  destination/source_name/file.ext
+    /// When false: destination/file.ext  (current default)
+    copy_as_subfolder: bool,
     /// Whether to open each destination in the file manager after a successful copy.
     /// This flag is read by JavaScript in the `copy-done` handler, not by Rust.
     #[allow(dead_code)]
@@ -609,6 +633,10 @@ fn start_copy(
     // `Option<SyncSender<Reply>>`, then assign `Some(reply_tx)` to replace `None`.
     *state.reply_tx.lock().unwrap() = Some(reply_tx);
 
+    // Create the pause/cancel handle and store it in AppState.
+    let pc = copy_engine::PauseCancel::new();
+    *state.pause_cancel.lock().unwrap() = Some(pc.clone());
+
     // ── Extract flags before moving into closures ──────────────────────────────
     // `args` is moved into the first thread's closure below. But we need several
     // of its fields after that. In Rust, once a value is moved, it cannot be used.
@@ -641,17 +669,19 @@ fn start_copy(
     // It runs the three phases: copy → verify → reports.
     thread::spawn(move || {
         copy_engine::run(
-            src_path,          // absolute source directory path
-            dst_paths,         // list of destination directory paths
-            verify,            // Phase 2 enabled? (= gen_md5 || gen_xxh)
-            gen_md5,           // compute MD5 + write .md5 file
-            gen_xxh,           // compute XXH3 + write .xxh3 file
-            gen_csv,           // generate .csv metadata report?
-            gen_pdf,           // generate .pdf visual report?
-            gen_html,          // generate .html self-contained report?
-            settings_snapshot, // snapshot of user settings
-            tx,                // Sender<Msg>: engine pushes progress updates here
-            reply_rx,          // Receiver<Reply>: engine waits for user replies here
+            src_path,                    // absolute source directory path
+            dst_paths,                   // list of destination directory paths
+            verify,                      // Phase 2 enabled? (= gen_md5 || gen_xxh)
+            gen_md5,                     // compute MD5 + write .md5 file
+            gen_xxh,                     // compute XXH3 + write .xxh3 file
+            gen_csv,                     // generate .csv metadata report?
+            gen_pdf,                     // generate .pdf visual report?
+            gen_html,                    // generate .html self-contained report?
+            args.copy_as_subfolder,      // wrap files inside source folder name?
+            settings_snapshot,           // snapshot of user settings
+            tx,                          // Sender<Msg>: engine pushes progress updates here
+            reply_rx,                    // Receiver<Reply>: engine waits for user replies here
+            pc,                          // pause/cancel control handle
         );
         // When run() returns, `tx` is dropped. This signals the forwarding thread
         // that no more messages will arrive (Receiver::recv() will return Err).
@@ -717,19 +747,27 @@ fn start_copy(
                 // `invoke("prompt_reply", { reply: "continue" | "skip" | "cancel" })`.
                 Ok(copy_engine::Msg::NonEmptyDest(paths)) => {
                     let _ = win.emit("copy-prompt", PromptPayload {
-                        kind:  "non_empty".into(), // JS checks event.payload.kind
-                        items: paths,              // list of non-empty destination paths
+                        kind:           "non_empty".into(),
+                        items:          paths,
+                        conflict_items: None,
                     });
-                    // Do NOT break — continue listening for the next message
                 }
 
                 // ── File conflict prompt ──────────────────────────────────────
                 // Same mechanism as NonEmptyDest. The engine is blocked; JS
-                // shows a "files already exist" dialog.
-                Ok(copy_engine::Msg::Conflicts(files)) => {
+                // shows a scrollable conflict table with size+date match indicators.
+                Ok(copy_engine::Msg::Conflicts(infos)) => {
+                    let conflict_items: Vec<ConflictItemPayload> = infos.into_iter()
+                        .map(|ci| ConflictItemPayload {
+                            rel_path:   ci.rel_path,
+                            size_match: ci.size_match,
+                            date_match: ci.date_match,
+                        })
+                        .collect();
                     let _ = win.emit("copy-prompt", PromptPayload {
-                        kind:  "conflicts".into(), // JS shows the conflict dialog
-                        items: files,              // list of conflicting relative paths
+                        kind:           "conflicts".into(),
+                        items:          vec![],
+                        conflict_items: Some(conflict_items),
                     });
                 }
 
@@ -804,6 +842,34 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Transport controls ────────────────────────────────────────────────────────
+
+/// Pauses the active copy between chunks and emits `copy-paused` to the frontend.
+#[tauri::command]
+fn pause_copy(window: WebviewWindow, state: State<AppState>) {
+    if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
+        pc.pause();
+        let _ = window.emit("copy-paused", ());
+    }
+}
+
+/// Resumes a paused copy and emits `copy-resumed` to the frontend.
+#[tauri::command]
+fn resume_copy(window: WebviewWindow, state: State<AppState>) {
+    if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
+        pc.resume();
+        let _ = window.emit("copy-resumed", ());
+    }
+}
+
+/// Cancels the active copy operation.
+#[tauri::command]
+fn cancel_copy(state: State<AppState>) {
+    if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
+        pc.cancel();
+    }
+}
+
 // ── Folder dialog ─────────────────────────────────────────────────────────────
 //
 // The folder picker is handled entirely in JavaScript:
@@ -859,6 +925,7 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
 /// Errors are silently ignored — a missing notification is non-critical.
 /// The result is already visible in the Bartleby UI.
 #[tauri::command]
+#[allow(unused_variables)]
 fn send_notification(app: tauri::AppHandle, title: String, body: String) {
     #[cfg(target_os = "linux")]
     {

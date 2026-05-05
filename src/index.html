@@ -47,6 +47,18 @@
   <!-- App icon: bartleby.svg loaded via <img> tag.
        The SVG is an external file so it can be updated without recompiling. -->
 
+  <!-- Transport control icons — used by Pause / Resume / Cancel buttons -->
+  <symbol id="ico-play" viewBox="0 0 24 24">
+    <polygon points="7,4 20,12 7,20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="ico-pause" viewBox="0 0 24 24">
+    <line x1="6" y1="4" x2="6" y2="20" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    <line x1="14" y1="4" x2="14" y2="20" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="ico-stop" viewBox="0 0 24 24">
+    <rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+  </symbol>
+
 </svg>
 
 <!-- ══ HEADER BAR ══════════════════════════════════════════════════════════ -->
@@ -116,22 +128,25 @@
         <option value="md5">.MD5</option>
         <option value="xxh3">.XXH3</option>
       </select>
-      <label><input type="checkbox" id="chk-csv"> .CSV</label>
-      <label><input type="checkbox" id="chk-pdf"> .PDF</label>
-      <label><input type="checkbox" id="chk-html"> .HTML</label>
-      <label><input type="checkbox" id="chk-open">
-        <span title="Open destination folders in file manager after copy">Open destinations</span>
-      </label>
+      <label class="toggle-label"><input type="checkbox" id="chk-csv"><span class="toggle-track"><span class="toggle-thumb"></span></span>.CSV</label>
+      <label class="toggle-label"><input type="checkbox" id="chk-pdf"><span class="toggle-track"><span class="toggle-thumb"></span></span>.PDF</label>
+      <label class="toggle-label"><input type="checkbox" id="chk-html"><span class="toggle-track"><span class="toggle-thumb"></span></span>.HTML</label>
+      <label class="toggle-label"><input type="checkbox" id="chk-open"><span class="toggle-track"><span class="toggle-thumb"></span></span><span title="Open destination folders in file manager after copy">Open destinations</span></label>
       <button id="gear-btn" class="icon-btn" title="Settings">
         <svg width="18" height="18"><use href="#ico-gear"/></svg>
       </button>
     </div>
   </div>
 
-  <!-- Action buttons: MD5/XXH3 checkboxes control whether verify=true.
-       Nothing checked → copy only. MD5 or XXH3 checked → copy + verify. -->
+  <!-- Action buttons: Copy is visible at rest; Pause + Cancel appear during transfer. -->
   <div id="btn-row">
     <button id="copy-btn" class="action-btn suggested">Copy</button>
+    <button id="pause-btn" class="action-btn transport-btn hidden" title="Pause transfer">
+      <svg width="18" height="18"><use href="#ico-pause"/></svg>
+    </button>
+    <button id="cancel-btn" class="action-btn danger transport-btn hidden" title="Cancel transfer">
+      <svg width="18" height="18"><use href="#ico-stop"/></svg>
+    </button>
   </div>
 
 </main>
@@ -177,17 +192,17 @@
 
     <div class="modal-section-label">Active columns</div>
     <div class="card modal-card col-grid">
-      <label><input type="checkbox" data-col="col_name">        Name</label>
-      <label><input type="checkbox" data-col="col_type">        Type</label>
-      <label><input type="checkbox" data-col="col_size">        Size</label>
-      <label><input type="checkbox" data-col="col_resolution">  Resolution</label>
-      <label><input type="checkbox" data-col="col_codec">       Codec</label>
-      <label><input type="checkbox" data-col="col_duration">    Duration</label>
-      <label><input type="checkbox" data-col="col_bit_depth">   Bit Depth</label>
-      <label><input type="checkbox" data-col="col_chroma">      Chroma</label>
-      <label><input type="checkbox" data-col="col_color_space"> Color Space</label>
-      <label><input type="checkbox" data-col="col_sample_rate"> Sample Rate</label>
-      <label><input type="checkbox" data-col="col_md5">         MD5</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_name"><span class="toggle-track"><span class="toggle-thumb"></span></span>Name</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_type"><span class="toggle-track"><span class="toggle-thumb"></span></span>Type</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_size"><span class="toggle-track"><span class="toggle-thumb"></span></span>Size</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_resolution"><span class="toggle-track"><span class="toggle-thumb"></span></span>Resolution</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_codec"><span class="toggle-track"><span class="toggle-thumb"></span></span>Codec</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_duration"><span class="toggle-track"><span class="toggle-thumb"></span></span>Duration</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_bit_depth"><span class="toggle-track"><span class="toggle-thumb"></span></span>Bit Depth</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_chroma"><span class="toggle-track"><span class="toggle-thumb"></span></span>Chroma</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_color_space"><span class="toggle-track"><span class="toggle-thumb"></span></span>Color Space</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_sample_rate"><span class="toggle-track"><span class="toggle-thumb"></span></span>Sample Rate</label>
+      <label class="toggle-label"><input type="checkbox" data-col="col_md5"><span class="toggle-track"><span class="toggle-thumb"></span></span>MD5</label>
     </div>
 
     <div class="modal-btn-row">

@@ -107,8 +107,28 @@ var chkOpen      = document.getElementById('chk-open');
 // Single "Copy" action button. Disabled during active copy to prevent double-click.
 // verify mode is derived automatically: verify = chkMd5.checked || chkXxh.checked.
 var copyBtn      = document.getElementById('copy-btn');
+// Transport control buttons — visible only during an active transfer.
+var pauseBtn     = document.getElementById('pause-btn');
+var cancelBtn    = document.getElementById('cancel-btn');
+var copyIsPaused = false;
+var userCancelledQueue = false;
 var menuBtn      = document.getElementById('menu-btn');
 var menuPopup    = document.getElementById('menu-popup');
+
+// ── Transport control helpers ─────────────────────────────────────────────────
+//
+// setCopyInProgress(true)  — hides Copy, shows Pause + Cancel.
+// setCopyInProgress(false) — shows Copy, hides Pause + Cancel.
+function setCopyInProgress(active) {
+    copyIsPaused = false;
+    copyBtn.classList.toggle('hidden', active);
+    pauseBtn.classList.toggle('hidden', !active);
+    cancelBtn.classList.toggle('hidden', !active);
+    pauseBtn.disabled = false;
+    cancelBtn.disabled = false;
+    pauseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
+    pauseBtn.title = 'Pause transfer';
+}
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 //
@@ -360,6 +380,26 @@ function addJob() {
     srcRow.appendChild(srcBrowseBtn);
     card.appendChild(srcRow);
 
+    // Copy-as-subfolder toggle
+    var subfolderRow = document.createElement('div');
+    subfolderRow.className = 'row subfolder-row';
+    var subfolderLbl = document.createElement('label');
+    subfolderLbl.className = 'toggle-label subfolder-label';
+    var subfolderChk = document.createElement('input');
+    subfolderChk.type = 'checkbox';
+    subfolderChk.className = 'job-subfolder-chk';
+    var toggleTrack = document.createElement('span');
+    toggleTrack.className = 'toggle-track';
+    var toggleThumb = document.createElement('span');
+    toggleThumb.className = 'toggle-thumb';
+    toggleTrack.appendChild(toggleThumb);
+    var subfolderTxt = document.createTextNode('Copy folder itself into destination');
+    subfolderLbl.appendChild(subfolderChk);
+    subfolderLbl.appendChild(toggleTrack);
+    subfolderLbl.appendChild(subfolderTxt);
+    subfolderRow.appendChild(subfolderLbl);
+    card.appendChild(subfolderRow);
+
     // Visual separator between source and destinations
     var sep = document.createElement('hr');
     sep.className = 'dest-sep';
@@ -407,12 +447,13 @@ function renumberJobs() {
 function getJobs() {
     var result = [];
     jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
-        var srcEl = card.querySelector('.job-src-input');
-        var src   = srcEl ? srcEl.value.trim() : '';
-        var dsts  = Array.from(card.querySelectorAll('.job-dest-list input[type="text"]'))
+        var srcEl       = card.querySelector('.job-src-input');
+        var subfolderEl = card.querySelector('.job-subfolder-chk');
+        var src         = srcEl ? srcEl.value.trim() : '';
+        var dsts        = Array.from(card.querySelectorAll('.job-dest-list input[type="text"]'))
             .map(function(i) { return i.value.trim(); })
             .filter(function(v) { return v.length > 0; });
-        result.push({ src: src, dsts: dsts });
+        result.push({ src: src, dsts: dsts, copyAsSubfolder: subfolderEl ? subfolderEl.checked : false });
     });
     return result;
 }
@@ -567,12 +608,14 @@ document.getElementById('settings-save').addEventListener('click', async functio
 // sent to Rust via invoke('prompt_reply') to unblock the copy thread.
 var promptOverlay = document.getElementById('prompt-overlay');
 
-function showPrompt(kind, items) {
+function showPrompt(kind, items, conflictItems) {
     return new Promise(function(resolve) {
         var title   = document.getElementById('prompt-title');
         var message = document.getElementById('prompt-message');
         var btnRow  = document.getElementById('prompt-btn-row');
         btnRow.innerHTML = '';
+        message.innerHTML = '';
+        message.removeAttribute('style'); // reset inline styles from previous call
 
         if (kind === 'non_empty') {
             title.textContent = 'Non-empty destination';
@@ -583,14 +626,63 @@ function showPrompt(kind, items) {
             addPromptBtn(btnRow, 'Continue', 'continue', true,  false, resolve);
         } else {
             title.textContent = 'File conflicts detected';
-            var preview = items.slice(0, 10).join('\n');
-            var more = items.length > 10 ? '\n… and ' + (items.length - 10) + ' more.' : '';
-            message.textContent =
-                items.length + ' file(s) already exist:\n\n' +
-                preview + more + '\n\nWhat would you like to do?';
-            addPromptBtn(btnRow, 'Cancel',  'cancel',   false, false, resolve);
-            addPromptBtn(btnRow, 'Skip',    'skip',     true,  false, resolve);
-            addPromptBtn(btnRow, 'Replace', 'continue', true,  true,  resolve);
+
+            // Remove background/padding from the message container — the table handles its own styling.
+            message.style.background    = 'none';
+            message.style.padding       = '0';
+            message.style.maxHeight     = 'none';
+            message.style.whiteSpace    = 'normal';
+            message.style.borderRadius  = '0';
+
+            var countEl = document.createElement('p');
+            countEl.style.cssText = 'margin:0 0 8px; font-size:12px; color:var(--text-dim)';
+            countEl.textContent = (conflictItems || []).length + ' file(s) already exist in one or more destinations.';
+            message.appendChild(countEl);
+
+            var wrap = document.createElement('div');
+            wrap.className = 'conflict-table-wrap';
+
+            var table = document.createElement('table');
+            table.className = 'conflict-table';
+
+            var thead = document.createElement('thead');
+            var hrow  = document.createElement('tr');
+            ['File', 'Size', 'Date'].forEach(function(col) {
+                var th = document.createElement('th');
+                th.textContent = col;
+                hrow.appendChild(th);
+            });
+            thead.appendChild(hrow);
+            table.appendChild(thead);
+
+            var tbody = document.createElement('tbody');
+            (conflictItems || []).forEach(function(item) {
+                var tr = document.createElement('tr');
+
+                var tdFile = document.createElement('td');
+                tdFile.className   = 'conflict-filename';
+                tdFile.textContent = item.rel_path;
+                tr.appendChild(tdFile);
+
+                var tdSize = document.createElement('td');
+                tdSize.className   = 'conflict-status ' + (item.size_match ? 'match-ok' : 'match-fail');
+                tdSize.textContent = item.size_match ? '✓' : '✗';
+                tr.appendChild(tdSize);
+
+                var tdDate = document.createElement('td');
+                tdDate.className   = 'conflict-status ' + (item.date_match ? 'match-ok' : 'match-fail');
+                tdDate.textContent = item.date_match ? '✓' : '✗';
+                tr.appendChild(tdDate);
+
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            wrap.appendChild(table);
+            message.appendChild(wrap);
+
+            addPromptBtn(btnRow, 'Cancel',                  'cancel',   false, false, resolve);
+            addPromptBtn(btnRow, 'Skip — size & date match', 'skip', true, false, resolve);
+            addPromptBtn(btnRow, 'Replace all',             'continue', true,  true,  resolve);
         }
         promptOverlay.classList.remove('hidden');
     });
@@ -640,7 +732,21 @@ async function registerListeners() {
     }));
 
     unlisteners.push(await listen('copy-prompt', async function(event) {
-        await showPrompt(event.payload.kind, event.payload.items);
+        await showPrompt(event.payload.kind, event.payload.items || [], event.payload.conflict_items || null);
+    }));
+
+    unlisteners.push(await listen('copy-paused', function() {
+        copyIsPaused = true;
+        pauseBtn.disabled = false;
+        pauseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-play"/></svg>';
+        pauseBtn.title = 'Resume transfer';
+    }));
+
+    unlisteners.push(await listen('copy-resumed', function() {
+        copyIsPaused = false;
+        pauseBtn.disabled = false;
+        pauseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
+        pauseBtn.title = 'Pause transfer';
     }));
 }
 
@@ -650,7 +756,9 @@ async function registerListeners() {
 // with { ok, summary } when the Rust copy-done event fires.
 // A one-shot copy-done listener is registered inside the Promise and removed
 // as soon as the event arrives, so sequential jobs never overlap.
-async function runJob(src, dsts) {
+async function runJob(job) {
+    var src  = job.src;
+    var dsts = job.dsts;
     var hashAlgo = hashSelect ? hashSelect.value : 'none';
     var verify   = hashAlgo !== 'none';
 
@@ -663,15 +771,16 @@ async function runJob(src, dsts) {
         try {
             await invoke('start_copy', {
                 args: {
-                    src:          src,
-                    destinations: dsts,
-                    verify:       verify,
-                    gen_md5:      hashAlgo === 'md5',
-                    gen_xxh:      hashAlgo === 'xxh3',
-                    gen_csv:      chkCsv.checked,
-                    gen_pdf:      chkPdf.checked,
-                    gen_html:     chkHtml.checked,
-                    open_dest:    false // handled at the end of launchCopy()
+                    src:               src,
+                    destinations:      dsts,
+                    verify:            verify,
+                    gen_md5:           hashAlgo === 'md5',
+                    gen_xxh:           hashAlgo === 'xxh3',
+                    gen_csv:           chkCsv.checked,
+                    gen_pdf:           chkPdf.checked,
+                    gen_html:          chkHtml.checked,
+                    copy_as_subfolder: job.copyAsSubfolder || false,
+                    open_dest:         false // handled at the end of launchCopy()
                 }
             });
         } catch(e) {
@@ -685,6 +794,7 @@ async function runJob(src, dsts) {
 // Progress/log/prompt listeners are shared across the entire queue;
 // each individual job's copy-done is awaited via runJob().
 async function launchCopy() {
+    userCancelledQueue = false;
     var jobs  = getJobs();
     var multi = jobs.length > 1;
 
@@ -701,7 +811,7 @@ async function launchCopy() {
         }
     }
 
-    copyBtn.disabled = true;
+    setCopyInProgress(true);
     progressFill.style.width = '0%';
     progressText.textContent = 'Starting…';
     statusLabel.textContent  = '';
@@ -729,7 +839,7 @@ async function launchCopy() {
             logView.scrollTop = logView.scrollHeight;
         }
 
-        var result = await runJob(job.src, job.dsts);
+        var result = await runJob(job);
 
         // Turn the job label green (or leave neutral on error) once the job finishes
         var jobCards = jobsContainer.querySelectorAll('.job-group');
@@ -745,7 +855,11 @@ async function launchCopy() {
             logView.textContent += (result.ok ? '✓ ' : '✗ ') + result.summary + '\n';
             logView.scrollTop = logView.scrollHeight;
         }
+
+        if (userCancelledQueue) break;
     }
+
+    userCancelledQueue = false;
 
     // Tear down shared listeners now that all jobs are done
     currentJobPrefix = '';
@@ -759,7 +873,7 @@ async function launchCopy() {
     statusLabel.className    = allOk ? 'success' : 'error';
     progressFill.style.width = '100%';
     progressText.textContent = allOk ? 'Done' : 'Finished with errors';
-    copyBtn.disabled = false;
+    setCopyInProgress(false);
 
     // ── Auto-save log to ~/.config/bartleby/logs/YYYY-MM-DD_HH-MM-SS.txt ──────
     try {
@@ -796,6 +910,25 @@ async function launchCopy() {
 // Wire the single Copy button to launchCopy().
 // verify is derived inside launchCopy() from the checkbox states.
 copyBtn.addEventListener('click', function() { launchCopy(); });
+
+// Pause / Resume button — toggles between pause and resume.
+pauseBtn.addEventListener('click', async function() {
+    if (!copyIsPaused) {
+        pauseBtn.disabled = true;
+        try { await invoke('pause_copy'); } catch(e) {}
+    } else {
+        pauseBtn.disabled = true;
+        try { await invoke('resume_copy'); } catch(e) {}
+    }
+});
+
+// Cancel button — aborts the entire transfer and prevents further jobs from running.
+cancelBtn.addEventListener('click', async function() {
+    cancelBtn.disabled = true;
+    pauseBtn.disabled = true;
+    userCancelledQueue = true;
+    try { await invoke('cancel_copy'); } catch(e) {}
+});
 
 // ── Drag & drop — folder drag from OS file manager ────────────────────────────
 //

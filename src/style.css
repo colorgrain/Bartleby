@@ -29,6 +29,7 @@
 
 /* ── Reset ────────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+.hidden { display: none !important; }
 
 /* ── Tokens Mint-Y Aqua Light ─────────────────────────────────────────────── */
 :root {
@@ -304,6 +305,20 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   color:       #fff;
   border-color: var(--error);
 }
+.action-btn.danger:hover {
+  background:   color-mix(in srgb, var(--error) 82%, #000);
+  border-color: color-mix(in srgb, var(--error) 82%, #000);
+}
+
+/* Transport control buttons (Pause / Resume / Cancel) */
+.transport-btn {
+  padding: 5px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.transport-btn svg { stroke: currentColor; fill: none; }
+.action-btn.danger .transport-btn svg { stroke: #fff; }
 
 /* Menu button */
 #menu-btn {
@@ -359,6 +374,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .dest-row input { flex: 1; }
 .dest-sep  { border: none; border-top: 1px solid var(--separator); margin: 4px 0; }
 
+.subfolder-row  { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; }
+.subfolder-label { font-size: 11px; color: var(--text-dim); cursor: pointer; }
+
 /* ── Jobs queue ───────────────────────────────────────────────────────────── */
 #jobs-container { display: flex; flex-direction: column; gap: var(--gap); }
 
@@ -407,6 +425,49 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #status-label.success { color: var(--success); font-weight: 500; }
 #status-label.error   { color: var(--error);   font-weight: 500; }
 
+/* ── Toggle switch ────────────────────────────────────────────────────────── */
+.toggle-label {
+  display:     flex;
+  align-items: center;
+  gap:         7px;
+  cursor:      pointer;
+  user-select: none;
+  font-size:   13px;
+}
+.toggle-label input[type="checkbox"] {
+  position: absolute;
+  opacity:  0;
+  width:    0;
+  height:   0;
+}
+.toggle-track {
+  position:      relative;
+  display:       inline-flex;
+  flex-shrink:   0;
+  width:         28px;
+  height:        16px;
+  background:    rgba(128,128,128,0.35);
+  border-radius: 8px;
+  transition:    background 0.18s ease;
+}
+.toggle-label input[type="checkbox"]:checked + .toggle-track {
+  background: var(--accent);
+}
+.toggle-thumb {
+  position:      absolute;
+  top:           2px;
+  left:          2px;
+  width:         12px;
+  height:        12px;
+  background:    #fff;
+  border-radius: 50%;
+  box-shadow:    0 1px 2px rgba(0,0,0,0.25);
+  transition:    transform 0.18s ease;
+}
+.toggle-label input[type="checkbox"]:checked + .toggle-track .toggle-thumb {
+  transform: translateX(12px);
+}
+
 /* ── Options bar ──────────────────────────────────────────────────────────── */
 #options-bar   { padding: 0; }
 #options-inner {
@@ -416,20 +477,11 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   padding:     6px 12px;
   flex-wrap:   wrap;
 }
-#options-inner label {
-  display:     flex;
-  align-items: center;
-  gap:         6px;
-  cursor:      pointer;
-  user-select: none;
-  font-size:   13px;
-}
-#options-inner input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; }
 #hash-select {
   font-size:    13px;
   font-family:  inherit;
   color:        var(--text);
-  background:   var(--input-bg);
+  background:   var(--card-bg);
   border:       1px solid var(--input-border);
   border-radius: var(--radius-sm);
   padding:      2px 6px;
@@ -492,9 +544,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
 }
 .col-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
-.col-grid label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
-.col-grid input[type="checkbox"] { accent-color: var(--accent); }
-.modal-btn-row { display: flex; justify-content: center; gap: 10px; padding-top: 4px; }
+.modal-btn-row { display: flex; justify-content: center; gap: 10px; padding-top: 4px; flex-wrap: wrap; }
 
 /* ── Logo picker row ─────────────────────────────────────────────────────────
    The logo row sits inside the Report Header card in the Settings modal.
@@ -593,6 +643,51 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   padding:       10px 12px;
   color:         var(--text);
 }
+
+/* ── Conflict table (file conflict prompt) ────────────────────────────────── */
+.conflict-table-wrap {
+  max-height:    320px;
+  overflow-y:    auto;
+  border:        1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+}
+.conflict-table-wrap::-webkit-scrollbar       { width: 5px; }
+.conflict-table-wrap::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+.conflict-table {
+  width:           100%;
+  border-collapse: collapse;
+  font-size:       12px;
+}
+.conflict-table thead th {
+  position:       sticky;
+  top:            0;
+  background:     var(--surface);
+  font-weight:    700;
+  font-size:      10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color:          var(--text-dim);
+  padding:        5px 8px;
+  text-align:     left;
+  border-bottom:  1px solid var(--card-border);
+}
+.conflict-table tbody tr:nth-child(even) { background: rgba(128,128,128,0.05); }
+.conflict-table tbody tr:hover           { background: rgba(31,158,222,0.08); }
+.conflict-filename {
+  padding:    5px 8px;
+  font-family: "Noto Mono", "Ubuntu Mono", "Fira Mono", monospace;
+  font-size:  11.5px;
+  word-break: break-all;
+}
+.conflict-status {
+  padding:     5px 12px;
+  text-align:  center;
+  font-size:   16px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.match-ok   { color: #16a34a; }   /* vivid green  */
+.match-fail { color: #dc2626; }   /* vivid red    */
 
 /* ── About ────────────────────────────────────────────────────────────────── */
 #about-content {

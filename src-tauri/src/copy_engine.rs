@@ -69,6 +69,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use rayon::prelude::*;
 use crate::metadata;
@@ -92,6 +94,46 @@ use crate::settings::Settings;
 /// Increasing to 16 MiB gives marginal throughput improvement on NVMe but
 /// uses 4× more RAM per concurrent hash operation.
 const HASH_CHUNK: usize = 4 * 1024 * 1024; // 4 MiB = 4_194_304 bytes
+
+// ── Pause / Cancel control ────────────────────────────────────────────────────
+
+/// Shared pause/cancel state threaded through the copy engine.
+///
+/// - `paused`    : a Condvar-guarded bool. When `true`, worker threads block
+///   on `wait_if_paused()` between 64 MiB chunks until `resume()` is called.
+/// - `cancelled` : an atomic flag. When set, `wait_if_paused()` returns `Err(())`
+///   so the caller can clean up and return immediately.
+pub struct PauseCancel {
+    paused:    (Mutex<bool>, Condvar),
+    cancelled: AtomicBool,
+}
+
+impl PauseCancel {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused:    (Mutex::new(false), Condvar::new()),
+            cancelled: AtomicBool::new(false),
+        })
+    }
+    pub fn pause(&self) { *self.paused.0.lock().unwrap() = true; }
+    pub fn resume(&self) {
+        *self.paused.0.lock().unwrap() = false;
+        self.paused.1.notify_all();
+    }
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.resume();
+    }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Acquire) }
+    pub fn wait_if_paused(&self) -> Result<(), ()> {
+        if self.is_cancelled() { return Err(()); }
+        let (lock, cvar) = &self.paused;
+        let guard = lock.lock().unwrap();
+        if !*guard { return Ok(()); }
+        let _guard = cvar.wait_while(guard, |p| *p && !self.is_cancelled()).unwrap();
+        if self.is_cancelled() { Err(()) } else { Ok(()) }
+    }
+}
 
 // ── Hash result ───────────────────────────────────────────────────────────────
 
@@ -178,6 +220,16 @@ impl FileHashes {
     }
 }
 
+/// Information about one conflicting file sent to the UI for the conflict dialog.
+///
+/// `size_match` and `date_match` are `true` only if **all** conflicting destinations
+/// have the same size / modification time as the source. A single mismatch → `false`.
+pub struct ConflictInfo {
+    pub rel_path:   String,
+    pub size_match: bool,
+    pub date_match: bool,
+}
+
 // ── IPC — inter-process communication between engine and UI ──────────────────
 //
 // The copy engine runs on a dedicated OS thread (spawned by main.rs) and
@@ -208,7 +260,7 @@ pub enum Msg {
     NonEmptyDest(Vec<String>),
     /// Pre-copy prompt: specific files already exist in a destination.
     /// Same blocking mechanism as `NonEmptyDest`.
-    Conflicts(Vec<String>),
+    Conflicts(Vec<ConflictInfo>),
 }
 
 /// User replies sent from the UI thread back to the blocked copy engine.
@@ -222,6 +274,12 @@ pub enum Reply {
     Skip,
     /// Abort the entire operation immediately.
     Cancel,
+}
+
+/// Per-destination conflict data — used internally during the pre-copy conflict check.
+struct ConflictEntry {
+    rel_path:    String,
+    dst_matches: Vec<(usize, bool, bool)>, // (dst_idx, size_match, date_match)
 }
 
 /// Returns elapsed time since `start` as a timecode: `HH:MM:SS.d`.
@@ -265,17 +323,19 @@ fn ts(start: &Instant) -> String {
 /// `Msg::Done(false, summary)` at the end. The function never panics —
 /// all error paths send a Done message and return cleanly.
 pub fn run(
-    src:          PathBuf,
-    destinations: Vec<PathBuf>,
-    verify:       bool,
-    gen_md5:      bool,
-    gen_xxh:      bool,
-    gen_csv:      bool,
-    gen_pdf:      bool,
-    gen_html:     bool,
-    settings:     Settings,
-    tx:           Sender<Msg>,
-    reply_rx:     std::sync::mpsc::Receiver<Reply>,
+    src:               PathBuf,
+    destinations:      Vec<PathBuf>,
+    verify:            bool,
+    gen_md5:           bool,
+    gen_xxh:           bool,
+    gen_csv:           bool,
+    gen_pdf:           bool,
+    gen_html:          bool,
+    copy_as_subfolder: bool,
+    settings:          Settings,
+    tx:                Sender<Msg>,
+    reply_rx:          std::sync::mpsc::Receiver<Reply>,
+    pc:                Arc<PauseCancel>,
 ) {
     let start = Instant::now();
 
@@ -316,7 +376,10 @@ pub fn run(
 
     // ── Pre-copy checks ───────────────────────────────────────────────────────
     let non_empty: Vec<String> = destinations.iter()
-        .filter(|d| fs::read_dir(d).map(|mut r| r.next().is_some()).unwrap_or(false))
+        .filter(|d| {
+            let check = if copy_as_subfolder { d.join(&src_name) } else { d.to_path_buf() };
+            fs::read_dir(&check).map(|mut r| r.next().is_some()).unwrap_or(false)
+        })
         .map(|d| d.to_string_lossy().to_string())
         .collect();
     if !non_empty.is_empty() {
@@ -331,17 +394,43 @@ pub fn run(
         }
     }
 
-    let conflict_rels: Vec<String> = files.iter().filter_map(|p| {
+    // Detect conflicts per (file, destination) pair, comparing size and modification time.
+    let conflict_entries: Vec<ConflictEntry> = files.iter().filter_map(|p| {
         let rel = p.strip_prefix(&src).unwrap_or(p);
-        if destinations.iter().any(|d| d.join(rel).exists()) {
-            Some(rel.to_string_lossy().replace('\\', "/"))
-        } else { None }
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let src_meta = fs::metadata(p).ok();
+        let dst_matches: Vec<(usize, bool, bool)> = destinations.iter().enumerate()
+            .filter_map(|(i, d)| {
+                let dst_path = if copy_as_subfolder { d.join(&src_name).join(rel) } else { d.join(rel) };
+                if !dst_path.exists() { return None; }
+                let dst_meta = fs::metadata(&dst_path).ok();
+                let size_match = match (&src_meta, &dst_meta) {
+                    (Some(sm), Some(dm)) => sm.len() == dm.len(),
+                    _ => false,
+                };
+                let date_match = match (&src_meta, &dst_meta) {
+                    (Some(sm), Some(dm)) => sm.modified().ok() == dm.modified().ok(),
+                    _ => false,
+                };
+                Some((i, size_match, date_match))
+            })
+            .collect();
+        if dst_matches.is_empty() { None } else { Some(ConflictEntry { rel_path: rel_str, dst_matches }) }
     }).collect();
 
-    let mut skip_set: std::collections::HashSet<String> =
+    let conflict_infos: Vec<ConflictInfo> = conflict_entries.iter()
+        .map(|e| ConflictInfo {
+            rel_path:   e.rel_path.clone(),
+            size_match: e.dst_matches.iter().all(|(_, sm, _)| *sm),
+            date_match: e.dst_matches.iter().all(|(_, _, dm)| *dm),
+        })
+        .collect();
+
+    // skip_pairs: (rel_path, dst_index) — only skip where size AND date both match.
+    let mut skip_pairs: std::collections::HashSet<(String, usize)> =
         std::collections::HashSet::new();
-    if !conflict_rels.is_empty() {
-        let _ = tx.send(Msg::Conflicts(conflict_rels.clone()));
+    if !conflict_entries.is_empty() {
+        let _ = tx.send(Msg::Conflicts(conflict_infos));
         match reply_rx.recv().unwrap_or(Reply::Cancel) {
             Reply::Cancel => {
                 log(&tx, "✖  Cancelled.\n");
@@ -349,8 +438,14 @@ pub fn run(
                 return;
             }
             Reply::Skip => {
-                for r in &conflict_rels { skip_set.insert(r.clone()); }
-                log(&tx, &format!("△  {} file(s) will be skipped.\n", skip_set.len()));
+                for entry in &conflict_entries {
+                    for &(dst_idx, size_match, date_match) in &entry.dst_matches {
+                        if size_match && date_match {
+                            skip_pairs.insert((entry.rel_path.clone(), dst_idx));
+                        }
+                    }
+                }
+                log(&tx, &format!("△  Skipping {} file×destination pair(s) where size & date match.\n", skip_pairs.len()));
             }
             Reply::Continue => { log(&tx, "△  Conflicting files will be overwritten.\n"); }
         }
@@ -396,6 +491,11 @@ pub fn run(
     let mut copy_errors = 0usize;
 
     for (idx, src_path) in files.iter().enumerate() {
+        if let Err(_) = pc.wait_if_paused() {
+            log(&tx, "✖  Cancelled.\n");
+            let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+            return;
+        }
         let rel     = src_path.strip_prefix(&src).unwrap_or(src_path);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let fsize   = file_sizes[idx];
@@ -407,26 +507,29 @@ pub fn run(
         let ws = fmt_speed(speed_bps(p1_dst_bytes, &mut p1_dst_snap, &mut p1_dst_t, &start));
         let _ = tx.send(Msg::Progress(pct, format!("Copying {} — R: {}  W: {}", rel_str, rs, ws)));
 
-        if skip_set.contains(&rel_str) {
-            // This file was in the conflict set and the user chose "Skip".
-            // We do NOT re-copy it, but we DO add it to `copied` so that:
-            //   1. Phase 2 still verifies the existing destination copy against src.
-            //   2. It appears in the CSV and PDF reports.
-            //   3. Its hash appears in the .md5 / .xxh3 checksum files.
-            //
-            // This is the correct DIT workflow: "I already have this file on disk,
-            // please verify it matches the source without copying again."
-            log(&tx, &format!("  ↷  skipped copy (already exists): {}\n", rel_str));
+        // Filter destinations: exclude those where this file is already complete (size + date match).
+        let dst_entries: Vec<(usize, PathBuf)> = destinations.iter().enumerate()
+            .filter(|(i, _)| !skip_pairs.contains(&(rel_str.clone(), *i)))
+            .map(|(i, d)| (i, if copy_as_subfolder { d.join(&src_name).join(rel) } else { d.join(rel) }))
+            .collect();
+
+        for (i, d) in destinations.iter().enumerate() {
+            if skip_pairs.contains(&(rel_str.clone(), i)) {
+                log(&tx, &format!("  ↷  skipped (size & date match): {} → {}\n", rel_str, d.display()));
+            }
+        }
+
+        if dst_entries.is_empty() {
+            // All destinations already have this file — add to `copied` for verification/reports.
             copied.push((src_path.clone(), rel_str.clone()));
             bytes_done += fsize * n_dst;
-            // `continue` : skip the copy block below, move to the next file.
             continue;
         }
 
-        let dst_paths: Vec<PathBuf> = destinations.iter()
-            .map(|d| d.join(rel)).collect();
+        let dst_paths: Vec<PathBuf> = dst_entries.iter().map(|(_, p)| p.clone()).collect();
+        let dst_indices: Vec<usize> = dst_entries.iter().map(|(i, _)| *i).collect();
 
-        // Create subdirectories in all destinations
+        // Create subdirectories in active destinations only.
         let mut dir_ok = true;
         for dst_path in &dst_paths {
             if let Some(parent) = dst_path.parent() {
@@ -435,54 +538,39 @@ pub fn run(
         }
         if !dir_ok { copy_errors += 1; continue; }
 
-        // ── 1a. Copy to all destinations in parallel ──────────────────────────
-        //
-        // `dst_paths.par_iter()` : rayon parallel iterator — one OS thread per
-        // destination. Each thread calls `fs::copy()` independently.
-        //
-        // `std::fs::copy()` on Linux uses the `copy_file_range()` syscall:
-        //   - Data moves entirely within the kernel — never touches userspace RAM.
-        //   - Typically 2–3× faster than a userspace read/write loop.
-        //   - The kernel can use DMA (Direct Memory Access) to copy between
-        //     page cache entries without involving the CPU at all.
-        //
-        // On macOS: `copyfile(COPYFILE_ALL)` — similar zero-copy semantics.
-        // On Windows: `CopyFileEx()` — Windows cache manager handles the copy.
-        //
-        // `Vec<io::Result<u64>>` : each element is Ok(bytes_copied) or Err(e).
-        // `.collect()` gathers all results in original order (rayon guarantee).
-        // On macOS: copyfile(). On Windows: CopyFileEx().
+        // Copy to active destinations in parallel.
         let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter()
-            .map(|dst_path| copy_file(src_path, dst_path))
+            .map(|dst_path| copy_file(src_path, dst_path, &pc))
             .collect();
 
         let mut any_error = false;
         for (i, res) in copy_results.iter().enumerate() {
             if let Err(e) = res {
-                log(&tx, &format!("  ✖  → {}: {}\n", destinations[i].display(), e));
+                if e.kind() == io::ErrorKind::Interrupted {
+                    log(&tx, "✖  Cancelled.\n");
+                    let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                    return;
+                }
+                log(&tx, &format!("  ✖  → {}: {}\n", destinations[dst_indices[i]].display(), e));
                 any_error = true;
             }
         }
         if any_error { copy_errors += 1; continue; }
 
-        // sync_all() on each destination — calls fsync() at OS level.
-        // Guarantees data AND metadata (timestamps, permissions) are physically
-        // written to storage before we proceed to hash verification.
-        // Runs in parallel across destinations.
         let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
             .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
             .collect();
 
         for (i, res) in sync_results.iter().enumerate() {
             if let Err(e) = res {
-                log(&tx, &format!("  ✖  sync {}: {}\n", destinations[i].display(), e));
+                log(&tx, &format!("  ✖  sync {}: {}\n", destinations[dst_indices[i]].display(), e));
                 copy_errors += 1;
             }
         }
 
         bytes_done   += fsize * n_dst;
         p1_src_bytes += fsize;
-        p1_dst_bytes += fsize * n_dst;
+        p1_dst_bytes += fsize * (dst_entries.len() as u64);
         copied.push((src_path.clone(), rel_str.clone()));
         log(&tx, &format!("  ✓  {}\n", rel_str));
     }
@@ -540,6 +628,11 @@ pub fn run(
     let mut verify_errors = 0usize;
 
     for (file_idx, (src_path, rel_str)) in copied.iter().enumerate() {
+        if let Err(_) = pc.wait_if_paused() {
+            log(&tx, "✖  Cancelled.\n");
+            let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+            return;
+        }
         let fsize = fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
 
         let pct = if grand_total > 0 {
@@ -557,8 +650,13 @@ pub fn run(
         // forward slashes to backslashes. MAIN_SEPARATOR_STR is "/" on Unix, "\\" on Windows.
         let mut all_paths: Vec<PathBuf> = vec![src_path.clone()];
         for dst in &destinations {
-            all_paths.push(dst.join(
-                rel_str.replace('/', std::path::MAIN_SEPARATOR_STR)));
+            let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let path = if copy_as_subfolder {
+                dst.join(&src_name).join(&rel_native)
+            } else {
+                dst.join(&rel_native)
+            };
+            all_paths.push(path);
         }
 
         // Hash all paths in parallel via rayon.
@@ -574,12 +672,17 @@ pub fn run(
         // `Vec<io::Result<FileHashes>>` : one result per path, in original order.
         // rayon guarantees result order matches input order despite parallel execution.
         let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
-            .map(|path| hash_direct(path, gen_md5, gen_xxh))
+            .map(|path| hash_direct(path, gen_md5, gen_xxh, &pc))
             .collect();
 
         let mut read_error = false;
         for (i, res) in hash_results.iter().enumerate() {
             if let Err(e) = res {
+                if e.kind() == io::ErrorKind::Interrupted {
+                    log(&tx, "✖  Cancelled.\n");
+                    let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                    return;
+                }
                 let label = if i == 0 { "source".to_string() }
                             else { destinations[i-1].display().to_string() };
                 log(&tx, &format!("  ✖  read error {} ({}): {}\n", rel_str, label, e));
@@ -693,27 +796,27 @@ pub fn run(
 /// If direct I/O fails (unsupported filesystem, insufficient permissions,
 /// very small files), we fall back to standard buffered I/O automatically.
 /// The hash result is still correct — only the cache-bypass guarantee is lost.
-fn hash_direct(path: &Path, gen_md5: bool, gen_xxh: bool) -> io::Result<FileHashes> {
+fn hash_direct(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
     // Try platform-specific direct I/O first, fall back to buffered on error.
-    let result = hash_direct_impl(path, gen_md5, gen_xxh);
+    let result = hash_direct_impl(path, gen_md5, gen_xxh, pc);
     match result {
         Ok(h)  => Ok(h),
         Err(_) => {
             // Fallback: standard buffered read with pipeline.
             // Still correct (sync_all guarantees cache == disk),
             // just not direct from physical storage.
-            hash_buffered(path, gen_md5, gen_xxh)
+            hash_buffered(path, gen_md5, gen_xxh, pc)
         }
     }
 }
 
 /// Platform-specific direct I/O implementation.
-fn hash_direct_impl(path: &Path, gen_md5: bool, gen_xxh: bool) -> io::Result<FileHashes> {
+fn hash_direct_impl(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
     // Open with cache-bypassing flags — the file is moved into hash_buffered_file()
     // which passes it to the reader thread. No buffer needed here: the pipeline
     // allocates its own per-chunk buffers inside the reader thread.
     let file = open_direct(path)?;
-    hash_buffered_file(file, gen_md5, gen_xxh)
+    hash_buffered_file(file, gen_md5, gen_xxh, pc.clone())
 }
 
 // ── Platform-specific file openers ───────────────────────────────────────────
@@ -837,6 +940,7 @@ fn hash_buffered_file(
     file:    fs::File,
     gen_md5: bool,
     gen_xxh: bool,
+    pc:      Arc<PauseCancel>,
 ) -> io::Result<FileHashes> {
     // twox-hash 2.x: xxhash3_128::Hasher has its own write() and finish_128() methods
     use twox_hash::xxhash3_128::Hasher as Xxh3Hasher;
@@ -917,6 +1021,10 @@ fn hash_buffered_file(
                     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                     unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
                     if tx.send(Ok(chunk)).is_err() { break; }
+                    if pc.wait_if_paused().is_err() {
+                        tx.send(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))).ok();
+                        break;
+                    }
                 }
                 Err(e) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -966,9 +1074,10 @@ fn hash_buffered(
     path:    &Path,
     gen_md5: bool,
     gen_xxh: bool,
+    pc:      &Arc<PauseCancel>,
 ) -> io::Result<FileHashes> {
     let file = fs::File::open(path)?;
-    hash_buffered_file(file, gen_md5, gen_xxh)
+    hash_buffered_file(file, gen_md5, gen_xxh, pc.clone())
 }
 
 // ── Native MD5 implementations ────────────────────────────────────────────────
@@ -1375,32 +1484,90 @@ fn log(tx: &Sender<Msg>, msg: &str) {
     let _ = tx.send(Msg::Log(msg.to_string()));
 }
 
-/// Copy a file with platform-specific read-ahead optimisation.
-///
-/// On Linux: opens the source fd explicitly and calls `posix_fadvise(SEQUENTIAL)`
-/// before copying. This tells the kernel to increase its read-ahead window
-/// (from the default 128 KB to several MB), which significantly improves
-/// throughput on high-latency storage like SD cards and USB drives.
-///
-/// On other platforms: delegates directly to `fs::copy` (which uses
-/// `copyfile` on macOS and `CopyFileEx` on Windows — already optimised).
-fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
+/// Copy a file with pause/cancel support, using chunked copy_file_range on Linux
+/// (64 MiB per call) or a 4 MiB buffered read/write loop on other platforms.
+/// `wait_if_paused()` is checked between each chunk.
+fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
-        let mut src_file = fs::File::open(src)?;
-        // POSIX_FADV_SEQUENTIAL = 2 : request aggressive read-ahead on this fd.
-        // Errors are silently ignored — this is a hint, not a requirement.
+        let src_file = fs::File::open(src)?;
         unsafe { libc::posix_fadvise(src_file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
-        let mut dst_file = fs::OpenOptions::new()
+        let src_mtime = src_file.metadata().ok().and_then(|m| m.modified().ok());
+        let dst_file = fs::OpenOptions::new()
             .write(true).create(true).truncate(true)
             .open(dst)?;
-        io::copy(&mut src_file, &mut dst_file)
+        const CHUNK: usize = 64 * 1024 * 1024;
+        let src_fd = src_file.as_raw_fd();
+        let dst_fd = dst_file.as_raw_fd();
+        let mut total = 0u64;
+        let mut use_cfr = true;
+        'cfr: loop {
+            pc.wait_if_paused()
+                .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "cancelled"))?;
+            let ret = unsafe {
+                libc::copy_file_range(src_fd, std::ptr::null_mut(), dst_fd, std::ptr::null_mut(), CHUNK, 0)
+            };
+            match ret.cmp(&0) {
+                std::cmp::Ordering::Equal   => break,
+                std::cmp::Ordering::Greater => { total += ret as u64; }
+                std::cmp::Ordering::Less    => {
+                    let err = io::Error::last_os_error();
+                    let raw = err.raw_os_error().unwrap_or(0);
+                    if raw == libc::EXDEV || raw == libc::ENOSYS || raw == libc::EOPNOTSUPP {
+                        use_cfr = false;
+                        break 'cfr;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        if !use_cfr {
+            drop(src_file);
+            drop(dst_file);
+            return copy_file_buffered_chunked(src, dst, pc);
+        }
+        if let Some(mtime) = src_mtime { let _ = dst_file.set_modified(mtime); }
+        return Ok(total);
     }
     #[cfg(not(target_os = "linux"))]
     {
-        fs::copy(src, dst)
+        let src_mtime = fs::metadata(src).ok().and_then(|m| m.modified().ok());
+        let total = copy_file_buffered_chunked(src, dst, pc)?;
+        if let Some(mtime) = src_mtime {
+            if let Ok(f) = fs::OpenOptions::new().write(true).open(dst) {
+                let _ = f.set_modified(mtime);
+            }
+        }
+        Ok(total)
     }
+}
+
+/// Buffered chunked copy fallback — 4 MiB chunks with pause/cancel checks.
+fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
+    use std::io::{Read, Write};
+    let mut src_file = fs::File::open(src)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::posix_fadvise(src_file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
+    }
+    let src_mtime = src_file.metadata().ok().and_then(|m| m.modified().ok());
+    let mut dst_file = fs::OpenOptions::new()
+        .write(true).create(true).truncate(true)
+        .open(dst)?;
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut total = 0u64;
+    loop {
+        pc.wait_if_paused()
+            .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "cancelled"))?;
+        let n = src_file.read(&mut buf)?;
+        if n == 0 { break; }
+        dst_file.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+    if let Some(mtime) = src_mtime { let _ = dst_file.set_modified(mtime); }
+    Ok(total)
 }
 
 /// Returns bytes-per-second from a sliding 2-second window.
