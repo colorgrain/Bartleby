@@ -2,11 +2,15 @@
 <img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/82851c10-9c74-4bb5-ba11-b6f00c435657" />
 
 
-<img width="720" height="915" alt="Capture d’écran du 2026-05-03 09-01-04" src="https://github.com/user-attachments/assets/6e46f43c-df60-4870-b0ef-95e4c37b329d" />
-<img width="720" height="915" alt="Capture d’écran du 2026-05-03 09-02-20" src="https://github.com/user-attachments/assets/2f38a4a7-2a8c-47bb-8c54-905196ea9ce1" />
-<img width="720" height="712" alt="Capture d’écran du 2026-05-03 09-02-41" src="https://github.com/user-attachments/assets/9722a986-4f2e-47b8-8c11-777f32457b4f" />
-<img width="720" height="859" alt="Capture d’écran du 2026-05-03 09-03-28" src="https://github.com/user-attachments/assets/1e3c1147-941d-4bd2-8d62-bdaaaa1ce399" />
-<img width="720" height="859" alt="Capture d’écran du 2026-05-03 09-03-39" src="https://github.com/user-attachments/assets/f703fddc-475d-44b0-9dd8-ae2fc3c8d963" />
+<img width="2200" height="1464" alt="Bartleby 010-3_1" src="https://github.com/user-attachments/assets/c19d7ea2-f891-424d-aad4-456abb4ab19d" />
+<img width="2200" height="1464" alt="Bartleby 010-3_2" src="https://github.com/user-attachments/assets/343877f5-6367-4f56-83f3-cc4c79d175f3" />
+<img width="2200" height="1464" alt="Bartleby 010-3_3" src="https://github.com/user-attachments/assets/81668e62-6dcc-4d54-b1d3-ccbacc18d4c6" />
+<img width="2200" height="1464" alt="Bartleby 010-3_4" src="https://github.com/user-attachments/assets/35c0ccec-39fe-4c26-89f9-70cd9209a372" />
+<img width="2200" height="1464" alt="Bartleby 010-3_5" src="https://github.com/user-attachments/assets/06dc2b6c-c1ec-44c8-81b1-c266c70deee5" />
+<img width="2200" height="1464" alt="Bartleby 010-3_6" src="https://github.com/user-attachments/assets/66b51ea7-7366-4061-9b89-18aa99b3e51a" />
+<img width="1768" height="1256" alt="Bartleby 010-3_7" src="https://github.com/user-attachments/assets/2f386321-781c-4aae-914e-d19b8e0872ec" />
+
+
 
 
 > **Beta software** — Bartleby is under active development. Expect rough edges, missing features, and breaking changes between releases. Use at your own risk in production workflows.
