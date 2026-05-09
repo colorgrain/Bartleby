@@ -121,19 +121,12 @@ pub struct Settings {
     /// two-column text layout without a central image.
     pub logo_path: String,
 
-    /// Primary accent colour for PDF reports, stored as a CSS hex string (e.g. "#1F9EDE").
+    /// Accent colour for PDF/HTML reports, stored as a CSS hex string (e.g. "#1F9EDE").
     ///
-    /// Used for the column header row background and the page footer header band.
+    /// Used for the column header row background, footer rule, and decorative rules.
     /// Defaults to the Bartleby blue (#1F9EDE / RGB 0.122, 0.620, 0.871).
     /// Must be a valid 6-digit hex colour with leading "#".
     pub accent_color_1: String,
-
-    /// Secondary accent colour for PDF reports, stored as a CSS hex string (e.g. "#99C7DE").
-    ///
-    /// Used for the thin decorative horizontal rules above/below the data table
-    /// and in the page footer. Defaults to the Bartleby light cyan (#99C7DE).
-    /// Must be a valid 6-digit hex colour with leading "#".
-    pub accent_color_2: String,
 
     // ── Active report columns ─────────────────────────────────────────────────
     //
@@ -285,10 +278,7 @@ impl Default for Settings {
             email:         String::new(),
             phone:         String::new(),
             logo_path:     String::new(), // no logo by default — user must opt in via Settings
-            // Default accent colours match the original Bartleby cyan/blue palette.
-            // Stored as CSS hex strings so they can be read/written by the JS color picker.
-            accent_color_1: "#1F9EDE".to_string(), // Bartleby blue  — column headers
-            accent_color_2: "#99C7DE".to_string(), // Bartleby cyan  — decorative rules
+            accent_color_1: "#1F9EDE".to_string(), // Bartleby blue — column headers + rules
 
             // All metadata columns enabled — show everything by default.
             col_name:        true,

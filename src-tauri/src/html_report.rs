@@ -17,7 +17,7 @@
 //! composite them against the table row background naturally.
 
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ::image::imageops::FilterType;
@@ -239,26 +239,56 @@ fn html_sort_key(rel: &str) -> (String, String) {
     (dir, name)
 }
 
+/// Allows only safe inline formatting tags; converts block elements to `<br>`.
+/// Prevents any XSS / script injection in the generated HTML report.
+fn sanitize_comment(html: &str) -> String {
+    let mut result = String::new();
+    let mut chars = html.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '<' { result.push(ch); continue; }
+        let mut closing = false;
+        if chars.peek() == Some(&'/') { chars.next(); closing = true; }
+        let mut tag = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '/' { break; }
+            tag.push(c); chars.next();
+        }
+        while let Some(c) = chars.next() { if c == '>' { break; } }
+        match tag.to_lowercase().as_str() {
+            "b" | "strong" => result.push_str(if closing { "</b>" } else { "<b>" }),
+            "i" | "em"     => result.push_str(if closing { "</i>" } else { "<i>" }),
+            "u"            => result.push_str(if closing { "</u>" } else { "<u>" }),
+            "br" | "div" | "p" | "li" => result.push_str("<br>"),
+            _              => {} // strip all other tags
+        }
+    }
+    // Collapse consecutive <br> tags, then trim leading/trailing
+    while result.contains("<br><br>") { result = result.replace("<br><br>", "<br>"); }
+    let s = result.trim_start_matches("<br>").trim_end_matches("<br>").trim();
+    s.to_string()
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn write_html(
-    dst_dir:  &Path,
-    src_name: &str,
-    src_path: &Path,
-    entries:  &[(FileMeta, String, String, String, Option<bool>)],
-    settings: &Settings,
-    gen_md5:  bool,
-    gen_xxh:  bool,
+    dst_dir:         &Path,
+    src_name:        &str,
+    src_path:        &Path,
+    src_total_bytes: u64,
+    destinations:    &[PathBuf],
+    entries:         &[(FileMeta, String, String, String, Option<bool>)],
+    settings:        &Settings,
+    gen_md5:         bool,
+    gen_xxh:         bool,
+    comment:         &str,
 ) -> io::Result<()> {
     let out_path = dst_dir.join(format!("{}_report.html", src_name));
     let mut out  = std::fs::File::create(&out_path)?;
 
-    let now = Local::now().format("%Y-%m-%d  %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d at %I:%M %p").to_string();
 
     let (r1, g1, b1) = hex_to_rgb(&settings.accent_color_1);
-    let (r2, g2, b2) = hex_to_rgb(&settings.accent_color_2);
     let a1 = format!("rgb({},{},{})", r1, g1, b1);
-    let a2 = format!("rgb({},{},{})", r2, g2, b2);
 
     let checksum_header = if gen_md5 && gen_xxh { "Checksum" }
                           else if gen_md5        { "MD5" }
@@ -271,14 +301,18 @@ pub fn write_html(
     let css = format!(r#"
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#222;background:#fff}}
-#header{{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:2px solid {a2}}}
-#header-left h1{{font-size:15px;font-weight:bold;color:#000;text-transform:uppercase}}
-#header-left p.report-type{{font-size:9px;font-weight:bold;color:#333;margin-top:1px}}
-#header-left p{{font-size:9px;color:#555;margin-top:2px}}
-#header-center img{{max-height:48px;max-width:160px;object-fit:contain}}
-#header-right{{text-align:right;font-size:9px;color:#444;line-height:1.6}}
-#header-right .company-name{{font-size:12px;font-weight:bold;color:#222}}
-.rule{{height:2px;background:{a2};margin:0}}
+#header{{padding:10px 16px 10px}}
+#header-company-block{{margin-bottom:8px}}
+#header-logo{{margin-bottom:3px}}
+#header-logo img{{max-height:36px;max-width:110px;object-fit:contain;display:block}}
+#header-company{{font-size:13px;font-weight:bold;color:#111;text-transform:uppercase;margin-bottom:1px}}
+#header-contact{{font-size:9px;color:#555}}
+#header-center{{text-align:center;margin-top:6px}}
+#header-center h1{{font-size:16px;font-weight:bold;color:#000;text-transform:uppercase;display:inline-block;border-bottom:2px solid #000;padding-bottom:1px;margin-bottom:4px}}
+#header-center .report-line{{font-size:10px;font-weight:bold;color:#333;margin-top:3px}}
+#header-center .src-line{{font-size:9px;color:#555;margin-top:2px}}
+#header-center .dst-line{{font-size:9px;color:#666;margin-top:1px}}
+.rule{{height:2px;background:{a1};margin:0}}
 table{{width:100%;border-collapse:collapse;margin-top:0}}
 th{{background:{a1};color:#fff;padding:4px 5px;text-align:left;font-size:9px;font-weight:bold;white-space:nowrap}}
 td{{padding:3px 5px;vertical-align:middle;border-bottom:1px solid #e0e0e0;font-size:9px}}
@@ -292,7 +326,7 @@ td.thumb .fallback{{width:60px;height:38px;border-radius:3px;margin:auto}}
 td.status{{width:24px;text-align:center;font-size:11px}}
 td.hash{{font-family:monospace;font-size:7.5px;word-break:break-all;max-width:140px}}
 td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
-#footer{{margin-top:6px;padding:4px 16px;border-top:2px solid {a2};font-size:8px;color:#888;display:flex;justify-content:space-between}}
+#footer{{margin-top:6px;padding:4px 16px;border-top:2px solid {a1};font-size:8px;color:#888;display:flex;justify-content:space-between}}
 @media print{{
   @page{{size:A4 landscape;margin:10mm}}
   body{{font-size:8px}}
@@ -300,7 +334,7 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
   td,th{{padding:2px 4px}}
   td.thumb img{{max-width:60px;max-height:36px}}
 }}
-"#, a1 = a1, a2 = a2);
+"#, a1 = a1);
 
     // ── HTML head ─────────────────────────────────────────────────────────────
     write!(out, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")?;
@@ -312,33 +346,58 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     // ── Header ────────────────────────────────────────────────────────────────
     write!(out, "<div id=\"header\">\n")?;
 
-    // Left: project title + source
-    write!(out, "<div id=\"header-left\">\n")?;
-    if !settings.project_title.is_empty() {
-        write!(out, "<h1>{}</h1>\n", he(&settings.project_title.to_uppercase()))?;
-    } else {
-        write!(out, "<h1>{}</h1>\n", he(&src_name.to_uppercase()))?;
+    // Company block — top-left (logo, name, contact one line) — rendered first
+    write!(out, "<div id=\"header-company-block\">\n")?;
+    if let Some(logo_uri) = logo_data_uri(&settings.logo_path) {
+        write!(out, "<div id=\"header-logo\"><img src=\"{}\" alt=\"logo\"></div>\n", logo_uri)?;
     }
-    write!(out, "<p class=\"report-type\">BACKUP REPORT</p>\n")?;
-    write!(out, "<p>Source: {}</p>\n", he(&src_path.to_string_lossy()))?;
-    write!(out, "<p>Generated: {}</p>\n", now)?;
+    if !settings.company.is_empty() {
+        write!(out, "<div id=\"header-company\">{}</div>\n", he(&settings.company.to_uppercase()))?;
+    }
+    let contact_line: Vec<&str> = [
+        settings.contact_name.as_str(),
+        settings.email.as_str(),
+        settings.phone.as_str(),
+    ]
+    .iter()
+    .filter(|s| !s.is_empty())
+    .copied()
+    .collect();
+    if !contact_line.is_empty() {
+        write!(out, "<div id=\"header-contact\">{}</div>\n", he(&contact_line.join(" / ")))?;
+    }
+    write!(out, "</div>\n")?; // #header-company-block
+
+    // Project / report block — centered
+    write!(out, "<div id=\"header-center\">\n")?;
+    let project_display = if !settings.project_title.is_empty() {
+        settings.project_title.to_uppercase()
+    } else {
+        src_name.to_uppercase()
+    };
+    write!(out, "<h1>{}</h1>\n", he(&project_display))?;
+    write!(out, "<p class=\"report-line\">Backup Report &ndash; {}</p>\n", he(&now))?;
+    let size_str = crate::metadata::format_size(src_total_bytes);
+    write!(out, "<p class=\"src-line\">Source : {}  &ndash;  {}</p>\n",
+        he(&src_path.to_string_lossy()), he(&size_str))?;
+    for (i, dst) in destinations.iter().enumerate() {
+        write!(out, "<p class=\"dst-line\">Destination {} : {}</p>\n",
+            i + 1, he(&dst.to_string_lossy()))?;
+    }
     write!(out, "</div>\n")?;
 
-    // Centre: logo (if any)
-    if let Some(logo_uri) = logo_data_uri(&settings.logo_path) {
-        write!(out, "<div id=\"header-center\"><img src=\"{}\" alt=\"logo\"></div>\n", logo_uri)?;
-    } else {
-        write!(out, "<div id=\"header-center\"></div>\n")?;
-    }
+    write!(out, "</div>\n")?; // #header
 
-    // Right: company / contact
-    write!(out, "<div id=\"header-right\">\n")?;
-    if !settings.company.is_empty()      { write!(out, "<span class=\"company-name\">{}</span><br>\n", he(&settings.company))?; }
-    if !settings.contact_name.is_empty() { write!(out, "{}<br>\n", he(&settings.contact_name))?; }
-    if !settings.email.is_empty()        { write!(out, "{}<br>\n", he(&settings.email))?; }
-    if !settings.phone.is_empty()        { write!(out, "{}<br>\n", he(&settings.phone))?; }
-    write!(out, "</div>\n</div>\n")?;
-    write!(out, "<div class=\"rule\"></div>\n")?;
+    // ── Comment block (if present) — BEFORE the coloured rule ────────────────
+    let safe_comment = sanitize_comment(comment);
+    if !safe_comment.is_empty() {
+        write!(out,
+            "<div id=\"report-comment\" style=\"padding:6px 16px 10px;font-size:9px;line-height:1.6;\">\
+            <div style=\"font-weight:bold;text-decoration:underline;margin-bottom:2px;\">Comments:</div>\
+            <div>{note}</div></div>\n",
+            note = safe_comment
+        )?;
+    }
 
     // ── Table ─────────────────────────────────────────────────────────────────
     write!(out, "<table>\n<thead><tr>\n")?;

@@ -11,12 +11,13 @@
 //!     ┌── Copy to dst1 ──┐                                                  
 //!     ├── Copy to dst2 ──┤  ← rayon parallel per destination               
 //!     └── Copy to dstN ──┘                                                  
-//!     sync_all(dst1, dst2, dstN)  ← fsync: data+metadata on physical disk  
-//!                                                                            
-//! Phase 2 ── Integrity verification ──────────────────────────────────────  
-//!   For each file (sequentially):                                           
-//!     ┌── hash(src)  ──┐                                                    
-//!     ├── hash(dst1) ──┤  ← rayon parallel, O_DIRECT bypasses page cache   
+//!   syncfs(dst1) … syncfs(dstN)  ← one call per filesystem, after all files
+//!
+//! Phase 2 ── Integrity verification ──────────────────────────────────────
+//!   [Linux/FUSE: fadvise(DONTNEED) per FUSE path before each hash]
+//!   For each file (sequentially):
+//!     ┌── hash(src)  ──┐
+//!     ├── hash(dst1) ──┤  ← rayon parallel, O_DIRECT or fadvise+buffered
 //!     └── hash(dstN) ──┘                                                    
 //!     compare: src_hash == dst1_hash == dstN_hash ?                        
 //!                                                                            
@@ -33,10 +34,25 @@
 //!
 //! ## Why O_DIRECT for hashing?
 //!
-//! After `sync_all()`, the kernel page cache and physical disk are identical.
-//! However, reading through the cache would hash RAM copies of the data.
-//! O_DIRECT forces reads directly from the storage device, making the
-//! verification a true end-to-end integrity check.
+//! After `syncfs()` (Linux) or `sync_all()` (other platforms), the kernel page
+//! cache and physical disk are identical. However, reading through the cache
+//! would hash RAM copies of the data rather than verifying the physical disk.
+//! O_DIRECT forces reads directly from the storage device for a true end-to-end
+//! integrity check.
+//!
+//! ## FUSE filesystems (Linux: ntfs-3g, fuse-exfat …)
+//!
+//! O_DIRECT fails with EINVAL on FUSE filesystems (ntfs-3g, fuse-exfat, sshfs).
+//! Two mitigations are applied on Linux when a FUSE destination is detected:
+//!
+//! 1. **Phase 1**: `syncfs()` replaces `sync_all()` per file. One flush per
+//!    filesystem covers all files at once. This avoids the ntfs-3g performance
+//!    cliff where every `fsync()` triggers a full FUSE cache flush.
+//!
+//! 2. **Phase 2**: `posix_fadvise(FADV_DONTNEED)` is called on each FUSE-backed
+//!    path before hashing. This evicts the pages from the OS page cache so the
+//!    subsequent buffered read is forced through the FUSE driver to the physical
+//!    disk — restoring the disk-to-disk guarantee despite the absence of O_DIRECT.
 //!
 //! ## Hash algorithms
 //!
@@ -308,9 +324,10 @@ fn ts(start: &Instant) -> String {
 /// - `src`          : absolute path to the source directory to copy.
 /// - `destinations` : list of destination root directories (1 or more).
 /// - `verify`       : if true, run Phase 2 (hash + comparison). Always equals
-///                    `gen_md5 || gen_xxh` — pre-computed by the caller.
+///                    `gen_md5 || gen_xxh || gen_size` — pre-computed by the caller.
 /// - `gen_md5`      : compute MD5, verify destination, write `.md5` file.
 /// - `gen_xxh`      : compute XXH3-128, verify destination, write `.xxh3` file.
+/// - `gen_size`     : compare source vs destination file sizes (fast, no checksum file).
 /// - `gen_csv`      : generate a `.csv` metadata table report.
 /// - `gen_pdf`      : generate a `.pdf` visual report with thumbnails.
 /// - `gen_html`     : generate a self-contained `.html` report with thumbnails.
@@ -328,10 +345,12 @@ pub fn run(
     verify:            bool,
     gen_md5:           bool,
     gen_xxh:           bool,
+    gen_size:          bool,
     gen_csv:           bool,
     gen_pdf:           bool,
     gen_html:          bool,
     copy_as_subfolder: bool,
+    comment:           String,
     settings:          Settings,
     tx:                Sender<Msg>,
     reply_rx:          std::sync::mpsc::Receiver<Reply>,
@@ -341,8 +360,9 @@ pub fn run(
 
     log(&tx, &format!("→  Source : {}\n", src.display()));
     for dst in &destinations { log(&tx, &format!("→  Dest   : {}\n", dst.display())); }
-    if gen_md5 { log(&tx, "→  Hash   : MD5\n"); }
-    if gen_xxh { log(&tx, "→  Hash   : XXH3-128\n"); }
+    if gen_md5  { log(&tx, "→  Hash   : MD5\n"); }
+    if gen_xxh  { log(&tx, "→  Hash   : XXH3-128\n"); }
+    if gen_size { log(&tx, "→  Verify : file size\n"); }
     log(&tx, "\n");
 
     let src_name = src.file_name()
@@ -457,8 +477,9 @@ pub fn run(
         .collect();
     let total_bytes: u64 = file_sizes.iter().sum();
     let n_dst = destinations.len() as u64;
+    // gen_size Phase 2 is pure stat() calls — no bytes read, no progress weight.
     let grand_total = total_bytes * n_dst
-        + if verify { total_bytes * (1 + n_dst) } else { 0 };
+        + if gen_md5 || gen_xxh { total_bytes * (1 + n_dst) } else { 0 };
     let mut bytes_done: u64 = 0;
 
     // Phase 1 — separate read (source) and write (destinations) byte counters
@@ -482,9 +503,49 @@ pub fn run(
     // each destination gets its own thread. Efficient when destinations are
     // on separate buses (USB, Thunderbolt, NVMe).
     //
-    // After each file: sync_all() flushes data + metadata to physical storage.
-    // This is the guarantee that what we later hash is what is on disk.
+    // Linux sync strategy: instead of sync_all() (fsync) after each individual
+    // file, a single syncfs() per destination filesystem is issued at the END
+    // of the whole copy loop. syncfs(2) flushes all dirty pages on the filesystem
+    // in one kernel round-trip, equivalent to fsync() on every written file but
+    // with far fewer IPC transitions to FUSE daemons (ntfs-3g, fuse-exfat) where
+    // each fsync triggers a full flush and is very expensive.
+    //
+    // Other platforms: sync_all() (fsync) is called per-file as before, giving
+    // per-file crash-safety granularity.
     // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Linux: detect FUSE-mounted filesystems ────────────────────────────────
+    //
+    // FUSE filesystems (ntfs-3g, fuse-exfat, sshfs …) have two critical quirks:
+    //
+    //   1. O_DIRECT returns EINVAL: Phase 2 hash_direct() falls back to buffered
+    //      I/O, which reads from the page cache instead of the physical disk.
+    //      Without mitigation, this breaks the disk-to-disk integrity guarantee.
+    //
+    //   2. fsync is slow: ntfs-3g serialises every fsync through the FUSE daemon,
+    //      making N×M per-file fsync calls very expensive (N files × M destinations).
+    //
+    // Mitigations applied when FUSE is detected:
+    //   • Phase 1 end   : syncfs() once per destination filesystem (see below).
+    //   • Phase 2 start : posix_fadvise(FADV_DONTNEED) on each FUSE path before
+    //                     hashing, evicting pages so the buffered read hits disk.
+    //
+    // FUSE_SUPER_MAGIC = 0x65735546 (linux/magic.h) — reported by all FUSE mounts.
+    #[cfg(target_os = "linux")]
+    let (fuse_src, fuse_dests, any_fuse) = {
+        let src_fuse   = is_fuse_path(&src);
+        let dests_fuse: Vec<bool> = destinations.iter().map(|d| is_fuse_path(d)).collect();
+        let any        = src_fuse || dests_fuse.iter().any(|&f| f);
+        (src_fuse, dests_fuse, any)
+    };
+
+    #[cfg(target_os = "linux")]
+    if any_fuse {
+        log(&tx, "△  FUSE filesystem detected (e.g. ntfs-3g)\n");
+        log(&tx, "   Phase 1: syncfs per filesystem instead of per-file fsync\n");
+        log(&tx, "   Phase 2: fadvise(DONTNEED) before each hash to ensure disk reads\n\n");
+    }
+
     log(&tx, &format!("── Phase 1 — Copy {} ──────────────────────\n", ts(&start)));
 
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
@@ -557,14 +618,27 @@ pub fn run(
         }
         if any_error { copy_errors += 1; continue; }
 
-        let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
-            .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
-            .collect();
-
-        for (i, res) in sync_results.iter().enumerate() {
-            if let Err(e) = res {
-                log(&tx, &format!("  ✖  sync {}: {}\n", destinations[dst_indices[i]].display(), e));
-                copy_errors += 1;
+        // On non-Linux: fsync each destination file immediately after copy.
+        // Per-file fsync gives crash-safety granularity: if the process is
+        // killed mid-transfer, every file copied so far is safely on disk.
+        //
+        // On Linux: per-file fsync is intentionally omitted here. A single
+        // syncfs() call after *all* files are copied (see below) replaces
+        // N×M fsync calls. This is far more efficient on FUSE filesystems
+        // where every fsync triggers a round-trip through the FUSE daemon.
+        // syncfs(2) provides the same durability guarantee: all dirty pages
+        // on the filesystem are flushed to physical storage in one pass.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
+                .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
+                .collect();
+            for (i, res) in sync_results.iter().enumerate() {
+                if let Err(e) = res {
+                    log(&tx, &format!("  ✖  sync {}: {}\n",
+                        destinations[dst_indices[i]].display(), e));
+                    copy_errors += 1;
+                }
             }
         }
 
@@ -573,6 +647,47 @@ pub fn run(
         p1_dst_bytes += fsize * (dst_entries.len() as u64);
         copied.push((src_path.clone(), rel_str.clone()));
         log(&tx, &format!("  ✓  {}\n", rel_str));
+    }
+
+    // ── Linux: single syncfs() per destination filesystem ────────────────────
+    //
+    // All file copies are now buffered in the kernel page cache (data is correct
+    // in RAM, not yet guaranteed on physical disk). We flush everything at once
+    // with syncfs(2), which is equivalent to calling fsync() on every written
+    // file on that filesystem, but in one kernel round-trip instead of N×M.
+    //
+    // We deduplicate by st_dev (device number): two destination paths that share
+    // the same mounted filesystem (same st_dev) need only one syncfs() call.
+    // In the common case — each destination on a separate drive — there is one
+    // syncfs() per destination, matching the previous per-file fsync() count.
+    //
+    // syncfs() is called unconditionally, even when verify=false: the user always
+    // wants their data persisted on disk, regardless of hash verification.
+    //
+    // If syncfs() fails, we log a warning and continue. Phase 2 (hash comparison)
+    // will detect any data corruption caused by the incomplete flush. The error
+    // is not counted as a copy_error because the write() calls all succeeded —
+    // the data is correct in the kernel buffer; only the flush to disk is uncertain.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // Track which physical devices have already been synced.
+        // st_dev uniquely identifies a mounted filesystem on Linux.
+        let mut synced_devs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for dst in &destinations {
+            // stat() the destination root to obtain its device number.
+            // On error (destination was never created), skip silently.
+            let dev = fs::metadata(dst).map(|m| m.dev()).unwrap_or(0);
+            if synced_devs.insert(dev) {
+                // This device has not been synced yet — flush it now.
+                if let Err(e) = syncfs_dir(dst) {
+                    log(&tx, &format!(
+                        "  △  syncfs {} failed: {} (Phase 2 will verify integrity)\n",
+                        dst.display(), e));
+                }
+            }
+            // dev == 0 or already synced: skip without logging (normal case).
+        }
     }
 
     log(&tx, &format!("\n── Phase 1 complete {} ─────────────────────\n", ts(&start)));
@@ -600,9 +715,9 @@ pub fn run(
     if !verify {
         let no_hashes: Vec<(FileHashes, bool)> =
             copied.iter().map(|_| (FileHashes::default(), true)).collect();
-        generate_reports(&tx, &destinations, &src_name, &src,
+        generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                          &meta_entries, &no_hashes,
-                         gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, false, &settings);
+                         gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, false, &comment, &settings);
         let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
             copied.len(), destinations.len());
         log(&tx, &format!("\n{}\n", summary));
@@ -612,13 +727,16 @@ pub fn run(
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // PHASE 2 — Hash from physical storage (bypassing OS page cache)
+    // PHASE 2 — Verification
     //
-    // Reads use O_DIRECT on Linux, F_NOCACHE on macOS, FILE_FLAG_NO_BUFFERING
-    // on Windows. This ensures we hash what is physically on disk, not cached RAM.
+    // Two paths depending on what the user requested:
     //
-    // For each file: source + all destinations are hashed in parallel.
-    // MD5 and XXH3 are computed simultaneously in a single read pass.
+    // A) Size check (gen_size): compare source vs destination file sizes via
+    //    fs::metadata() — no disk reads, completes in milliseconds.
+    //
+    // B) Hash check (gen_md5 / gen_xxh): re-read source and all destinations
+    //    with O_DIRECT / F_NOCACHE / FILE_FLAG_NO_BUFFERING to hash what is
+    //    physically on disk, then compare digests.
     // ══════════════════════════════════════════════════════════════════════════
     log(&tx, &format!("\n── Phase 2 — Verification {} ──────────────\n", ts(&start)));
 
@@ -627,107 +745,173 @@ pub fn run(
         vec![(FileHashes::default(), true); n_files];
     let mut verify_errors = 0usize;
 
-    for (file_idx, (src_path, rel_str)) in copied.iter().enumerate() {
-        if let Err(_) = pc.wait_if_paused() {
-            log(&tx, "✖  Cancelled.\n");
-            let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
-            return;
-        }
-        let fsize = fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
+    if gen_size {
+        // ── Path A: fast file-size comparison ────────────────────────────────
+        for (file_idx, (_src_path, rel_str)) in copied.iter().enumerate() {
+            if let Err(_) = pc.wait_if_paused() {
+                log(&tx, "✖  Cancelled.\n");
+                let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                return;
+            }
+            let src_size = file_sizes[file_idx];
 
-        let pct = if grand_total > 0 {
-            (bytes_done as f64 / grand_total as f64).min(0.98)
-        } else { 0.0 };
-        let vs = fmt_speed(speed_bps(p2_bytes, &mut p2_snap, &mut p2_t, &start));
-        let _ = tx.send(Msg::Progress(pct,
-            format!("Verifying {}/{} — {} — R: {}", file_idx + 1, n_files, rel_str, vs)));
+            let pct = if grand_total > 0 {
+                (bytes_done as f64 / grand_total as f64).min(0.98)
+            } else { 0.98 };
+            let _ = tx.send(Msg::Progress(pct,
+                format!("Checking size {}/{} — {}", file_idx + 1, n_files, rel_str)));
 
-        // Build the list of paths to hash: [source, destination1, destination2, …]
-        // `vec![src_path.clone()]` initialises a Vec with one element (the source).
-        // We then append each destination path, reconstructed from the relative path.
-        //
-        // `rel_str.replace('/', MAIN_SEPARATOR_STR)` : on Windows, convert Unix-style
-        // forward slashes to backslashes. MAIN_SEPARATOR_STR is "/" on Unix, "\\" on Windows.
-        let mut all_paths: Vec<PathBuf> = vec![src_path.clone()];
-        for dst in &destinations {
-            let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
-            let path = if copy_as_subfolder {
-                dst.join(&src_name).join(&rel_native)
-            } else {
-                dst.join(&rel_native)
-            };
-            all_paths.push(path);
-        }
-
-        // Hash all paths in parallel via rayon.
-        //
-        // `all_paths.par_iter()` : rayon distributes the hash operations across
-        // CPU cores. For 1 source + 2 destinations, 3 threads hash simultaneously.
-        //
-        // Each rayon closure calls `hash_direct()` which:
-        //   1. Opens the file with O_DIRECT (bypasses page cache → reads from disk)
-        //   2. Spawns an internal reader thread (pipeline: read+hash overlap)
-        //   3. Returns the computed FileHashes
-        //
-        // `Vec<io::Result<FileHashes>>` : one result per path, in original order.
-        // rayon guarantees result order matches input order despite parallel execution.
-        let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
-            .map(|path| hash_direct(path, gen_md5, gen_xxh, &pc))
-            .collect();
-
-        let mut read_error = false;
-        for (i, res) in hash_results.iter().enumerate() {
-            if let Err(e) = res {
-                if e.kind() == io::ErrorKind::Interrupted {
-                    log(&tx, "✖  Cancelled.\n");
-                    let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
-                    return;
+            let mut mismatch = false;
+            for (i, dst) in destinations.iter().enumerate() {
+                let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
+                let dst_path = if copy_as_subfolder {
+                    dst.join(&src_name).join(&rel_native)
+                } else {
+                    dst.join(&rel_native)
+                };
+                match fs::metadata(&dst_path) {
+                    Ok(m) if m.len() != src_size => {
+                        log(&tx, &format!(
+                            "  ✖  SIZE MISMATCH — {}\n     src: {} B  dst[{}]: {} B\n",
+                            rel_str, src_size, i + 1, m.len()));
+                        mismatch = true;
+                    }
+                    Err(e) => {
+                        log(&tx, &format!(
+                            "  ✖  stat error {} (dst[{}]): {}\n", rel_str, i + 1, e));
+                        mismatch = true;
+                    }
+                    _ => {}
                 }
-                let label = if i == 0 { "source".to_string() }
-                            else { destinations[i-1].display().to_string() };
-                log(&tx, &format!("  ✖  read error {} ({}): {}\n", rel_str, label, e));
-                read_error = true;
+            }
+            if mismatch {
+                verify_errors += 1;
+                results[file_idx].1 = false;
+            } else {
+                log(&tx, &format!("  ✓  {}  [{} B]\n", rel_str, src_size));
             }
         }
-        if read_error {
-            verify_errors += 1;
-            results[file_idx].1 = false;
+    } else {
+        // ── Path B: hash from physical storage ───────────────────────────────
+        //
+        // Reads use O_DIRECT on Linux, F_NOCACHE on macOS, FILE_FLAG_NO_BUFFERING
+        // on Windows. This ensures we hash what is physically on disk, not cached RAM.
+        //
+        // For each file: source + all destinations are hashed in parallel.
+        // MD5 and XXH3 are computed simultaneously in a single read pass.
+        for (file_idx, (src_path, rel_str)) in copied.iter().enumerate() {
+            if let Err(_) = pc.wait_if_paused() {
+                log(&tx, "✖  Cancelled.\n");
+                let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                return;
+            }
+            let fsize = fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
+
+            let pct = if grand_total > 0 {
+                (bytes_done as f64 / grand_total as f64).min(0.98)
+            } else { 0.0 };
+            let vs = fmt_speed(speed_bps(p2_bytes, &mut p2_snap, &mut p2_t, &start));
+            let _ = tx.send(Msg::Progress(pct,
+                format!("Verifying {}/{} — {} — R: {}", file_idx + 1, n_files, rel_str, vs)));
+
+            // Build the list of paths to hash: [source, destination1, destination2, …]
+            let mut all_paths: Vec<PathBuf> = vec![src_path.clone()];
+            for dst in &destinations {
+                let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
+                let path = if copy_as_subfolder {
+                    dst.join(&src_name).join(&rel_native)
+                } else {
+                    dst.join(&rel_native)
+                };
+                all_paths.push(path);
+            }
+
+            // ── Linux: evict FUSE-backed pages from the OS cache before hashing ─
+            //
+            // For non-FUSE paths (ext4, btrfs, XFS …), `hash_direct()` uses O_DIRECT
+            // which bypasses the page cache entirely — eviction is unnecessary.
+            //
+            // For FUSE paths (ntfs-3g, fuse-exfat …), O_DIRECT returns EINVAL, so
+            // `hash_direct()` falls back to standard buffered I/O. Without eviction,
+            // that buffered read would hash the in-RAM page cache copy written during
+            // Phase 1, rather than verifying what is physically on disk.
+            //
+            // `posix_fadvise(FADV_DONTNEED)` asks the kernel to release the cached
+            // pages for this file. After Phase 1's syncfs(), all pages are clean
+            // (written to disk), so the kernel can evict them immediately. The next
+            // read call goes to the FUSE driver → physical disk, restoring the
+            // disk-to-disk integrity guarantee.
+            //
+            // all_paths layout: [0] = source, [1..] = destinations (same order as
+            // `destinations`), so fuse_dests[i-1] maps to all_paths[i] for i >= 1.
+            #[cfg(target_os = "linux")]
+            {
+                for (i, path) in all_paths.iter().enumerate() {
+                    let path_is_fuse = if i == 0 { fuse_src } else { fuse_dests[i - 1] };
+                    if path_is_fuse {
+                        fadvise_dontneed(path);
+                    }
+                }
+            }
+
+            let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
+                .map(|path| hash_direct(path, gen_md5, gen_xxh, &pc))
+                .collect();
+
+            let mut read_error = false;
+            for (i, res) in hash_results.iter().enumerate() {
+                if let Err(e) = res {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        log(&tx, "✖  Cancelled.\n");
+                        let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                        return;
+                    }
+                    let label = if i == 0 { "source".to_string() }
+                                else { destinations[i-1].display().to_string() };
+                    log(&tx, &format!("  ✖  read error {} ({}): {}\n", rel_str, label, e));
+                    read_error = true;
+                }
+            }
+            if read_error {
+                verify_errors += 1;
+                results[file_idx].1 = false;
+                bytes_done += fsize * (1 + n_dst);
+                continue;
+            }
+
+            let hashes: Vec<FileHashes> = hash_results.into_iter()
+                .map(|r| r.unwrap()).collect();
+            let src_hash = &hashes[0];
+
+            let mut mismatch = false;
+            for (i, dst_hash) in hashes[1..].iter().enumerate() {
+                if !src_hash.matches(dst_hash) {
+                    log(&tx, &format!(
+                        "  ✖  MISMATCH — {}\n     src: {}\n     dst[{}]: {}\n",
+                        rel_str, src_hash.short(), i + 1, dst_hash.short()));
+                    mismatch = true;
+                }
+            }
+
+            if mismatch {
+                verify_errors += 1;
+                results[file_idx] = (src_hash.clone(), false);
+            } else {
+                log(&tx, &format!("  ✓  {}  [{}]\n", rel_str, src_hash.short()));
+                results[file_idx] = (src_hash.clone(), true);
+            }
+
             bytes_done += fsize * (1 + n_dst);
-            continue;
+            p2_bytes   += fsize * (1 + n_dst);
         }
-
-        let hashes: Vec<FileHashes> = hash_results.into_iter()
-            .map(|r| r.unwrap()).collect();
-        let src_hash = &hashes[0];
-
-        let mut mismatch = false;
-        for (i, dst_hash) in hashes[1..].iter().enumerate() {
-            if !src_hash.matches(dst_hash) {
-                log(&tx, &format!(
-                    "  ✖  MISMATCH — {}\n     src: {}\n     dst[{}]: {}\n",
-                    rel_str, src_hash.short(), i + 1, dst_hash.short()));
-                mismatch = true;
-            }
-        }
-
-        if mismatch {
-            verify_errors += 1;
-            results[file_idx] = (src_hash.clone(), false);
-        } else {
-            log(&tx, &format!("  ✓  {}  [{}]\n", rel_str, src_hash.short()));
-            results[file_idx] = (src_hash.clone(), true);
-        }
-
-        bytes_done += fsize * (1 + n_dst);
-        p2_bytes   += fsize * (1 + n_dst);
     }
 
     log(&tx, &format!("\n── Phase 2 complete {} ─────────────────────\n", ts(&start)));
 
     // ── Phase 3: reports ──────────────────────────────────────────────────────
-    generate_reports(&tx, &destinations, &src_name, &src,
+    generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                      &meta_entries, &results,
-                     gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, true, &settings);
+                     gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, true, &comment, &settings);
 
     if verify_errors > 0 {
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -740,11 +924,12 @@ pub fn run(
 
     let total_errors = copy_errors + verify_errors;
     let _ = tx.send(Msg::Progress(1.0, "Done".into()));
-    let hash_label = match (gen_md5, gen_xxh) {
-        (true,  true)  => " — MD5 + XXH3 verified",
-        (true,  false) => " — MD5 verified",
-        (false, true)  => " — XXH3 verified",
-        _              => "",
+    let hash_label = match (gen_md5, gen_xxh, gen_size) {
+        (true,  true,  _) => " — MD5 + XXH3 verified",
+        (true,  false, _) => " — MD5 verified",
+        (false, true,  _) => " — XXH3 verified",
+        (false, false, true) => " — size verified",
+        _                    => "",
     };
     if total_errors == 0 {
         let summary = format!("✓  {} file(s) — {} destination(s){}",
@@ -766,11 +951,20 @@ pub fn run(
 ///
 /// ## Why bypass the cache?
 ///
-/// After sync_all(), the page cache == physical disk by definition.
-/// However, reading through the cache means we might be comparing
-/// two identical RAM copies rather than verifying what is on disk.
-/// Direct I/O forces the read to come from the storage device itself,
+/// After `syncfs()` (Linux) or `sync_all()` (other platforms), the page cache
+/// and physical disk are identical. However, reading through the cache means we
+/// might be comparing two identical RAM copies rather than verifying what is on
+/// disk. Direct I/O forces the read to come from the storage device itself,
 /// making the verification a true end-to-end integrity check.
+///
+/// ## FUSE fallback
+///
+/// On FUSE filesystems (ntfs-3g, fuse-exfat …), O_DIRECT returns EINVAL.
+/// The caller (`run()`) must call `posix_fadvise(FADV_DONTNEED)` on the path
+/// before invoking this function. That evicts the pages from the kernel page
+/// cache so that the buffered fallback inside `hash_direct` reads from the FUSE
+/// driver → physical disk, restoring the disk-to-disk guarantee. See
+/// `fadvise_dontneed()` and the Phase 2 loop in `run()`.
 ///
 /// ## Platform implementations
 ///
@@ -803,8 +997,12 @@ fn hash_direct(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>)
         Ok(h)  => Ok(h),
         Err(_) => {
             // Fallback: standard buffered read with pipeline.
-            // Still correct (sync_all guarantees cache == disk),
-            // just not direct from physical storage.
+            // On FUSE filesystems (ntfs-3g, fuse-exfat), O_DIRECT returns EINVAL
+            // and we land here. The caller must have already called
+            // fadvise_dontneed() on this path to evict the page cache,
+            // so this buffered read goes to the FUSE driver → physical disk.
+            // On non-FUSE filesystems, syncfs()/sync_all() guarantees that
+            // cache == disk, so the buffered read is still correct.
             hash_buffered(path, gen_md5, gen_xxh, pc)
         }
     }
@@ -1328,19 +1526,21 @@ impl NativeMd5 {
 /// Alternative: pass a `ReportConfig` struct. Trade-off: more code, no real benefit.
 #[allow(clippy::too_many_arguments)]
 fn generate_reports(
-    tx:           &Sender<Msg>,
-    destinations: &[PathBuf],
-    src_name:     &str,
-    src:          &Path,
-    meta_entries: &[(String, metadata::FileMeta)],
-    hashes:       &[(FileHashes, bool)],
-    gen_csv:      bool,
-    gen_pdf:      bool,
-    gen_html:     bool,
-    gen_md5:      bool,
-    gen_xxh:      bool,
-    has_verify:   bool,
-    settings:     &Settings,
+    tx:              &Sender<Msg>,
+    destinations:    &[PathBuf],
+    src_name:        &str,
+    src:             &Path,
+    total_bytes:     u64,
+    meta_entries:    &[(String, metadata::FileMeta)],
+    hashes:          &[(FileHashes, bool)],
+    gen_csv:         bool,
+    gen_pdf:         bool,
+    gen_html:        bool,
+    gen_md5:         bool,
+    gen_xxh:         bool,
+    has_verify:      bool,
+    comment:         &str,
+    settings:        &Settings,
 ) {
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
     for dst in destinations {
@@ -1370,7 +1570,7 @@ fn generate_reports(
                         (meta.clone(), md5, xxh3, if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(dst, src_name, &csv_entries, settings, gen_md5, gen_xxh) {
+            match metadata::write_csv(dst, src_name, src, total_bytes, destinations, &csv_entries, settings, gen_md5, gen_xxh, comment) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
                     dst.join(format!("{}_report.csv", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
@@ -1389,7 +1589,7 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(dst, src_name, src, &pdf_entries, settings, gen_md5, gen_xxh) {
+            match pdf_report::write_pdf(dst, src_name, src, total_bytes, destinations, &pdf_entries, settings, gen_md5, gen_xxh, comment) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
                     dst.join(format!("{}_report.pdf", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
@@ -1406,7 +1606,7 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(dst, src_name, src, &html_entries, settings, gen_md5, gen_xxh) {
+            match html_report::write_html(dst, src_name, src, total_bytes, destinations, &html_entries, settings, gen_md5, gen_xxh, comment) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
                     dst.join(format!("{}_report.html", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
@@ -1598,5 +1798,147 @@ fn fmt_speed(bps: f64) -> String {
         format!("{:.0} MB/s", bps / 1_048_576.0)
     } else {
         format!("{:.0} KB/s", bps / 1_024.0)
+    }
+}
+
+// ── Linux-only helpers: FUSE detection, page-cache eviction, filesystem sync ──
+
+/// Returns `true` if `path` lives on a FUSE-mounted filesystem.
+///
+/// ## How it works
+///
+/// Calls `statfs(2)` on the path and checks `statfs.f_type` against
+/// `FUSE_SUPER_MAGIC` (0x65735546, defined in `<linux/magic.h>`). Every FUSE
+/// filesystem — ntfs-3g, fuse-exfat, sshfs, encfs, s3fs … — reports this magic
+/// number, regardless of what actual filesystem the FUSE driver implements.
+///
+/// ## Why we detect FUSE
+///
+/// FUSE filesystems have two properties that affect copy correctness/performance:
+///
+/// 1. **O_DIRECT fails** (EINVAL): `hash_direct()` falls back to buffered I/O,
+///    which reads from the kernel page cache instead of the physical disk.
+///    Without mitigation, Phase 2 hashes cached RAM, not actual disk data.
+///
+/// 2. **fsync is expensive**: ntfs-3g serialises every `fsync()` call through
+///    the FUSE daemon. The per-file `sync_all()` pattern in Phase 1 makes N×M
+///    fsync round-trips (N files × M destinations), each triggering a full
+///    cache flush on the FUSE side. On ntfs-3g, this can be 10–100× slower
+///    than on a native kernel filesystem.
+///
+/// ## Return value
+///
+/// Returns `false` on any error (path not found, stat fails, etc.) — the caller
+/// treats a detection failure conservatively as "not FUSE" and uses the standard
+/// code path.
+#[cfg(target_os = "linux")]
+fn is_fuse_path(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    // Build a NUL-terminated C string from the path bytes for the statfs() call.
+    // CString::new() fails if the path contains a NUL byte, which is illegal on
+    // Linux anyway — treat that as "not FUSE".
+    let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(p)  => p,
+        Err(_) => return false,
+    };
+    // SAFETY: `buf` is fully initialised by statfs() on success. We check the
+    // return value before reading any field.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statfs(c_path.as_ptr(), &mut buf) };
+    if ret != 0 { return false; }
+    // FUSE_SUPER_MAGIC = 0x65735546 (little-endian ASCII "UFse").
+    // Cast to u64 for cross-architecture safety: f_type is i32 on 32-bit Linux
+    // and i64 on 64-bit Linux; the constant 0x65735546 fits in both.
+    (buf.f_type as u64) == 0x6573_5546_u64
+}
+
+/// Evicts a file's pages from the OS page cache via `posix_fadvise(FADV_DONTNEED)`.
+///
+/// ## Purpose
+///
+/// After Phase 1 copy, the destination file's data lives in the kernel page cache
+/// (it was just written there). On FUSE filesystems, `O_DIRECT` fails, so
+/// `hash_direct()` falls back to standard buffered I/O. Without eviction, that
+/// buffered read would return the in-RAM cached copy — hashing RAM, not disk.
+///
+/// Calling `fadvise_dontneed` before Phase 2 hashing tells the kernel to release
+/// those pages. The next `read()` on the file goes to the FUSE driver → physical
+/// disk, restoring the disk-to-disk integrity guarantee.
+///
+/// ## Prerequisite: all dirty pages must be flushed first
+///
+/// `FADV_DONTNEED` can only evict **clean** (already-flushed) pages. If dirty
+/// pages still exist, the kernel ignores the hint for those pages.
+/// This is why `syncfs()` is called at the end of Phase 1, before this function:
+/// syncfs flushes all dirty pages to disk, leaving them clean and evictable.
+///
+/// ## Advisory nature
+///
+/// `posix_fadvise` is a hint — the kernel is free to ignore it. In practice on
+/// Linux with a clean page cache, it reliably drops the pages. If eviction fails
+/// silently, the subsequent hash may read from cache instead of disk, but the
+/// hash result is still bit-accurate (cache == disk after syncfs). The only risk
+/// is a false pass if the disk has a hardware write error not reflected in the
+/// cache — that risk is the same as without O_DIRECT.
+///
+/// Errors are silently ignored: this is a best-effort optimisation.
+#[cfg(target_os = "linux")]
+fn fadvise_dontneed(path: &Path) {
+    use std::os::unix::io::AsRawFd;
+    // Open the file read-only to obtain a file descriptor.
+    // The file must exist at this point (it was just copied in Phase 1).
+    if let Ok(f) = fs::File::open(path) {
+        // POSIX_FADV_DONTNEED = 4 (linux/fadvise.h):
+        //   "The specified data will not be accessed in the near future."
+        //   The kernel releases the cached pages for this range.
+        //   Offset 0 + length 0 = the entire file.
+        unsafe {
+            libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
+        // The fd is dropped here. The eviction is not synchronous: the kernel
+        // processes the hint asynchronously, but in practice pages are evicted
+        // before the next read() on a different fd (which hash_direct opens).
+    }
+}
+
+/// Calls `syncfs(2)` on the filesystem containing `path`, flushing all buffered
+/// dirty pages on that filesystem to physical storage.
+///
+/// ## Why syncfs instead of per-file fsync?
+///
+/// `sync_all()` (fsync) flushes one specific file. After N files copied to M
+/// destinations, the traditional approach makes N×M fsync syscalls. On FUSE
+/// filesystems (ntfs-3g), each fsync is forwarded to the FUSE daemon, which
+/// serialises it and writes it through — this is extremely slow.
+///
+/// `syncfs(2)` flushes the **entire filesystem** in one call. The kernel batches
+/// all dirty pages for that mount and writes them in one pass, regardless of how
+/// many files are involved. For a complete transfer of N files to one FUSE
+/// destination, this reduces the number of expensive FUSE daemon round-trips from
+/// N to 1.
+///
+/// ## Durability guarantee
+///
+/// `syncfs()` provides the same physical-disk durability as `fsync()` for all
+/// files currently buffered on the filesystem. After it returns, all data written
+/// during Phase 1 is guaranteed to be on physical storage.
+///
+/// ## Available since Linux 2.6.39 (2011)
+///
+/// All supported Ubuntu/Debian/Fedora/Arch distributions include this syscall.
+/// The `libc` crate exposes it as `libc::syncfs(fd: c_int) -> c_int`.
+#[cfg(target_os = "linux")]
+fn syncfs_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // Open the directory to obtain a file descriptor for syncfs().
+    // `open(path, O_RDONLY)` on a directory is valid on Linux and does not
+    // require write permission — we only need the fd to identify the filesystem.
+    let dir = fs::File::open(path)?;
+    // SAFETY: dir.as_raw_fd() is a valid, open file descriptor.
+    let ret = unsafe { libc::syncfs(dir.as_raw_fd()) };
+    if ret != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }

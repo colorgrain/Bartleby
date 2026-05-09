@@ -112,8 +112,8 @@ use serde::{Serialize, Deserialize};
 // - `Deserialize` → constructs a Rust struct from JSON (received from JavaScript)
 // Both traits are derived (auto-implemented) via `#[derive(…)]` macros.
 
-use tauri::{State, Emitter};
-//           ─────  ───────
+use tauri::{State, Emitter, Manager};
+use tauri::webview::Color;
 //           │      └─ The `Emitter` trait adds the `.emit()` method to `WebviewWindow`.
 //           │         Without this `use`, the method would not be in scope.
 //           └─ `State<T>` is Tauri's dependency-injection wrapper.
@@ -304,6 +304,9 @@ fn main() {
             open_destinations,
             send_notification,
             save_log,
+            get_home_dir,
+            get_volume_info,
+            set_webview_bg,
         ])
 
         // Start the Tauri event loop. This call blocks until the window is closed.
@@ -505,8 +508,11 @@ struct StartCopyArgs {
     /// Generate a `{src_name}_checksum.md5` file in each destination.
     gen_md5:      bool,
     /// Generate a `{src_name}_checksum.xxh3` file in each destination.
-    /// verify = gen_md5 || gen_xxh, pre-computed by JavaScript.
+    /// verify = gen_md5 || gen_xxh || gen_size, pre-computed by JavaScript.
     gen_xxh:      bool,
+    /// Check that each destination file has the same byte count as the source.
+    /// No checksum file is written. Faster than MD5/XXH3 but does not detect bit-rot.
+    gen_size:     bool,
     /// Generate a `{src_name}_report.csv` metadata table in each destination.
     gen_csv:      bool,
     /// Generate a `{src_name}_report.pdf` visual report in each destination.
@@ -517,6 +523,10 @@ struct StartCopyArgs {
     /// When true:  destination/source_name/file.ext
     /// When false: destination/file.ext  (current default)
     copy_as_subfolder: bool,
+    /// Per-job comment/note written into report headers (CSV, PDF, HTML).
+    /// HTML string from the WYSIWYG editor (bold/italic/underline only).
+    #[serde(default)]
+    comment:      String,
     /// Whether to open each destination in the file manager after a successful copy.
     /// This flag is read by JavaScript in the `copy-done` handler, not by Rust.
     #[allow(dead_code)]
@@ -641,12 +651,14 @@ fn start_copy(
     // We copy the booleans into local variables first (booleans are `Copy`, so they
     // can be duplicated without `clone()` — the compiler does it implicitly).
     // This is an explicit documentation of what the two threads each receive.
-    let verify  = args.verify;
-    let gen_md5 = args.gen_md5;
-    let gen_xxh = args.gen_xxh;
+    let verify   = args.verify;
+    let gen_md5  = args.gen_md5;
+    let gen_xxh  = args.gen_xxh;
+    let gen_size = args.gen_size;
     let gen_csv  = args.gen_csv;
     let gen_pdf  = args.gen_pdf;
     let gen_html = args.gen_html;
+    let comment  = args.comment;
     // `args.open_dest` is not read here — it is used by JavaScript in the `copy-done`
     // event handler to decide whether to call `invoke("open_destinations", …)`.
 
@@ -669,13 +681,15 @@ fn start_copy(
         copy_engine::run(
             src_path,                    // absolute source directory path
             dst_paths,                   // list of destination directory paths
-            verify,                      // Phase 2 enabled? (= gen_md5 || gen_xxh)
+            verify,                      // Phase 2 enabled? (= gen_md5 || gen_xxh || gen_size)
             gen_md5,                     // compute MD5 + write .md5 file
             gen_xxh,                     // compute XXH3 + write .xxh3 file
+            gen_size,                    // fast file-size check (no checksum file written)
             gen_csv,                     // generate .csv metadata report?
             gen_pdf,                     // generate .pdf visual report?
             gen_html,                    // generate .html self-contained report?
             args.copy_as_subfolder,      // wrap files inside source folder name?
+            comment,                     // per-job note for report headers
             settings_snapshot,           // snapshot of user settings
             tx,                          // Sender<Msg>: engine pushes progress updates here
             reply_rx,                    // Receiver<Reply>: engine waits for user replies here
@@ -1139,6 +1153,155 @@ fn is_system_dark_mode() -> bool {
     {
         false
     }
+}
+
+/// Sets the WebView compositor background colour — the colour shown for areas not yet
+/// painted by HTML during a window resize. Called by JS whenever the skin or theme changes.
+#[tauri::command]
+fn set_webview_bg(app: tauri::AppHandle, r: u8, g: u8, b: u8) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_background_color(Some(Color(r, g, b, 255)));
+    }
+}
+
+/// Returns the user's home directory as a UTF-8 string, or an empty string if unavailable.
+/// Used by JavaScript to shorten displayed paths: /home/user/FOO → ~/FOO.
+#[tauri::command]
+fn get_home_dir() -> String {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+// ── Volume info ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+struct VolumeInfo {
+    ok:          bool,
+    label:       String,
+    media_type:  String,
+    total_bytes: u64,
+    free_bytes:  u64,
+}
+
+/// Walks up `path` until an existing ancestor is found (for not-yet-created destinations).
+fn nearest_existing(path: &str) -> Option<String> {
+    let mut p = std::path::PathBuf::from(path);
+    for _ in 0..32 {
+        if p.exists() { return Some(p.to_string_lossy().into_owned()); }
+        if !p.pop() { break; }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn vol_space(path: &str) -> Option<(u64, u64)> {
+    use std::ffi::CString;
+    let cpath = CString::new(path).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(cpath.as_ptr(), &mut st) } != 0 { return None; }
+    Some((
+        (st.f_blocks as u64).saturating_mul(st.f_frsize as u64),
+        (st.f_bavail as u64).saturating_mul(st.f_frsize as u64),
+    ))
+}
+
+#[cfg(not(unix))]
+fn vol_space(_path: &str) -> Option<(u64, u64)> { None }
+
+#[cfg(target_os = "linux")]
+fn lsblk_val(line: &str, field: &str) -> String {
+    let key = format!("{}=\"", field);
+    if let Some(s) = line.find(&key) {
+        let rest = &line[s + key.len()..];
+        if let Some(e) = rest.find('"') { return rest[..e].to_string(); }
+    }
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
+fn vol_label_type(path: &str) -> (String, String) {
+    let Ok(out) = std::process::Command::new("lsblk")
+        .args(["-P", "-o", "NAME,MOUNTPOINT,LABEL,ROTA,RM,TRAN,PKNAME"])
+        .output()
+    else { return (String::new(), "Unknown".to_string()); };
+
+    let text  = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Build NAME → TRAN map so partition rows can inherit the parent device's transport.
+    let mut tran_map = std::collections::HashMap::<String, String>::new();
+    for line in &lines {
+        let name = lsblk_val(line, "NAME");
+        let tran = lsblk_val(line, "TRAN");
+        if !name.is_empty() && !tran.is_empty() { tran_map.insert(name, tran); }
+    }
+
+    let path_p = std::path::Path::new(path);
+    let mut best: usize = 0;
+    let mut label = String::new();
+    let mut mtype = "Unknown".to_string();
+
+    for line in &lines {
+        let mp = lsblk_val(line, "MOUNTPOINT");
+        if mp.is_empty() { continue; }
+        if !path_p.starts_with(std::path::Path::new(&*mp)) { continue; }
+        if mp.len() <= best { continue; }
+        best  = mp.len();
+        label = lsblk_val(line, "LABEL");
+        let rota  = lsblk_val(line, "ROTA");
+        let rm    = lsblk_val(line, "RM");
+        let name  = lsblk_val(line, "NAME");
+        let mut tran = lsblk_val(line, "TRAN").to_lowercase();
+        if tran.is_empty() {
+            let pk = lsblk_val(line, "PKNAME");
+            if !pk.is_empty() {
+                tran = tran_map.get(&pk).cloned().unwrap_or_default().to_lowercase();
+            }
+        }
+        mtype = if rota == "1" {
+            "HDD".to_string()
+        } else if tran == "mmc" || name.starts_with("mmcblk") {
+            "SD".to_string()
+        } else if tran == "usb" || rm == "1" {
+            "Flash".to_string()
+        } else {
+            "SSD".to_string()
+        };
+    }
+    (label, mtype)
+}
+
+#[cfg(target_os = "macos")]
+fn vol_label_type(path: &str) -> (String, String) {
+    let Ok(out) = std::process::Command::new("diskutil")
+        .args(["info", path])
+        .output()
+    else { return (String::new(), "Unknown".to_string()); };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let label = text.lines()
+        .find(|l| l.contains("Volume Name:"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let ssd = text.lines().any(|l| l.contains("Solid State:") && l.to_lowercase().contains("yes"));
+    let rem = text.lines().any(|l| l.contains("Removable Media:") && l.to_lowercase().contains("removable"));
+    let mtype = if rem { "Flash" } else if ssd { "SSD" } else { "HDD" };
+    (label, mtype.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn vol_label_type(_path: &str) -> (String, String) {
+    (String::new(), "Unknown".to_string())
+}
+
+#[tauri::command]
+fn get_volume_info(path: String) -> VolumeInfo {
+    let none = VolumeInfo { ok: false, label: String::new(), media_type: String::new(), total_bytes: 0, free_bytes: 0 };
+    let probe = match nearest_existing(&path) { Some(p) => p, None => return none };
+    let (total, free) = match vol_space(&probe) { Some(v) => v, None => return none };
+    let (label, media_type) = vol_label_type(&probe);
+    VolumeInfo { ok: true, label, media_type, total_bytes: total, free_bytes: free }
 }
 
 /// Saves the in-app copy log to a timestamped `.txt` file in the logs directory.

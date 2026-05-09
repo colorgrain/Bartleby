@@ -61,7 +61,7 @@
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 // `Path` : borrowed filesystem path (like `&str`). Always used as `&Path`.
 // Provides: `.extension()`, `.parent()`, `.join()`, `.display()`, etc.
 
@@ -205,11 +205,8 @@ const FS_CELL:  f32 = 6.5;  // ≈ 2.3 mm — smallest readable at A4 printing r
 // Colours are tuples `(f32, f32, f32)` = (Red, Green, Blue).
 // Accessed as `COLOR.0`, `COLOR.1`, `COLOR.2` in function calls.
 
-/// Dark navy blue (#163460) — used for the column header band and header rule backgrounds.
-// Default accent colours — used as fallback when settings hex is invalid.
+// Default accent colour — used as fallback when settings hex is invalid.
 const DEFAULT_ACCENT1: (f32, f32, f32) = (0.122, 0.620, 0.871); // #1F9EDE Bartleby blue
-/// Light cyan (#99C7DE) — used for the decorative horizontal rules above/below the table.
-const DEFAULT_ACCENT2: (f32, f32, f32) = (0.600, 0.780, 0.870); // #99C7DE Bartleby cyan
 /// Light grey (#F1F3F6) — alternating row background for even-numbered rows.
 const ROW_EVEN:   (f32, f32, f32) = (0.945, 0.953, 0.965);
 /// Pure white (#FFFFFF) — alternating row background for odd-numbered rows.
@@ -310,6 +307,163 @@ const AUDIO_EXTS: &[&str] = &[
 /// The `?` operator inside propagates errors to the caller (`copy_engine::run`).
 
 
+/// One styled word parsed from the WYSIWYG comment HTML.
+#[derive(Clone)]
+struct RichWord {
+    text:   String,
+    bold:   bool,
+    italic: bool,  // includes <u> — renders as italic in PDF (no native underline in built-in fonts)
+}
+
+/// Parses HTML comment into a flat sequence of styled words and newline tokens.
+///
+/// Supports `<b>/<strong>`, `<i>/<em>/<u>`, `<br>`, and closing `</div>`/`</p>`.
+/// All other tags are stripped. HTML entities are decoded.
+fn parse_html_to_rich_words(html: &str) -> Vec<RichWord> {
+    let mut out: Vec<RichWord> = Vec::new();
+    let mut bold:   u32 = 0;
+    let mut italic: u32 = 0;
+    let mut buf  = String::new();
+    let mut chars = html.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '<' { buf.push(ch); continue; }
+        // Flush buffered plain text as words
+        for word in buf.split_whitespace() {
+            out.push(RichWord { text: word.to_string(), bold: bold > 0, italic: italic > 0 });
+        }
+        buf.clear();
+        // Parse tag
+        let mut closing = false;
+        if chars.peek() == Some(&'/') { chars.next(); closing = true; }
+        let mut tag = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '>' || c == ' ' || c == '\t' || c == '/' { break; }
+            tag.push(c); chars.next();
+        }
+        while let Some(c) = chars.next() { if c == '>' { break; } }
+        let tag_lc = tag.to_lowercase();
+        match tag_lc.as_str() {
+            "b" | "strong" => {
+                if closing { bold   = bold.saturating_sub(1);   }
+                else       { bold   += 1; }
+            }
+            "i" | "em" | "u" => {
+                if closing { italic = italic.saturating_sub(1); }
+                else       { italic += 1; }
+            }
+            "br" | "div" | "p" | "li" =>
+                out.push(RichWord { text: "\n".into(), bold: false, italic: false }),
+            _ => {}
+        }
+    }
+    for word in buf.split_whitespace() {
+        out.push(RichWord { text: word.to_string(), bold: bold > 0, italic: italic > 0 });
+    }
+    // Decode HTML entities
+    for w in &mut out {
+        w.text = w.text
+            .replace("&amp;",  "&")
+            .replace("&lt;",   "<")
+            .replace("&gt;",   ">")
+            .replace("&nbsp;", " ")
+            .replace("&#39;",  "'")
+            .replace("&quot;", "\"");
+    }
+    out
+}
+
+/// Reflows styled words into lines that fit within `max_mm` at font size `fs`.
+fn wrap_rich_words(words: &[RichWord], max_mm: f32, fs: f32) -> Vec<Vec<RichWord>> {
+    let space_w = text_width_mm(" ", fs, false);
+
+    let mut lines: Vec<Vec<RichWord>> = Vec::new();
+    let mut cur:   Vec<RichWord>      = Vec::new();
+    let mut cur_w  = 0.0f32;
+
+    for word in words {
+        if word.text == "\n" {
+            if !cur.is_empty() { lines.push(std::mem::take(&mut cur)); cur_w = 0.0; }
+            continue;
+        }
+        let ww       = text_width_mm(&word.text, fs, word.bold);
+        let needed_w = if cur.is_empty() { ww } else { space_w + ww };
+        if cur_w + needed_w > max_mm && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0.0;
+        }
+        cur_w += if cur.is_empty() { ww } else { space_w + ww };
+        cur.push(word.clone());
+    }
+    if !cur.is_empty() { lines.push(cur); }
+    lines
+}
+
+/// Draws the rich-text comment block with a "Comments:" label and advances `cursor`.
+///
+/// Renders "Comments:" bold on its own line, then the comment text below.
+fn draw_rich_comment(
+    layer:     &PdfLayerReference,
+    font_reg:  &IndirectFontRef,
+    font_bold: &IndirectFontRef,
+    font_ital: &IndirectFontRef,
+    font_bi:   &IndirectFontRef,
+    comment:   &str,
+    cursor:    &mut f32,
+) {
+    const FS:       f32 = 7.5;
+    const LABEL_FS: f32 = 8.0;
+    const LINE_H:   f32 = 4.5;
+    const TOP_PAD:  f32 = 2.5;
+    const BOT_PAD:  f32 = 3.0;
+    const TEXT_X:   f32 = M + 2.0;
+
+    let max_mm  = W - M - TEXT_X;
+    let space_w = text_width_mm(" ", FS, false);
+
+    let words = parse_html_to_rich_words(comment);
+    if !words.iter().any(|w| w.text != "\n" && !w.text.trim().is_empty()) { return; }
+
+    let lines = wrap_rich_words(&words, max_mm, FS);
+    if lines.is_empty() { return; }
+
+    // +1 line for the "Comments:" label
+    let total_h = TOP_PAD + LINE_H + lines.len() as f32 * LINE_H + BOT_PAD;
+    if *cursor - total_h < M + 12.0 { return; }
+
+    *cursor -= TOP_PAD;
+
+    // "Comments:" label — bold, dark, underlined
+    let label_ty = *cursor - 3.2;
+    set_color(layer, TEXT_DARK);
+    layer.use_text("Comments:", LABEL_FS, Mm(TEXT_X), Mm(label_ty), font_bold);
+    let label_w = text_width_mm("Comments:", LABEL_FS, true);
+    fill_rect(layer, TEXT_X, label_ty - 1.0, TEXT_X + label_w, label_ty - 0.5, 0.0, 0.0, 0.0);
+    *cursor -= LINE_H;
+
+    // Comment text lines
+    for line in &lines {
+        let ty = *cursor - 3.2;
+        set_color(layer, TEXT_DARK);
+        let mut tx    = TEXT_X;
+        let mut first = true;
+        for word in line {
+            if !first { tx += space_w; }
+            first = false;
+            let font = match (word.bold, word.italic) {
+                (true,  true)  => font_bi,
+                (true,  false) => font_bold,
+                (false, true)  => font_ital,
+                (false, false) => font_reg,
+            };
+            layer.use_text(&word.text, FS, Mm(tx), Mm(ty), font);
+            tx += text_width_mm(&word.text, FS, word.bold);
+        }
+        *cursor -= LINE_H;
+    }
+    *cursor -= BOT_PAD;
+}
+
 // Wrapper that calls parse_hex_color with the ? operator inside an Option closure.
 fn hex_to_rgb(hex: &str, default: (f32, f32, f32)) -> (f32, f32, f32) {
     (|| -> Option<(f32, f32, f32)> {
@@ -323,27 +477,25 @@ fn hex_to_rgb(hex: &str, default: (f32, f32, f32)) -> (f32, f32, f32) {
 }
 
 pub fn write_pdf(
-    dst_dir:  &Path,
-    src_name: &str,
-    src_path: &Path,
-    entries:  &[(FileMeta, String, String, String, Option<bool>)],
-    settings: &Settings,
-    gen_md5:  bool,
-    gen_xxh:  bool,
+    dst_dir:         &Path,
+    src_name:        &str,
+    src_path:        &Path,
+    src_total_bytes: u64,
+    destinations:    &[PathBuf],
+    entries:         &[(FileMeta, String, String, String, Option<bool>)],
+    settings:        &Settings,
+    gen_md5:         bool,
+    gen_xxh:         bool,
+    comment:         &str,
 ) -> std::io::Result<()> {
-    // Resolve accent colours from settings.
-    // Fall back to the default Bartleby palette if the hex string is invalid.
-    // `accent1` = primary   (column headers, footer band)  — default Bartleby blue
-    // `accent2` = secondary (decorative rules)             — default Bartleby cyan
     let accent1 = hex_to_rgb(&settings.accent_color_1, DEFAULT_ACCENT1);
-    let accent2 = hex_to_rgb(&settings.accent_color_2, DEFAULT_ACCENT2);
 
     // ── Timestamp ──────────────────────────────────────────────────────────────
     // `Local::now()` : current date/time in the system's local timezone.
     // `.format(…)` : applies a strftime-style format string (from chrono).
     //   `%Y` = 4-digit year, `%m` = 2-digit month, `%d` = day, etc.
     // `.to_string()` : converts chrono's `DelayedFormat` to an owned `String`.
-    let now = Local::now().format("%Y-%m-%d  %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d at %I:%M %p").to_string();
 
     // ── Create PDF document ────────────────────────────────────────────────────
     // `PdfDocument::new(title, width, height, first_layer_name)` creates a new
@@ -372,8 +524,10 @@ pub fn write_pdf(
     //
     // `.unwrap()` is safe here: built-in fonts always load successfully. A failure
     // would indicate a bug in the printpdf library itself.
-    let font_reg  = doc.add_builtin_font(BuiltinFont::Helvetica).unwrap();
-    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).unwrap();
+    let font_reg     = doc.add_builtin_font(BuiltinFont::Helvetica).unwrap();
+    let font_bold    = doc.add_builtin_font(BuiltinFont::HelveticaBold).unwrap();
+    let font_ital    = doc.add_builtin_font(BuiltinFont::HelveticaOblique).unwrap();
+    let font_bold_it = doc.add_builtin_font(BuiltinFont::HelveticaBoldOblique).unwrap();
 
     // ── Page index ─────────────────────────────────────────────────────────────
     // `pages` accumulates (PdfPageIndex, PdfLayerIndex) pairs as new pages are added.
@@ -383,14 +537,9 @@ pub fn write_pdf(
     let mut pages: Vec<(PdfPageIndex, PdfLayerIndex)> = vec![(p1, l1)];
 
     // ── Vertical cursor ────────────────────────────────────────────────────────
-    // `cursor` is the Y coordinate of the **top edge** of the next element to draw.
-    // It starts near the top of the page (H - M = 198 mm) and decreases as rows
-    // are added. When it gets too close to the bottom (< M + RH + 2 mm), a new
-    // page is started and cursor resets to H - M.
-    //
-    // IMPORTANT: In printpdf, Y=0 is at the BOTTOM of the page. `cursor = 198` means
-    // 198 mm from the bottom, which is 210 - 198 = 12 mm from the top — exactly M.
-    let mut cursor: f32 = H - M;
+    // Set by draw_header's return value on page 1, reset to H-M on each new page.
+    // IMPORTANT: In printpdf, Y=0 is at the BOTTOM of the page.
+    let mut cursor: f32;
 
     // ── Status column detection ────────────────────────────────────────────────
     // If at least one entry has a non-None `verify_ok`, we add a "St." status column.
@@ -410,9 +559,12 @@ pub fn write_pdf(
         // `doc.get_page(index)` → `PdfPageReference` (borrows `doc`).
         // `.get_layer(index)` → `PdfLayerReference` (borrows the page).
         // Drawing operations are called on the `PdfLayerReference`.
-        let layer = doc.get_page(pages[0].0).get_layer(pages[0].1);
-        draw_header(&layer, &font_bold, &font_reg, src_name, src_path, &now, settings, &mut cursor, accent2);
-        draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1, accent2);
+        let layer   = doc.get_page(pages[0].0).get_layer(pages[0].1);
+        let rule_y  = draw_header(&layer, &font_bold, &font_reg, src_path, src_total_bytes, &now, settings, &destinations);
+        cursor      = rule_y;
+        draw_rich_comment(&layer, &font_reg, &font_bold, &font_ital, &font_bold_it, comment, &mut cursor);
+        cursor -= 2.0;
+        draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
     } // `layer` is dropped here, releasing the borrow on `doc`
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -450,7 +602,7 @@ pub fn write_pdf(
                 pages.push((np, nl));
                 cursor = H - M;
                 let layer = doc.get_page(np).get_layer(nl);
-                draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1, accent2);
+                draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
             }
             {
                 let (pi, li) = *pages.last().unwrap();
@@ -467,7 +619,7 @@ pub fn write_pdf(
             pages.push((np, nl));
             cursor = H - M;
             let layer = doc.get_page(np).get_layer(nl);
-            draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1, accent2);
+            draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
         }
 
         // ── Get the layer for the current (last) page ──────────────────────────
@@ -561,7 +713,7 @@ pub fn write_pdf(
     for (page_i, (pi, li)) in pages.iter().enumerate() {
         let layer = doc.get_page(*pi).get_layer(*li);
         // `*pi` and `*li` : dereference the references from `pages.iter()`.
-        draw_footer(&layer, &font_reg, page_i + 1, pages.len(), entries.len(), accent2);
+        draw_footer(&layer, &font_reg, page_i + 1, pages.len(), entries.len(), accent1);
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -587,257 +739,206 @@ pub fn write_pdf(
 
 // ── Header drawing ────────────────────────────────────────────────────────────
 
-/// Draws the two-column report header and advances `cursor` past it.
+/// Draws the report header and returns the Y position where the rule should be drawn.
 ///
-/// ## Two-column layout
+/// ## Layout
 ///
 /// ```text
-/// ┌──────────────────────────────┬────────────────────────────────────────┐
-/// │ LEFT COLUMN (M to W/2)       │ RIGHT COLUMN (W/2+4 to W-M)           │
-/// │                              │                                        │
-/// │ PROJECT TITLE (bold, 16pt)   │ COMPANY NAME (bold, 14pt, underlined) │
-/// │ BACKUP REPORT (bold, 14pt)   │ Contact Name (grey, 7.5pt)             │
-/// │ /path/to/source (grey, 7pt)  │ email@example.com (grey, 7.5pt)       │
-/// │ Generated 2024-01-15 (grey)  │ +33 6 12 34 56 78 (grey, 7.5pt)      │
-/// └──────────────────────────────┴────────────────────────────────────────┘
+/// ┌──────────────────────────────────────────────────────────────────────────────┐
+/// │ [Logo]  (top-left, optional, max 30×12 mm)                                  │
+/// │ COMPANY NAME  (bold, left-aligned)                                           │
+/// │ Contact / Email / Tel  (grey, one line, left-aligned)                        │
+/// │                                                                              │
+/// │                    PROJECT NAME  (bold, underlined, centered)                │
+/// │               Backup Report – YYYY-MM-DD at HH:MM:SS  (bold, centered)      │
+/// │              Source : /path/… – 2.34 GB  (grey, centered)                   │
+/// │                  Destination 1 : /path/…  (grey, centered)                  │
+/// └──────────────────────────────────────────────────────────────────────────────┘
 /// ```
-///
-/// ## Right column alignment
-/// All right-column lines start at the same `box_x` value, calculated so that
-/// the longest line (Company, Contact, Email, or Phone) ends exactly at the
-/// right page margin. This creates a visually flush right edge.
-///
-/// ## `*cursor` update
-/// After drawing, `cursor` is set to `rule_y - 2.5`, pointing to where the
-/// column header row should begin. The cyan rule is drawn at `rule_y`.
-///
-/// ## AUDIT NOTE — font width approximation
-/// Character widths are approximated as `font_size_pt × 0.3528 mm/pt × 0.55 char_ratio`.
-/// `0.3528` converts points to millimetres (1 pt = 1/72 inch = 0.3528 mm).
-/// `0.55` is an empirical average character width for Helvetica (proportional font).
-/// This is accurate to within ±2 characters for typical strings. Exact metrics
-/// would require querying font kerning tables, which printpdf does not expose.
 fn draw_header(
-    layer:     &PdfLayerReference,
-    bold:      &IndirectFontRef,
-    reg:       &IndirectFontRef,
-    _src_name: &str,
-    src_path:  &Path,
-    now:       &str,
-    settings:  &Settings,
-    cursor:    &mut f32,
-    accent2:   (f32, f32, f32),   // secondary accent colour for the decorative rule
-) {
-    // ── Two-column split ───────────────────────────────────────────────────────
-    let col_mid = W / 2.0;              // X where the right column begins
-    let rx      = col_mid + 4.0;        // right column left edge (with 4 mm indent)
-    let top_y   = H - M - 4.0;         // starting Y for both columns (below top margin)
+    layer:           &PdfLayerReference,
+    bold:            &IndirectFontRef,
+    reg:             &IndirectFontRef,
+    src_path:        &Path,
+    src_total_bytes: u64,
+    now:             &str,
+    settings:        &Settings,
+    destinations:    &[PathBuf],
+) -> f32 {
+    let top_y = H - M - 4.0;
+    let mut ly = top_y;
 
-    let mut ly  = top_y;                // left column Y cursor (decreases downward)
-    let mut ry  = top_y;                // right column Y cursor (decreases downward)
-
-    // ── RIGHT COLUMN — Company block ───────────────────────────────────────────
-    if !settings.company.is_empty() {
-        // Estimate the rendered width of each right-column text element.
-        // `0.3528` converts points to mm; `0.55` is the average Helvetica char width ratio.
-        let char_w_title = FS_TITLE * 0.3528 * 0.55; // mm per character at FS_TITLE
-        let char_w_sub   = FS_SUB   * 0.3528 * 0.55; // mm per character at FS_SUB
-        let right_edge   = W - M - 2.0;               // right page margin minus 2 mm padding
-
-        let co = settings.company.to_uppercase();
-        // `.chars().count()` : number of Unicode characters (not bytes).
-        // Rust strings are UTF-8, so `.len()` returns byte count, not char count.
-        // For ASCII-only text, `.len() == .chars().count()`, but "é" is 2 bytes, 1 char.
-        let w_co  = co.chars().count()                    as f32 * char_w_title;
-        let w_ct  = settings.contact_name.chars().count() as f32 * char_w_sub;
-        let w_em  = settings.email.chars().count()         as f32 * char_w_sub;
-        let w_ph  = settings.phone.chars().count()         as f32 * char_w_sub;
-
-        // `max_w` : the width of the widest element in the right column.
-        // `.max(b)` returns the larger of two `f32` values (from the `Ord`/partial_cmp trait).
-        let max_w = w_co.max(w_ct).max(w_em).max(w_ph);
-
-        // `box_x` : the X coordinate at which all right-column lines start.
-        // `right_edge - max_w` aligns the longest line flush with the right margin.
-        // `.max(rx)` : never go left of the right column's minimum left edge (`rx`),
-        // even if the computed value would overlap the left column.
-        let box_x = (right_edge - max_w).max(rx);
-
-        // Draw company name in dark, bold, large text.
-        set_color(layer, TEXT_DARK);
-        layer.use_text(co.clone(), FS_TITLE, Mm(box_x), Mm(ry), bold);
-        ry -= 5.0; // move down 5 mm for the next line
-
-        // Draw contact, email, phone in muted grey, regular weight.
-        set_color(layer, TEXT_MID);
-        if !settings.contact_name.is_empty() {
-            layer.use_text(settings.contact_name.clone(), FS_SUB, Mm(box_x), Mm(ry), reg);
-            ry -= 4.0;
-        }
-        if !settings.email.is_empty() {
-            layer.use_text(settings.email.clone(), FS_SUB, Mm(box_x), Mm(ry), reg);
-            ry -= 4.0;
-        }
-        if !settings.phone.is_empty() {
-            layer.use_text(settings.phone.clone(), FS_SUB, Mm(box_x), Mm(ry), reg);
-            ry -= 4.0;
-        }
-    }
-
-    // ── LEFT COLUMN — Project / report info ───────────────────────────────────
-
-    // 1. Project title — all-caps, true black, largest element in the header.
-    if !settings.project_title.is_empty() {
-        set_color(layer, (0.0, 0.0, 0.0));
-        layer.use_text(settings.project_title.to_uppercase(), FS_TITLE + 2.0, Mm(M + 2.0), Mm(ly), bold);
-        ly -= 6.5;
-    }
-
-    // 2. "BACKUP REPORT" — secondary label, smaller than the project title.
-    set_color(layer, TEXT_DARK);
-    layer.use_text("BACKUP REPORT".to_string(), FS_TITLE - 3.0, Mm(M + 2.0), Mm(ly), bold);
-    ly -= 5.0;
-
-    // 3. Source path — shown in grey so it is readable but secondary to the title.
-    //    Truncated with "…" prefix if too long for the left column width.
-    set_color(layer, TEXT_MID);
-    let src_str = src_path.to_string_lossy().to_string();
-
-    // Estimate how many characters fit in the left column.
-    // `col_mid - M - 6.0` = available width in mm (col mid minus left margin minus gap).
-    // `FS_SUB * 0.155` ≈ mm per character at FS_SUB (Helvetica Regular, mixed case).
-    // `as usize` truncates to an integer.
-    let max_src = ((col_mid - M - 6.0) / (FS_SUB * 0.155)) as usize;
-
-    let src_disp = if src_str.chars().count() > max_src {
-        // Path is too long — show the tail end, prefixed with "…".
-        // `src_str.char_indices()` : iterator of (byte_index, char) pairs.
-        // `.nth(max_src / 2)` : find the byte position of the character at index max_src/2.
-        //   This gives us the last ~half of the path, which typically contains the
-        //   most meaningful part (the final directory names).
-        // `.map(|(i, _)| i)` : extract just the byte index.
-        // `.unwrap_or(src_str.len())` : fall back to the end if nth returns None.
-        let tail_start = src_str.len().saturating_sub(
-            src_str.char_indices().nth(max_src / 2)
-                .map(|(i, _)| i).unwrap_or(src_str.len())
-        );
-        format!("…{}", &src_str[tail_start..])
-    } else {
-        src_str // Path fits — display as-is
-    };
-    layer.use_text(src_disp, FS_SUB, Mm(M + 2.0), Mm(ly), reg);
-    ly -= 4.5;
-
-    // 4. Generation timestamp — smallest text, reinforces document provenance.
-    //    `FS_SUB - 0.5` = 7.0 pt — slightly smaller than contact info.
-    layer.use_text(format!("Generated  {}", now), FS_SUB - 0.5, Mm(M + 2.0), Mm(ly), reg);
-
-    // ── Centre column — Company logo ──────────────────────────────────────────
-    //
-    // If settings.logo_path is non-empty and points to a valid JPEG or PNG file,
-    // the logo is drawn centred horizontally between the left and right text columns.
-    //
-    // ## Bounding box
-    // The logo fits within a 40 mm wide × 15 mm tall box (LOGO_W × LOGO_H).
-    // It is horizontally centred on the page: X = W/2 - scaled_width/2.
-    // Vertically, the logo's top edge aligns with the top of the header (top_y).
-    //
-    // ## Scaling ("contain" mode)
-    // The image is scaled down uniformly (preserving aspect ratio) to fit within
-    // the bounding box. If the image already fits, no upscaling is applied (min 1.0).
-    // This is the CSS "object-fit: contain" behaviour implemented manually.
-    //
-    // ## Why ImageXObject instead of Image::from_dynamic_image?
-    // We reuse the same ImageXObject / ImageTransform pattern already used for
-    // thumbnails elsewhere in this file (draw_thumbnail). This avoids importing a
-    // second image API and keeps the rendering pipeline consistent.
-    //
-    // ## Silent failure
-    // If logo_path is invalid or the image cannot be decoded, we simply skip the
-    // logo block. The report is generated normally with the two-column text header.
-
-    // Logo bounding box: 40 mm wide, 15 mm tall — centred in the header area.
-    const LOGO_W: f32 = 40.0; // maximum logo width in mm
-    const LOGO_H: f32 = 15.0; // maximum logo height in mm
+    // ── LEFT BLOCK — Logo + Company + Contact (drawn first) ──────────────────
 
     if !settings.logo_path.is_empty() {
-        // `image::open` supports JPEG, PNG, BMP, GIF, TIFF and more.
-        // We advertise JPEG/PNG in the UI, but any format the `image` crate
-        // supports will work here.
         if let Ok(dyn_img) = ::image::open(&settings.logo_path) {
-            // Composite RGBA onto white background before embedding in PDF.
-            // PNG logos often have transparent backgrounds; rgba_to_rgb_white()
-            // ensures transparent pixels render as white instead of black.
             let rgb = rgba_to_rgb_white(dyn_img.into_rgba8());
             let (iw, ih) = (rgb.width() as f32, rgb.height() as f32);
-
-            // Compute the uniform scale factor that fits the image within (LOGO_W × LOGO_H).
-            // `(LOGO_W / iw).min(LOGO_H / ih)` : the smaller of the two scale factors
-            //   ensures neither dimension overflows the bounding box.
-            // `.min(1.0)` : never upscale a small logo — it would look pixelated.
-            let scale = (LOGO_W / iw).min(LOGO_H / ih).min(1.0);
-            let dw = iw * scale; // actual rendered width in mm
-            let dh = ih * scale; // actual rendered height in mm
-
-            // Horizontal centre: place the logo at W/2 - dw/2 (centre of page).
-            let logo_x = W / 2.0 - dw / 2.0;
-            // Vertical: top edge at top_y means bottom edge at top_y - dh.
-            // printpdf's translate_y specifies the BOTTOM edge of the image (Y-up system).
-            let logo_y = top_y - dh;
-
-            // Build the PDF image object using the same ImageXObject approach as thumbnails.
-            // `ColorSpace::Rgb` : 3-channel RGB (matches our to_rgb8() conversion above).
-            // `ColorBits::Bit8` : 8 bits per channel = standard 24-bit colour.
-            // `interpolate: true` : enables bilinear smoothing when the PDF viewer scales the image.
+            const LW: f32 = 30.0;
+            const LH: f32 = 12.0;
+            let scale = (LW / iw).min(LH / ih).min(1.0);
+            let dw = iw * scale;
+            let dh = ih * scale;
+            let dpi: f32 = 96.0;
+            let px_per_mm = dpi / 25.4;
             let xobj = ImageXObject {
                 width:              Px(iw as usize),
                 height:             Px(ih as usize),
                 color_space:        ColorSpace::Rgb,
                 bits_per_component: ColorBits::Bit8,
                 interpolate:        true,
-                image_data:         rgb.into_raw(), // raw RGB bytes, consumes the RgbImage
+                image_data:         rgb.into_raw(),
                 image_filter:       None,
                 smask:              None,
                 clipping_bbox:      None,
             };
-            let img = Image::from(xobj);
-
-            // `dpi` : reference dots-per-inch for the image. We use 96 DPI (screen resolution).
-            // `px_per_mm` : converts between pixels and millimetres.
-            // `scale_x / scale_y` : scale factors for printpdf's ImageTransform.
-            //   printpdf uses "how many mm per pixel at the given DPI" as its internal unit.
-            //   `scale * px_per_mm * (1/px_per_mm)` simplifies to just `scale`.
-            //   In practice, ImageTransform.scale_x is a multiplier on the "natural size"
-            //   of the image at the given DPI, so we pass our computed `scale` directly.
-            let dpi: f32 = 96.0;
-            img.add_to_layer(layer.clone(), ImageTransform {
-                translate_x: Some(Mm(logo_x)),
-                translate_y: Some(Mm(logo_y)),
-                scale_x:     Some(dw / (iw / (dpi / 25.4))), // scale to fit dw mm
-                scale_y:     Some(dh / (ih / (dpi / 25.4))), // scale to fit dh mm
+            Image::from(xobj).add_to_layer(layer.clone(), ImageTransform {
+                translate_x: Some(Mm(M)),
+                translate_y: Some(Mm(ly - dh)),
+                scale_x:     Some(dw / (iw / px_per_mm)),
+                scale_y:     Some(dh / (ih / px_per_mm)),
                 rotate:      None,
                 dpi:         Some(dpi),
             });
+            ly -= dh + 7.0;
         }
-        // If image::open fails (file not found, unsupported format, corrupted),
-        // we fall through silently. The cyan rule and column headers are drawn
-        // normally — the only difference is the absence of the logo image.
     }
 
-    // ── Cyan decorative rule ───────────────────────────────────────────────────
-    // Drawn below the taller of the two text columns (left or right).
-    // `ly.min(ry)` : the lower of the two column cursors.
-    //   In printpdf's Y-up coordinate system, a numerically smaller Y value is
-    //   visually lower on the page (closer to the bottom).
-    // `- 3.0` : 3 mm gap below the last text line before the rule begins.
-    let rule_y = ly.min(ry) - 3.0;
-    // The rule is a 0.7 mm tall filled rectangle spanning the full page width.
-    // `rule_y - 0.9` = bottom edge, `rule_y - 0.2` = top edge (0.7 mm tall).
-    fill_rect(layer, M, rule_y - 0.9, W - M, rule_y - 0.2,
-              accent2.0, accent2.1, accent2.2);
+    if !settings.company.is_empty() {
+        set_color(layer, TEXT_DARK);
+        layer.use_text(settings.company.to_uppercase(), FS_TITLE, Mm(M), Mm(ly), bold);
+        ly -= 5.0;
+    }
 
-    // Update the cursor so the caller knows where to start the column header band.
-    *cursor = rule_y - 2.5;
+    let contact_line: String = [
+        settings.contact_name.as_str(),
+        settings.email.as_str(),
+        settings.phone.as_str(),
+    ]
+    .iter()
+    .filter(|s| !s.is_empty())
+    .cloned()
+    .collect::<Vec<_>>()
+    .join(" / ");
+
+    if !contact_line.is_empty() {
+        set_color(layer, TEXT_MID);
+        layer.use_text(&contact_line, FS_SUB, Mm(M), Mm(ly), reg);
+        ly -= 4.5;
+    }
+
+    // ── CENTER BLOCK — Project name + report info (starts below left block) ──
+
+    // 5 mm gap between contact line and project title.
+    let mut cy = ly - 5.0;
+
+    // Max chars that fit in the full printable width (used for path truncation).
+    let max_line_chars = ((W - 2.0 * M - 4.0) / (FS_SUB * 0.155)) as usize;
+
+    // PROJECT NAME — centered, bold, underlined
+    if !settings.project_title.is_empty() {
+        let project_text = settings.project_title.to_uppercase();
+        set_color(layer, (0.0, 0.0, 0.0));
+        let text_w = text_width_mm(&project_text, FS_TITLE + 2.0, true);
+        let cx = ((W / 2.0) - text_w / 2.0).max(M);
+        layer.use_text(&project_text, FS_TITLE + 2.0, Mm(cx), Mm(cy), bold);
+        // Manual underline: thin filled rect 0.8 mm below baseline
+        fill_rect(layer, cx, cy - 1.3, (cx + text_w).min(W - M), cy - 0.7, 0.0, 0.0, 0.0);
+        cy -= 7.0;
+    }
+
+    // "Backup Report – YYYY-MM-DD at HH:MM:SS" — bold, centered
+    let report_line = format!("Backup Report  –  {}", now);
+    set_color(layer, TEXT_DARK);
+    let rw = text_width_mm(&report_line, FS_TITLE - 3.0, true);
+    let rx = ((W / 2.0) - rw / 2.0).max(M);
+    layer.use_text(&report_line, FS_TITLE - 3.0, Mm(rx), Mm(cy), bold);
+    cy -= 5.5;
+
+    // "Source : /path – size" — regular, centered
+    let src_str  = src_path.to_string_lossy().to_string();
+    let size_str = crate::metadata::format_size(src_total_bytes);
+    let overhead = format!("Source :   –  {}", size_str).chars().count();
+    let max_path = max_line_chars.saturating_sub(overhead);
+    let src_disp = truncate_path_tail(&src_str, max_path);
+    let src_line = format!("Source : {}  –  {}", src_disp, size_str);
+    set_color(layer, TEXT_MID);
+    let sw = text_width_mm(&src_line, FS_SUB, false);
+    let sx = ((W / 2.0) - sw / 2.0).max(M);
+    layer.use_text(&src_line, FS_SUB, Mm(sx), Mm(cy), reg);
+    cy -= 4.5;
+
+    // Destinations — regular, centered, slightly smaller
+    let max_dst = max_line_chars.saturating_sub(20); // subtract "Destination N : " overhead
+    for (i, dst) in destinations.iter().enumerate() {
+        let dst_str  = dst.to_string_lossy().to_string();
+        let dst_disp = truncate_path_tail(&dst_str, max_dst);
+        let dst_line = format!("Destination {} : {}", i + 1, dst_disp);
+        let dw = text_width_mm(&dst_line, FS_SUB - 0.5, false);
+        let dx = ((W / 2.0) - dw / 2.0).max(M);
+        layer.use_text(&dst_line, FS_SUB - 0.5, Mm(dx), Mm(cy), reg);
+        cy -= 4.0;
+    }
+
+    cy - 3.0
+}
+
+/// Returns the rendered width in mm for a string in Helvetica (or Helvetica-Bold)
+/// using the official Adobe AFM glyph-width table (units/1000 em).
+/// Fallback for non-ASCII characters: 600 units (reasonable Latin average).
+fn text_width_mm(text: &str, font_size_pt: f32, bold: bool) -> f32 {
+    // AFM widths for codepoints 32–126 (space → tilde), Helvetica regular then bold.
+    #[rustfmt::skip]
+    const REG: [u16; 95] = [
+    //  sp   !    "    #    $    %    &    '    (    )    *    +    ,    -    .    /
+        278, 278, 355, 556, 556, 889, 667, 222, 333, 333, 389, 584, 278, 333, 278, 278,
+    //  0    1    2    3    4    5    6    7    8    9
+        556, 556, 556, 556, 556, 556, 556, 556, 556, 556,
+    //  :    ;    <    =    >    ?    @
+        278, 278, 584, 584, 584, 556,1015,
+    //  A    B    C    D    E    F    G    H    I    J    K    L    M    N    O    P    Q    R    S    T    U    V    W    X    Y    Z
+        667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611,
+    //  [    \    ]    ^    _    `
+        278, 278, 278, 469, 556, 222,
+    //  a    b    c    d    e    f    g    h    i    j    k    l    m    n    o    p    q    r    s    t    u    v    w    x    y    z
+        556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500,
+    //  {    |    }    ~
+        334, 260, 334, 584,
+    ];
+    #[rustfmt::skip]
+    const BOLD: [u16; 95] = [
+    //  sp   !    "    #    $    %    &    '    (    )    *    +    ,    -    .    /
+        278, 333, 474, 556, 556, 889, 722, 278, 333, 333, 389, 584, 278, 333, 278, 278,
+    //  0    1    2    3    4    5    6    7    8    9
+        556, 556, 556, 556, 556, 556, 556, 556, 556, 556,
+    //  :    ;    <    =    >    ?    @
+        333, 333, 584, 584, 584, 611, 975,
+    //  A    B    C    D    E    F    G    H    I    J    K    L    M    N    O    P    Q    R    S    T    U    V    W    X    Y    Z
+        722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611,
+    //  [    \    ]    ^    _    `
+        333, 278, 333, 584, 556, 278,
+    //  a    b    c    d    e    f    g    h    i    j    k    l    m    n    o    p    q    r    s    t    u    v    w    x    y    z
+        611, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500,
+    //  {    |    }    ~
+        389, 280, 389, 584,
+    ];
+    let table = if bold { &BOLD } else { &REG };
+    let units: f32 = text.chars().map(|c| {
+        let cp = c as u32;
+        if cp >= 32 && cp <= 126 { table[(cp - 32) as usize] as f32 } else { 600.0 }
+    }).sum();
+    units / 1000.0 * font_size_pt * 0.3528
+}
+
+/// Truncates a path string to `max_chars` by keeping the tail, prefixed with "…".
+fn truncate_path_tail(path: &str, max_chars: usize) -> String {
+    if path.chars().count() <= max_chars { return path.to_string(); }
+    let tail_start = path.len().saturating_sub(
+        path.char_indices().nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(path.len()),
+    );
+    format!("…{}", &path[tail_start..])
 }
 
 /// Draws the dark blue column header band with white labels, and advances `cursor`.
@@ -859,8 +960,7 @@ fn draw_col_headers(
     has_status: bool,
     gen_md5:    bool,
     gen_xxh:    bool,
-    accent1:    (f32, f32, f32),  // primary accent: column header background
-    _accent2:   (f32, f32, f32),  // secondary accent (reserved — not yet used in col headers)
+    accent1:    (f32, f32, f32),
 ) {
     // Header band height: 8 mm fits FS_HEAD (7 pt ≈ 2.5 mm) with ~2.7 mm top/bottom padding.
     let hh: f32 = 8.0;
@@ -924,14 +1024,13 @@ fn draw_col_headers(
 fn draw_footer(
     layer:      &PdfLayerReference,
     reg:        &IndirectFontRef,
-    page_num:   usize,    // 1-based current page number
-    page_total: usize,    // total number of pages (known only after all rows are placed)
-    file_count: usize,    // total number of files (shown on the last page)
-    accent2:    (f32, f32, f32),  // secondary accent colour for the footer rule
+    page_num:   usize,
+    page_total: usize,
+    file_count: usize,
+    accent1:    (f32, f32, f32),
 ) {
-    // Thin cyan rule at Y = M + 1.5 to M + 2.2 (0.7 mm tall, matching the header rule).
     fill_rect(layer, M, M + 1.5, W - M, M + 2.2,
-              accent2.0, accent2.1, accent2.2);
+              accent1.0, accent1.1, accent1.2);
 
     // Switch to medium grey for footer text — secondary, non-distracting.
     // The tuple `(0.55, 0.55, 0.58)` is passed directly to `set_color`.

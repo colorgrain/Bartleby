@@ -45,8 +45,8 @@
 :root {
 
   /* ── Backgrounds ── */
-  --bg:          #f8f8f9;
-  /* Slightly off-white. GTK .background selector in Mint-Y Light. */
+  --bg:          #ebebed;
+  /* Matches --titlebar-bg so the header and content area share one unified background. */
 
   --surface:     #ffffff;
   /* Pure white for modal dialogs and overlay panels. */
@@ -115,8 +115,8 @@
 /* ── Dark mode override — applied when JS sets body class="theme-dark" ──────*/
 body.theme-dark {
 
-  --bg:          #2e2e33;
-  /* GTK .background in Mint-Y Dark. */
+  --bg:          #222226;
+  /* Matches --titlebar-bg for a unified header/content background in dark mode. */
 
   --surface:     #2e2e33;
   --card-bg:     #333338;
@@ -164,7 +164,7 @@ body.theme-dark {
    on Linux; this block is a backup for the case where JS hasn't run yet.    */
 @media (prefers-color-scheme: dark) {
   body.theme-default {
-    --bg:              #2e2e33;
+    --bg:              #222226;
     --surface:         #2e2e33;
     --card-bg:         #333338;
     --card-border:     #202023;

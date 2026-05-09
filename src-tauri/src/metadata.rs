@@ -43,7 +43,7 @@
 //! (0x08000000) via the Windows-specific `CommandExt` trait to suppress this.
 //! On Linux and macOS, `no_window()` is a no-op.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use crate::settings::Settings;
 use chrono::Local;
@@ -508,25 +508,55 @@ fn query_audio(path: &Path, meta: &mut FileMeta) {
 /// `entries: &[(FileMeta, String, Option<bool>)]`
 /// The tuple contains: (metadata, md5_hash, verify_status).
 /// `Option<bool>` : `None` = copy-only mode, `Some(true)` = OK, `Some(false)` = ERROR.
+/// Strips HTML tags and converts block-level elements to newlines.
+/// Used to render the WYSIWYG comment as plain text in CSV and PDF headers.
+fn html_to_plain(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    let mut tag_buf = String::new();
+    for ch in html.chars() {
+        match ch {
+            '<' => { in_tag = true; tag_buf.clear(); }
+            '>' => {
+                let t = tag_buf.trim().to_lowercase();
+                if t == "br" || t == "br/" || t.starts_with("/p") || t.starts_with("/div") {
+                    if !result.ends_with('\n') { result.push('\n'); }
+                }
+                in_tag = false;
+            }
+            _ if in_tag => { tag_buf.push(ch); }
+            _ => { result.push(ch); }
+        }
+    }
+    result
+        .replace("&amp;",  "&")
+        .replace("&lt;",   "<")
+        .replace("&gt;",   ">")
+        .replace("&nbsp;", " ")
+        .replace("&#39;",  "'")
+        .replace("&quot;", "\"")
+        .trim()
+        .to_string()
+}
+
 pub fn write_csv(
-    dst_dir:  &Path,
-    src_name: &str,
-    entries:  &[(FileMeta, String, String, Option<bool>)],
-    // Each entry carries both hashes separately:
-    //   .1 = md5 hash string  (empty string if MD5 was not computed)
-    //   .2 = xxh3 hash string (empty string if XXH3 was not computed)
-    // This avoids the previous single-hash design where one hash was silently dropped.
-    settings: &Settings,
-    gen_md5:  bool,  // true if MD5 was computed — adds "MD5" column header
-    gen_xxh:  bool,  // true if XXH3 was computed — adds "XXH3" column header
+    dst_dir:         &Path,
+    src_name:        &str,
+    src_path:        &Path,
+    src_total_bytes: u64,
+    destinations:    &[PathBuf],
+    entries:         &[(FileMeta, String, String, Option<bool>)],
+    settings:        &Settings,
+    gen_md5:         bool,
+    gen_xxh:         bool,
+    comment:         &str,
 ) -> std::io::Result<()> {
-    use std::io::Write; // Write trait: adds writeln!() support for files
+    use std::io::Write;
 
-    // Build the output path: "/destination/SourceName_report.csv"
     let path = dst_dir.join(format!("{}_report.csv", src_name));
-    let mut f = std::fs::File::create(path)?; // create or overwrite
+    let mut f = std::fs::File::create(path)?;
 
-    write_custom_header_csv(&mut f, settings)?;
+    write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment)?;
 
     // Detect whether at least one entry has a verification status.
     // `.any(|(_, _, s)| s.is_some())` : returns true on the first Some encountered.
@@ -605,29 +635,49 @@ pub fn write_csv(
     Ok(())
 }
 
-/// Writes comment-style header lines for non-empty custom fields.
-/// A blank `#` line is appended as a visual separator before the column headers.
-fn write_custom_header_csv(f: &mut std::fs::File, s: &Settings) -> std::io::Result<()> {
+fn write_custom_header_csv(
+    f:               &mut std::fs::File,
+    s:               &Settings,
+    src_path:        &Path,
+    src_total_bytes: u64,
+    destinations:    &[PathBuf],
+    comment:         &str,
+) -> std::io::Result<()> {
     use std::io::Write;
 
-    // `Local::now()` : current local date and time.
-    // `.format(…)` : ISO 8601 readable format. Example: "2024-01-15  14:32".
-    let now = Local::now().format("%Y-%m-%d  %H:%M").to_string();
+    let now = Local::now().format("%Y-%m-%d at %H:%M:%S").to_string();
     writeln!(f, "# Backup report")?;
     if !s.project_title.is_empty() {
         writeln!(f, "# Project,{}", csv_escape(&s.project_title))?;
     }
     writeln!(f, "# Generated,{}", now)?;
 
-    // Optional contact fields — written only if non-empty
-    let mut wrote_any = false;
-    if !s.company.is_empty()      { writeln!(f, "# Company,{}", csv_escape(&s.company))?;      wrote_any = true; }
-    if !s.contact_name.is_empty() { writeln!(f, "# Contact,{}", csv_escape(&s.contact_name))?; wrote_any = true; }
-    if !s.email.is_empty()        { writeln!(f, "# Email,{}", csv_escape(&s.email))?;           wrote_any = true; }
-    if !s.phone.is_empty()        { writeln!(f, "# Phone,{}", csv_escape(&s.phone))?;           wrote_any = true; }
-    // `let _ = wrote_any` suppresses the "unused variable" compiler warning for
-    // a flag that is only used inside conditional branches.
-    let _ = wrote_any;
+    if !s.company.is_empty() {
+        writeln!(f, "# Company,{}", csv_escape(&s.company))?;
+    }
+
+    // Contact / Email / Tel — combine on one line separated by " / "
+    let contact_parts: Vec<&str> = [s.contact_name.as_str(), s.email.as_str(), s.phone.as_str()]
+        .iter().filter(|s| !s.is_empty()).copied().collect();
+    if !contact_parts.is_empty() {
+        writeln!(f, "# Contact,{}", csv_escape(&contact_parts.join(" / ")))?;
+    }
+
+    let size_str = format_size(src_total_bytes);
+    writeln!(f, "# Source,{} – {}", csv_escape(&src_path.to_string_lossy()), size_str)?;
+    for (i, dst) in destinations.iter().enumerate() {
+        writeln!(f, "# Destination {},{}",
+            i + 1, csv_escape(&dst.to_string_lossy()))?;
+    }
+
+    let plain = html_to_plain(comment);
+    if !plain.is_empty() {
+        for line in plain.lines() {
+            if !line.trim().is_empty() {
+                writeln!(f, "# Comment,{}", csv_escape(line.trim()))?;
+            }
+        }
+    }
 
     writeln!(f, "#")?; // blank separator line before column headers
     Ok(())

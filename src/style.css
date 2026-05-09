@@ -34,7 +34,7 @@
 /* ── Tokens Mint-Y Aqua Light ─────────────────────────────────────────────── */
 :root {
   color-scheme:      light;
-  --bg:              #f8f8f9;
+  --bg:              #ebebed;
   --surface:         #ffffff;
   --card-bg:         #fefefe;
   --card-border:     #c8c8ce;
@@ -60,12 +60,14 @@
   --radius-sm:       4px;
   --spacing:         16px;
   --gap:             10px;
+  --neon:            #00CFFF;
+  --neon-glow:       rgba(0, 207, 255, 0.55);
 }
 
 /* ── Mint-Y Aqua Dark ─────────────────────────────────────────────────────── */
 body.theme-dark {
   color-scheme:      dark;
-  --bg:              #2e2e33;
+  --bg:              #222226;
   --surface:         #2E2E33;
   --card-bg:         #333338;
   --card-border:     #202023;
@@ -93,7 +95,7 @@ body.theme-dark {
 @media (prefers-color-scheme: dark) {
   body.theme-default {
     color-scheme:      dark;
-    --bg:              #2e2e33;
+    --bg:              #222226;
     --surface:         #2E2E33;
     --card-bg:         #333338;
     --card-border:     #202023;
@@ -157,14 +159,62 @@ html, body {
 /* ── Contenu ──────────────────────────────────────────────────────────────── */
 #content {
   flex:           1;
-  overflow-y:     auto;
-  padding:        var(--spacing);
+  overflow:       hidden;
+  display:        flex;
+  flex-direction: column;
+}
+
+/* ── Two-panel layout ─────────────────────────────────────────────────────── */
+#main-panels {
+  display:    flex;
+  flex:       1;
+  min-height: 0;
+  overflow:   hidden;
+}
+
+#left-panel {
   display:        flex;
   flex-direction: column;
   gap:            var(--gap);
+  padding:        var(--spacing);
+  flex:           1;
+  min-width:      672px;   /* card min-width (640) + panel padding (2×16) */
+  overflow-y:     auto;
+  overflow-x:     hidden;
 }
-#content::-webkit-scrollbar       { width: 6px; }
-#content::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+#left-panel::-webkit-scrollbar       { width: 6px; }
+#left-panel::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+#right-resizer {
+  width:       6px;
+  flex-shrink: 0;
+  cursor:      col-resize;
+  position:    relative;
+}
+#right-resizer::after {
+  content:    '';
+  position:   absolute;
+  top:        0;
+  right:      0;
+  width:      1px;
+  height:     100%;
+  background: var(--separator);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+#right-resizer:hover::after,
+#right-resizer.active::after {
+  background: var(--accent);
+  box-shadow: 0 0 7px 1px rgba(31, 158, 222, 0.45);
+}
+
+#right-panel {
+  display:        flex;
+  flex-direction: column;
+  flex:           0 0 300px;
+  min-width:      0;
+  overflow:       hidden;
+  background:     var(--card-bg);
+}
 
 /* ── Groupes ──────────────────────────────────────────────────────────────── */
 .group { display: flex; flex-direction: column; gap: 4px; }
@@ -186,16 +236,6 @@ html, body {
   box-shadow:    0 1px 2px var(--shadow);
 }
 
-/* ── Log card ─────────────────────────────────────────────────────────────── */
-.log-card {
-  flex:           1;
-  min-height:     160px;
-  max-height:     320px;
-  padding:        0;
-  overflow:       hidden;
-  display:        flex;
-  flex-direction: column;
-}
 #log-view {
   font-family: "Noto Mono", "Ubuntu Mono", "Fira Mono", monospace;
   font-size:   11.5px;
@@ -204,9 +244,10 @@ html, body {
   background:  transparent;
   padding:     8px 10px;
   margin:      0;
-  white-space: pre-wrap;
-  word-break:  break-all;
+  white-space:   pre-wrap;
+  overflow-wrap: break-word;
   flex:        1;
+  min-height:  0;
   overflow-y:  auto;
 }
 #log-view::-webkit-scrollbar       { width: 5px; }
@@ -331,51 +372,151 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #menu-btn:hover { background: rgba(128,128,128,0.15); }
 #menu-btn svg   { width: 22px; height: 22px; stroke: var(--titlebar-txt); fill: none; }
 
-/* ── Popup menu ──────────────────────────────────────────────────────────────
-   Floating panel opened by the hamburger button.
-   Contains theme switcher, skin selector, and About link.
+/* ── Settings modal — full tabbed window ────────────────────────────────────
+   Opened by the hamburger button. Contains Appearance / Report tweaks / About.
    ─────────────────────────────────────────────────────────────────────────── */
-.popup {
-  position:      fixed;
-  top:           52px;
-  right:         10px;
+.settings-modal {
   background:    var(--surface);
   border:        1px solid var(--card-border);
   border-radius: var(--radius);
-  box-shadow:    0 4px 16px var(--shadow);
-  min-width:     174px;
-  z-index:       1000;
-  padding:       4px 0;
+  width:         680px;
+  max-width:     96vw;
+  height:        540px;
+  max-height:    88vh;
+  display:       flex;
+  overflow:      hidden;
+  box-shadow:    0 8px 28px var(--shadow);
 }
-.popup.hidden { display: none; }
-.menu-section-label {
-  font-size:      10px;
-  color:          var(--text-dim);
-  padding:        4px 12px 2px;
-  font-weight:    700;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+
+.settings-sidebar {
+  width:           150px;
+  flex-shrink:     0;
+  background:      var(--bg);
+  border-right:    1px solid var(--separator);
+  padding:         14px 0;
+  display:         flex;
+  flex-direction:  column;
+  gap:             2px;
 }
-.menu-item {
+
+.settings-tab-btn {
   display:       block;
   width:         100%;
   text-align:    left;
-  padding:       5px 12px;
+  padding:       9px 16px;
   border-radius: 0;
   font-size:     13px;
   color:         var(--text);
+  background:    transparent;
 }
-.menu-item:hover       { background: rgba(31,158,222,0.10); }
-.menu-item-active      { color: var(--accent); font-weight: 600; }
-.popup hr { border: none; border-top: 1px solid var(--separator); margin: 3px 0; }
+.settings-tab-btn:hover  { background: rgba(128,128,128,0.12); }
+.settings-tab-btn.active {
+  background: var(--accent);
+  color:      var(--accent-fg);
+}
+
+.settings-content {
+  flex:           1;
+  min-height:     0;
+  min-width:      0;
+  overflow:       hidden;
+  display:        flex;
+  flex-direction: column;
+}
+
+.settings-panel {
+  flex:           1;
+  min-height:     0;
+  display:        flex;
+  flex-direction: column;
+}
+.settings-panel.hidden { display: none; }
+
+/* Scrollable card inside each settings tab */
+.tab-scroll-card {
+  flex:           1;
+  min-height:     0;
+  overflow-y:     auto;
+  margin:         14px 14px 0;
+  padding:        16px 20px;
+  background:     var(--card-bg);
+  border:         1px solid var(--card-border);
+  border-radius:  var(--radius);
+  box-shadow:     0 1px 2px var(--shadow);
+  display:        flex;
+  flex-direction: column;
+  gap:            14px;
+}
+.tab-scroll-card::-webkit-scrollbar       { width: 6px; }
+.tab-scroll-card::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+/* Footer row: always visible below the scrollable card */
+.tab-footer {
+  flex-shrink:     0;
+  display:         flex;
+  justify-content: flex-end;
+  align-items:     center;
+  gap:             10px;
+  padding:         10px 16px;
+}
+
+/* Appearance tab — theme/skin picker buttons */
+.appearance-btn-group {
+  display:   flex;
+  flex-wrap: wrap;
+  gap:       8px;
+}
+.appearance-btn {
+  padding:       6px 14px;
+  border-radius: var(--radius-sm);
+  font-size:     13px;
+  background:    rgba(128,128,128,0.08);
+  border:        1px solid var(--input-border);
+  color:         var(--text);
+}
+.appearance-btn:hover        { background: rgba(128,128,128,0.18); }
+.appearance-btn-active {
+  background:   var(--accent);
+  color:        var(--accent-fg);
+  border-color: var(--accent-hover);
+  font-weight:  600;
+}
+
 
 /* ── Destination rows ─────────────────────────────────────────────────────── */
+.dest-item { display: flex; flex-direction: column; gap: 6px; }
 .dest-row  { display: flex; gap: 8px; align-items: center; }
 .dest-row input { flex: 1; }
 .dest-sep  { border: none; border-top: 1px solid var(--separator); margin: 4px 0; }
 
 .subfolder-row  { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; }
-.subfolder-label { font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.subfolder-label { font-size: 12px; color: var(--text-dim); cursor: pointer; }
+
+/* ── Volume info panel ────────────────────────────────────────────────────── */
+.vol-info { display: flex; flex-direction: column; gap: 3px; padding: 0 2px; }
+.vol-info-row {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+  flex-wrap:   wrap;
+}
+.vol-type-name { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.vol-stat      { font-size: 11px; color: var(--text-dim); }
+.vol-bar-track {
+  height:        4px;
+  background:    rgba(128,128,128,0.18);
+  border-radius: 2px;
+  overflow:      hidden;
+}
+.vol-bar-fill {
+  height:        100%;
+  width:         0%;
+  border-radius: 2px;
+  transition:    width 0.3s ease, background 0.3s ease;
+}
+.vol-bar-green  { background: #4caf50; }
+.vol-bar-orange { background: #ff9800; }
+.vol-bar-red    { background: #f44336; }
 
 /* ── Jobs queue ───────────────────────────────────────────────────────────── */
 #jobs-container { display: flex; flex-direction: column; gap: var(--gap); }
@@ -385,6 +526,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   display:         flex;
   align-items:     center;
   justify-content: space-between;
+  min-height:      16px;
 }
 
 /* Small uppercase label used inside the job card for "Source" / "Destinations" */
@@ -403,27 +545,90 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Job label turns green when the job finishes successfully */
 .job-label.job-done { color: var(--success); font-weight: 700; }
 
-/* ── Progress bar ─────────────────────────────────────────────────────────── */
-#progress-container { display: flex; flex-direction: column; gap: 4px; }
-#progress-track {
-  height:        6px;
+/* Horizontal source / destinations layout inside each job card */
+.job-group .card { padding: 0; overflow: hidden; min-width: 640px; }
+.job-body {
+  display:     flex;
+  align-items: stretch;
+}
+.job-src-section {
+  flex:           1;
+  min-width:      0;
+  padding:        10px 14px;
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+}
+.job-vsep {
+  width:           32px;
+  flex-shrink:     0;
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  color:           var(--accent);
+  font-size:       32px;
+  font-weight:     300;
+  line-height:     1;
+  padding:         0 2px;
+}
+.job-vsep::after {
+  content: '›';
+}
+.job-dest-section {
+  flex:           1;
+  min-width:      0;
+  padding:        10px 14px;
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+}
+
+/* ── Per-job progress bar ─────────────────────────────────────────────────── */
+.job-progress {
+  display:        flex;
+  flex-direction: column;
+  gap:            3px;
+  padding:        3px 2px 0;
+}
+.job-progress-track {
+  height:        5px;
   background:    rgba(128,128,128,0.15);
   border-radius: 3px;
   overflow:      hidden;
 }
-#progress-fill {
+.job-progress-fill {
   height:        100%;
   width:         0%;
   background:    var(--accent);
   border-radius: 3px;
   transition:    width 0.25s ease;
 }
-#progress-text { font-size: 11px; color: var(--text-dim); min-height: 16px; }
+.job-progress-fill.job-progress-done  { background: #4caf50; }
+.job-progress-fill.job-progress-error { background: var(--error); }
+.job-progress-text { font-size: 11px; color: var(--text-dim); min-height: 14px; }
 
 /* ── Status ───────────────────────────────────────────────────────────────── */
-#status-label         { font-size: 12px; min-height: 16px; }
-#status-label.success { color: var(--success); font-weight: 500; }
-#status-label.error   { color: var(--error);   font-weight: 500; }
+#status-label {
+  font-size:    12px;
+  line-height:  1.35;
+  padding:      6px 12px;
+  flex-shrink:  0;
+  border-top:   1px solid var(--separator);
+}
+#status-label:empty    { display: none; }
+#status-label.success  { color: var(--success); font-weight: 500; }
+#status-label.error    { color: var(--error);   font-weight: 500; }
+
+/* ── Log panel toggle ─────────────────────────────────────────────────────── */
+#log-toggle-btn {
+  width: 38px; height: 38px;
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  border-radius:   var(--radius-sm);
+}
+#log-toggle-btn:hover { background: rgba(128,128,128,0.15); }
+#log-toggle-btn svg   { width: 18px; height: 18px; stroke: var(--titlebar-txt); fill: none; }
 
 /* ── Toggle switch ────────────────────────────────────────────────────────── */
 .toggle-label {
@@ -468,28 +673,27 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   transform: translateX(12px);
 }
 
-/* ── Options bar ──────────────────────────────────────────────────────────── */
-#options-bar   { padding: 0; }
-#options-inner {
+/* ── Per-job options row: hash + CSV + PDF + HTML ─────────────────────────── */
+.job-options-row {
   display:     flex;
   align-items: center;
-  gap:         16px;
-  padding:     6px 12px;
+  gap:         14px;
+  padding:     7px 14px 8px;
+  border-top:  1px solid var(--separator);
   flex-wrap:   wrap;
 }
-#hash-select {
-  font-size:    13px;
-  font-family:  inherit;
-  color:        var(--text);
-  background:   var(--card-bg);
-  border:       1px solid var(--input-border);
+.job-hash-select {
+  font-size:     13px;
+  font-family:   inherit;
+  color:         var(--text);
+  background:    var(--card-bg);
+  border:        1px solid var(--input-border);
   border-radius: var(--radius-sm);
-  padding:      2px 6px;
-  cursor:       pointer;
-  outline:      none;
+  padding:       2px 6px;
+  cursor:        pointer;
+  outline:       none;
 }
-#hash-select:focus { border-color: var(--input-focus); }
-#gear-btn { margin-left: auto; }
+.job-hash-select:focus { border-color: var(--input-focus); }
 
 /* ── Buttons row ─────────────────────────────────────────────────────────────
    Bottom bar: MD5/XXH3/CSV/PDF checkboxes + Open destinations + Copy button.
@@ -544,7 +748,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
 }
 .col-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
-.modal-btn-row { display: flex; justify-content: center; gap: 10px; padding-top: 4px; flex-wrap: wrap; }
+.modal-btn-row { display: flex; justify-content: center; gap: 10px; padding-top: 4px; flex-wrap: wrap; position: sticky; bottom: 0; background: var(--surface); }
 
 /* ── Logo picker row ─────────────────────────────────────────────────────────
    The logo row sits inside the Report Header card in the Settings modal.
@@ -689,14 +893,93 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .match-ok   { color: #16a34a; }   /* vivid green  */
 .match-fail { color: #dc2626; }   /* vivid red    */
 
-/* ── About ────────────────────────────────────────────────────────────────── */
+/* ── Comment button (per-job "T" note button) ───────────────────────────── */
+.job-comment-btn {
+  margin-left:     auto;
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  width:           26px;
+  height:          24px;
+  font-size:       13px;
+  font-weight:     700;
+  font-family:     Georgia, "Times New Roman", serif;
+  font-style:      italic;
+  border:          1px solid var(--input-border);
+  border-radius:   var(--radius-sm);
+  background:      transparent;
+  color:           var(--text-dim);
+  padding:         0;
+  flex-shrink:     0;
+  transition:      background 0.12s, color 0.12s, border-color 0.12s;
+}
+.job-comment-btn:hover { background: rgba(128,128,128,0.12); color: var(--text); }
+.job-comment-btn.has-comment {
+  background:   var(--success);
+  border-color: var(--success);
+  color:        #fff;
+}
+.job-comment-btn.has-comment:hover { filter: brightness(0.88); }
+
+/* ── Comment modal ─────────────────────────────────────────────────────────── */
+.comment-modal {
+  width:      560px;
+  max-width:  96vw;
+  overflow-y: visible;
+}
+.comment-toolbar {
+  display:        flex;
+  gap:            4px;
+  padding-bottom: 8px;
+  border-bottom:  1px solid var(--separator);
+}
+.comment-fmt-btn {
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  width:           28px;
+  height:          28px;
+  font-size:       13px;
+  border:          1px solid var(--input-border);
+  border-radius:   var(--radius-sm);
+  background:      var(--input-bg);
+  color:           var(--text);
+  padding:         0;
+}
+.comment-fmt-btn:hover { background: rgba(128,128,128,0.15); }
+#comment-editor {
+  min-height:    90px;
+  max-height:    240px;
+  overflow-y:    auto;
+  border:        1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  padding:       8px 10px;
+  background:    var(--input-bg);
+  color:         var(--text);
+  font-size:     13px;
+  line-height:   1.5;
+  outline:       none;
+}
+#comment-editor:focus {
+  border-color: var(--input-focus);
+  box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
+}
+#comment-editor:empty::before {
+  content:        'Add a note for this job — it will appear in reports…';
+  color:          var(--text-dim);
+  pointer-events: none;
+}
+#comment-editor::-webkit-scrollbar       { width: 5px; }
+#comment-editor::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+/* ── About (inside settings panel) ───────────────────────────────────────── */
 #about-content {
   text-align:     center;
   display:        flex;
   flex-direction: column;
   align-items:    center;
   gap:            8px;
-  padding:        8px 0;
+  padding:        16px 0 8px;
 }
 #about-icon    { width: 72px; height: 72px; color: var(--accent); }
 #about-tagline { color: var(--text-dim); font-size: 12px; font-style: italic; }

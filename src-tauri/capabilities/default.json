@@ -8,6 +8,7 @@
     "core:event:default",
     "core:window:default",
     "core:webview:default",
+    "core:webview:allow-set-webview-background-color",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",
