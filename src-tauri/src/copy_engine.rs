@@ -298,6 +298,20 @@ struct ConflictEntry {
     dst_matches: Vec<(usize, bool, bool)>, // (dst_idx, size_match, date_match)
 }
 
+/// Returns `true` when two mtimes are within 2 seconds of each other.
+///
+/// Exact equality fails across filesystem boundaries because different filesystems
+/// have different timestamp precisions:
+///   - ext4 / btrfs / XFS : nanosecond
+///   - NTFS (via ntfs-3g) : 100 nanoseconds — up to 99 ns lost on round-trip
+///   - FAT32               : 2 seconds
+///
+/// 2 seconds covers all of the above with margin.
+fn mtimes_close(a: std::time::SystemTime, b: std::time::SystemTime) -> bool {
+    let diff = if a >= b { a.duration_since(b) } else { b.duration_since(a) };
+    diff.map(|d| d < std::time::Duration::from_secs(2)).unwrap_or(false)
+}
+
 /// Returns elapsed time since `start` as a timecode: `HH:MM:SS.d`.
 ///
 /// Example output: `00:00:06.6`, `00:02:05.3`
@@ -429,7 +443,10 @@ pub fn run(
                     _ => false,
                 };
                 let date_match = match (&src_meta, &dst_meta) {
-                    (Some(sm), Some(dm)) => sm.modified().ok() == dm.modified().ok(),
+                    (Some(sm), Some(dm)) => match (sm.modified(), dm.modified()) {
+                        (Ok(st), Ok(dt)) => mtimes_close(st, dt),
+                        _ => false,
+                    },
                     _ => false,
                 };
                 Some((i, size_match, date_match))
