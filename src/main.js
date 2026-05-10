@@ -978,10 +978,11 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
 
             var inSource = false;
             if (srcInputEl) {
-                var srcRow = srcInputEl.closest('.row');
-                if (srcRow) {
-                    var sr = srcRow.getBoundingClientRect();
-                    inSource = dropY >= sr.top && dropY <= sr.bottom + 30;
+                var srcSection = srcInputEl.closest('.job-src-section');
+                if (srcSection) {
+                    var sr = srcSection.getBoundingClientRect();
+                    var dropX = event.payload.position ? event.payload.position.x : 0;
+                    inSource = dropX >= sr.left && dropX <= sr.right;
                 }
             }
 

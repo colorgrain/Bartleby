@@ -1727,7 +1727,8 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
             drop(dst_file);
             return copy_file_buffered_chunked(src, dst, pc);
         }
-        if let Some(mtime) = src_mtime { let _ = dst_file.set_modified(mtime); }
+        drop(dst_file);
+        if let Some(mtime) = src_mtime { set_mtime_via_path(dst, mtime); }
         return Ok(total);
     }
     #[cfg(not(target_os = "linux"))]
@@ -1766,7 +1767,15 @@ fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel) -> io::R
         dst_file.write_all(&buf[..n])?;
         total += n as u64;
     }
+    // On non-Linux: set mtime on the open fd — macOS/Windows don't override on close.
+    // On Linux:     close first, then utimensat via path — FUSE drivers (ntfs-3g,
+    //               fuse-exfat) reset mtime to "now" when the write fd is closed,
+    //               so any fd-based set_modified call would be silently overridden.
+    #[cfg(not(target_os = "linux"))]
     if let Some(mtime) = src_mtime { let _ = dst_file.set_modified(mtime); }
+    drop(dst_file);
+    #[cfg(target_os = "linux")]
+    if let Some(mtime) = src_mtime { set_mtime_via_path(dst, mtime); }
     Ok(total)
 }
 
@@ -1850,6 +1859,36 @@ fn is_fuse_path(path: &Path) -> bool {
     // Cast to u64 for cross-architecture safety: f_type is i32 on 32-bit Linux
     // and i64 on 64-bit Linux; the constant 0x65735546 fits in both.
     (buf.f_type as u64) == 0x6573_5546_u64
+}
+
+/// Sets a file's modification time via `utimensat(2)` using the file path.
+///
+/// Unlike `File::set_modified()` (which calls `futimens` on an open fd),
+/// this function works on a path and must be called **after** the file is closed.
+/// This is critical on FUSE filesystems (ntfs-3g, fuse-exfat): those drivers
+/// update mtime when a file fd is closed after writing, overriding any mtime
+/// set on the still-open fd. By closing first and then issuing a separate
+/// `utimensat` syscall, the FUSE driver processes it as a standalone `FUSE_SETATTR`
+/// that is not silently overridden.
+///
+/// Only the mtime is changed; atime is left untouched via `UTIME_OMIT`.
+/// Errors are silently ignored — a wrong mtime is logged at the conflict-check
+/// step on the next run, which is the user-visible signal.
+#[cfg(target_os = "linux")]
+fn set_mtime_via_path(path: &Path, mtime: std::time::SystemTime) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::ffi::CString;
+    if let Ok(path_c) = CString::new(path.as_os_str().as_bytes()) {
+        let dur = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let times = [
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+            libc::timespec {
+                tv_sec:  dur.as_secs() as libc::time_t,
+                tv_nsec: dur.subsec_nanos() as libc::c_long,
+            },
+        ];
+        unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0); }
+    }
 }
 
 /// Evicts a file's pages from the OS page cache via `posix_fadvise(FADV_DONTNEED)`.
