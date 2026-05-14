@@ -13,7 +13,9 @@
 
 set -euo pipefail
 
-BINARIES_DIR="$(dirname "$0")/../src-tauri/binaries"
+# Prefer the absolute path injected by CI (BINARIES_DIR env var).
+# Fallback: compute from the script's own location so local runs still work.
+BINARIES_DIR="${BINARIES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../src-tauri/binaries}"
 mkdir -p "$BINARIES_DIR"
 
 # ── Detect platform ───────────────────────────────────────────────────────────
@@ -131,31 +133,40 @@ download_ffmpeg() {
   case "$triple" in
     x86_64-unknown-linux-gnu)
       # BtbN GPL static build — recommandé officiellement par ffmpeg.org
-      # Archive structure: ffmpeg-master-latest-linux64-gpl/bin/ffmpeg
       local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
       echo "Downloading FFmpeg (BtbN static GPL) for Linux x86_64..."
       curl -fsSL "$url" -o "$tmpdir/ff.tar.xz"
-      tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir" --wildcards "*/bin/ffmpeg" --strip-components=2
-      cp "$tmpdir/ffmpeg" "$dest"
+      # Extract the ffmpeg binary; use find as fallback in case archive layout changes
+      tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir" --wildcards "*/bin/ffmpeg" --strip-components=2 2>/dev/null \
+        || tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir"
+      local ffbin; ffbin="$(find "$tmpdir" -maxdepth 3 -type f -name "ffmpeg" | head -1)"
+      [[ -z "$ffbin" ]] && { echo "ERROR: ffmpeg not found in archive"; exit 1; }
+      cp "$ffbin" "$dest"
       ;;
     aarch64-unknown-linux-gnu)
       # BtbN GPL static build pour Linux ARM64
       local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
       echo "Downloading FFmpeg (BtbN static GPL) for Linux ARM64..."
       curl -fsSL "$url" -o "$tmpdir/ff.tar.xz"
-      tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir" --wildcards "*/bin/ffmpeg" --strip-components=2
-      cp "$tmpdir/ffmpeg" "$dest"
+      tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir" --wildcards "*/bin/ffmpeg" --strip-components=2 2>/dev/null \
+        || tar -xJf "$tmpdir/ff.tar.xz" -C "$tmpdir"
+      local ffbin; ffbin="$(find "$tmpdir" -maxdepth 3 -type f -name "ffmpeg" | head -1)"
+      [[ -z "$ffbin" ]] && { echo "ERROR: ffmpeg not found in archive"; exit 1; }
+      cp "$ffbin" "$dest"
       ;;
     x86_64-apple-darwin|aarch64-apple-darwin)
       # evermeet.cx — recommandé par ffmpeg.org pour macOS.
       # ⚠ Intel x86_64 uniquement. Sur Apple Silicon, Rosetta 2 prend le relais.
-      # Le format natif est .7z mais getrelease/ffmpeg/zip fournit un .zip.
+      # -J supprimé : avec -o, certaines versions de curl remplacent le nom de
+      # fichier par celui du Content-Disposition header, cassant l'unzip suivant.
       local url="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
       echo "Downloading FFmpeg (evermeet.cx, Intel x86_64) for macOS..."
       echo "  Note: runs via Rosetta 2 on Apple Silicon (no native arm64 official source)"
-      curl -fsSJL "$url" -o "$tmpdir/ff.zip"
+      curl -fsSL "$url" -o "$tmpdir/ff.zip"
       unzip -q "$tmpdir/ff.zip" -d "$tmpdir"
-      cp "$tmpdir/ffmpeg" "$dest"
+      local ffbin; ffbin="$(find "$tmpdir" -maxdepth 2 -type f -name "ffmpeg" | head -1)"
+      [[ -z "$ffbin" ]] && { echo "ERROR: ffmpeg not found in zip"; exit 1; }
+      cp "$ffbin" "$dest"
       # Ad-hoc sign for macOS
       if command -v codesign &>/dev/null; then
         codesign -s - "$dest" && echo "  ✓ Ad-hoc signed $dest"

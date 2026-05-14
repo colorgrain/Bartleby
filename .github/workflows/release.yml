@@ -75,18 +75,33 @@ jobs:
         shell: powershell
         run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
+      # macOS ships bash 3.2 (GPL v2). set -e inside functions is broken in
+      # bash < 4: a failed command inside a function doesn't exit the script,
+      # so the download can silently fail and return 0. brew install bash
+      # puts bash 5 in PATH so the next step picks it up.
+      - name: Upgrade bash (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bash
+
       # ── Sidecar binaries ──────────────────────────────────────────────────
       # Each runner downloads the binary for its own platform.
       # The script auto-detects OS/arch and places the file with the
       # correct Tauri triple suffix in src-tauri/binaries/.
+      # BINARIES_DIR is passed as an absolute path to avoid CWD ambiguity.
       - name: Download sidecar binaries (Linux / macOS)
         if: runner.os != 'Windows'
+        env:
+          BINARIES_DIR: ${{ github.workspace }}/src-tauri/binaries
         run: bash scripts/download_sidecars.sh
 
       - name: Download sidecar binaries (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: .\scripts\download_sidecars.ps1
+
+      - name: Verify sidecar binaries
+        if: runner.os != 'Windows'
+        run: ls -lh "${{ github.workspace }}/src-tauri/binaries/"
 
       # ── npm ───────────────────────────────────────────────────────────────
       - name: npm install
