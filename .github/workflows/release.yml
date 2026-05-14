@@ -1,0 +1,118 @@
+name: Release
+
+# Trigger: push a version tag  →  git tag v0.1.0-4 && git push origin v0.1.0-4
+# Or run manually from the Actions tab (workflow_dispatch).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0-4)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    permissions:
+      contents: write   # needed to create the GitHub Release and upload assets
+
+    strategy:
+      fail-fast: false  # if one platform fails, the others keep running
+      matrix:
+        include:
+          # Linux: ffmpeg sidecar only. mediainfo is a .deb dependency → installed by apt.
+          - platform: ubuntu-22.04
+            config-path: ''
+
+          # Windows: ffmpeg + mediainfo both bundled as sidecars.
+          - platform: windows-latest
+            config-path: src-tauri/tauri.windows.conf.json
+
+          # macOS (M1/M2 arm64 runner): ffmpeg + mediainfo both bundled as sidecars.
+          # Add macos-13 to the list for an Intel Mac build as well.
+          - platform: macos-latest
+            config-path: src-tauri/tauri.macos.conf.json
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      # ── Source ───────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Rust ─────────────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # ── Node.js ──────────────────────────────────────────────────────────────
+      - name: Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── Platform-specific system dependencies ─────────────────────────────
+      - name: Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            unzip
+
+      - name: Windows — allow PowerShell scripts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+      # ── Sidecar binaries ──────────────────────────────────────────────────
+      # Each runner downloads the binary for its own platform.
+      # The script auto-detects OS/arch and places the file with the
+      # correct Tauri triple suffix in src-tauri/binaries/.
+      - name: Download sidecar binaries (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: bash scripts/download_sidecars.sh
+
+      - name: Download sidecar binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\download_sidecars.ps1
+
+      # ── npm ───────────────────────────────────────────────────────────────
+      - name: npm install
+        run: npm install
+
+      # ── Build & publish ───────────────────────────────────────────────────
+      # tauri-action builds the platform installer, creates a GitHub Release
+      # (draft), and uploads the artifacts.  No signing secrets are required
+      # for an unsigned/ad-hoc-signed build.
+      #
+      # ⚠  macOS: the .dmg will be ad-hoc signed (done by download_sidecars.sh)
+      #    but NOT notarized (requires a paid Apple Developer account).
+      #    Users who download it from GitHub will see a Gatekeeper warning on
+      #    first launch: right-click → Open to bypass it.
+      #
+      # ⚠  Windows: the .msi/.exe will show a SmartScreen warning (unsigned).
+      #    Users click "More info → Run anyway" to proceed.
+      - name: Build & publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName:      ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName:  'Bartleby ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseDraft: true    # review the draft before publishing
+          prerelease:   false
+          # On macOS/Windows, load the platform config that adds mediainfo to externalBin.
+          # On Linux the field is empty so no --config flag is passed.
+          args: ${{ matrix.config-path != '' && format('--config {0}', matrix.config-path) || '' }}

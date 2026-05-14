@@ -50,7 +50,7 @@ name = "bartleby"
 #   • tauri.conf.json → "version"
 #   • pub const VERSION: &str in src/main.rs
 #   • The version displayed in the About modal (index.html)
-version = "0.1.0-3"
+version = "0.1.0-4"
 
 # The Rust edition determines which language features and idioms are available.
 # "2021" is the current stable edition (previous: "2015", "2018").
@@ -228,6 +228,22 @@ md-5 = { version = "0.10", features = ["oid"] }
 twox-hash = "2.1"
 # aligned-vec removed — using libc::posix_memalign directly
 
+# ── SHA-1 and SHA-512: additional hash algorithms for MHL support ─────────────
+# sha1 and sha2 are from the RustCrypto project.  Both re-export `digest::Digest`
+# so they work together in the same hasher dispatch loop.
+sha1 = "0.10"
+sha2 = "0.10"
+
+# ── bs58: Base-58 encoding for C4 ID generation ───────────────────────────────
+# C4 IDs are SHA-512 hashes Base-58 encoded with the Bitcoin alphabet.
+# `bs58::encode(bytes).into_string()` produces the standard encoded string.
+bs58 = "0.5"
+
+# ── roxmltree: lightweight read-only XML DOM ──────────────────────────────────
+# Used in verify_engine.rs to parse ASC MHL v2.0 XML files.
+# MHL files are small (< 1 MB) so a DOM approach is fine.
+roxmltree = "0.19"
+
 # ── printpdf: PDF generation ──────────────────────────────────────────────────
 #
 # `printpdf` is a pure-Rust PDF generation library. "Pure Rust" means no C
@@ -397,4 +413,4 @@ libc = "0.2"
 openssl = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation"] }
+windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }

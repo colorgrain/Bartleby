@@ -132,11 +132,14 @@ use tauri::WebviewWindow;
 // Items in a submodule are accessed as `name::Item` unless brought into scope with `use`.
 //
 // The four modules of Bartleby's backend:
-mod copy_engine; // Phase 1 (streaming copy) + Phase 2 (MD5 verify) + Phase 3 (reports)
-mod metadata;    // mediainfo-based technical metadata extraction + CSV writing
-mod pdf_report;  // A4 landscape PDF report generation (thumbnails, table, header)
-mod html_report; // Self-contained HTML report generation (thumbnails, table, header)
-mod settings;    // User preferences: JSON persistence, defaults, typed fields
+mod copy_engine;   // Phase 1 (streaming copy) + Phase 2 (hash verify) + Phase 3 (reports)
+mod metadata;      // mediainfo-based technical metadata extraction + CSV writing
+mod pdf_report;    // A4 landscape PDF report generation (thumbnails, table, header)
+mod html_report;   // Self-contained HTML report generation (thumbnails, table, header)
+mod mhl_report;    // ASC MHL v2.0 hash-list generator (one file per destination)
+mod settings;      // User preferences: JSON persistence, defaults, typed fields
+mod sidecar;       // Resolves bundled sidecar binaries (mediainfo, ffmpeg) with PATH fallback
+mod verify_engine; // Checksum / MHL verification + post-verify MHL generation
 
 // Bring `Settings` into scope from the `settings` module.
 // We use it often enough that the full path `settings::Settings` would be noisy.
@@ -307,6 +310,10 @@ fn main() {
             get_home_dir,
             get_volume_info,
             set_webview_bg,
+            open_verifier_window,
+            start_verification,
+            save_verify_html,
+            generate_post_verify_mhl,
         ])
 
         // Start the Tauri event loop. This call blocks until the window is closed.
@@ -502,17 +509,9 @@ struct StartCopyArgs {
     src:          String,
     /// Absolute paths to one or more destination directories.
     destinations: Vec<String>,
-    /// `true` → "Copy and verify" mode (Phase 1 copy + Phase 2 MD5 re-read).
-    /// `false` → "Copy only" mode (Phase 1 only, no MD5 comparison).
-    verify:       bool,
-    /// Generate a `{src_name}_checksum.md5` file in each destination.
-    gen_md5:      bool,
-    /// Generate a `{src_name}_checksum.xxh3` file in each destination.
-    /// verify = gen_md5 || gen_xxh || gen_size, pre-computed by JavaScript.
-    gen_xxh:      bool,
-    /// Check that each destination file has the same byte count as the source.
-    /// No checksum file is written. Faster than MD5/XXH3 but does not detect bit-rot.
-    gen_size:     bool,
+    /// Hash algorithm to use for integrity verification and checksum file generation.
+    /// One of: "none", "size", "md5", "sha1", "xxh64", "xxh3", "xxh128", "c4".
+    hash_algo:    String,
     /// Generate a `{src_name}_report.csv` metadata table in each destination.
     gen_csv:      bool,
     /// Generate a `{src_name}_report.pdf` visual report in each destination.
@@ -523,10 +522,17 @@ struct StartCopyArgs {
     /// When true:  destination/source_name/file.ext
     /// When false: destination/file.ext  (current default)
     copy_as_subfolder: bool,
-    /// Per-job comment/note written into report headers (CSV, PDF, HTML).
+    /// Generate an ASC MHL v2.0 hash list in each destination.
+    /// Ignored when hash_algo is "none" or "size".
+    #[serde(default)]
+    gen_mhl:      bool,
+    /// Per-job comment/note written into report headers (CSV, PDF, HTML, MHL).
     /// HTML string from the WYSIWYG editor (bold/italic/underline only).
     #[serde(default)]
     comment:      String,
+    /// Per-job shooting location written into report headers and MHL.
+    #[serde(default)]
+    location:     String,
     /// Whether to open each destination in the file manager after a successful copy.
     /// This flag is read by JavaScript in the `copy-done` handler, not by Rust.
     #[allow(dead_code)]
@@ -645,22 +651,14 @@ fn start_copy(
     let pc = copy_engine::PauseCancel::new();
     *state.pause_cancel.lock().unwrap() = Some(pc.clone());
 
-    // ── Extract flags before moving into closures ──────────────────────────────
-    // `args` is moved into the first thread's closure below. But we need several
-    // of its fields after that. In Rust, once a value is moved, it cannot be used.
-    // We copy the booleans into local variables first (booleans are `Copy`, so they
-    // can be duplicated without `clone()` — the compiler does it implicitly).
-    // This is an explicit documentation of what the two threads each receive.
-    let verify   = args.verify;
-    let gen_md5  = args.gen_md5;
-    let gen_xxh  = args.gen_xxh;
-    let gen_size = args.gen_size;
-    let gen_csv  = args.gen_csv;
-    let gen_pdf  = args.gen_pdf;
-    let gen_html = args.gen_html;
-    let comment  = args.comment;
-    // `args.open_dest` is not read here — it is used by JavaScript in the `copy-done`
-    // event handler to decide whether to call `invoke("open_destinations", …)`.
+    // ── Extract fields before moving into closures ─────────────────────────────
+    let hash_algo = copy_engine::HashAlgo::from_str(&args.hash_algo);
+    let gen_csv   = args.gen_csv;
+    let gen_pdf   = args.gen_pdf;
+    let gen_html  = args.gen_html;
+    let gen_mhl   = args.gen_mhl;
+    let comment   = args.comment;
+    let location  = args.location;
 
     // ── Thread 1: Copy engine ──────────────────────────────────────────────────
     // `thread::spawn(move || { … })` starts a new OS thread.
@@ -679,21 +677,20 @@ fn start_copy(
     // It runs the three phases: copy → verify → reports.
     thread::spawn(move || {
         copy_engine::run(
-            src_path,                    // absolute source directory path
-            dst_paths,                   // list of destination directory paths
-            verify,                      // Phase 2 enabled? (= gen_md5 || gen_xxh || gen_size)
-            gen_md5,                     // compute MD5 + write .md5 file
-            gen_xxh,                     // compute XXH3 + write .xxh3 file
-            gen_size,                    // fast file-size check (no checksum file written)
-            gen_csv,                     // generate .csv metadata report?
-            gen_pdf,                     // generate .pdf visual report?
-            gen_html,                    // generate .html self-contained report?
-            args.copy_as_subfolder,      // wrap files inside source folder name?
-            comment,                     // per-job note for report headers
-            settings_snapshot,           // snapshot of user settings
-            tx,                          // Sender<Msg>: engine pushes progress updates here
-            reply_rx,                    // Receiver<Reply>: engine waits for user replies here
-            pc,                          // pause/cancel control handle
+            src_path,
+            dst_paths,
+            hash_algo,
+            gen_csv,
+            gen_pdf,
+            gen_html,
+            gen_mhl,
+            args.copy_as_subfolder,
+            comment,
+            location,
+            settings_snapshot,
+            tx,
+            reply_rx,
+            pc,
         );
         // When run() returns, `tx` is dropped. This signals the forwarding thread
         // that no more messages will arrive (Receiver::recv() will return Err).
@@ -780,6 +777,17 @@ fn start_copy(
                         kind:           "conflicts".into(),
                         items:          vec![],
                         conflict_items: Some(conflict_items),
+                    });
+                }
+
+                // ── MHL conflict prompt (Phase 3) ─────────────────────────────
+                // A previous MHL for this source was found at the destination.
+                // Reply::Continue → replace, Reply::Skip → keep both, Reply::Cancel → skip MHL.
+                Ok(copy_engine::Msg::MhlConflict { dst, existing_mhl }) => {
+                    let _ = win.emit("copy-prompt", PromptPayload {
+                        kind:           "mhl_conflict".into(),
+                        items:          vec![dst, existing_mhl],
+                        conflict_items: None,
                     });
                 }
 
@@ -1206,7 +1214,21 @@ fn vol_space(path: &str) -> Option<(u64, u64)> {
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn vol_space(path: &str) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    let mut avail: u64 = 0;
+    let mut total: u64 = 0;
+    let mut _free: u64 = 0;
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut _free) } == 0 {
+        return None;
+    }
+    Some((total, avail))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn vol_space(_path: &str) -> Option<(u64, u64)> { None }
 
 #[cfg(target_os = "linux")]
@@ -1290,7 +1312,102 @@ fn vol_label_type(path: &str) -> (String, String) {
     (label, mtype.to_string())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Returns true if the volume whose root is `root` (null-terminated UTF-16,
+/// e.g. `['C',':','\\',0]`) is a solid-state device (no seek penalty).
+/// Opens `\\.\X:` and sends IOCTL_STORAGE_QUERY_PROPERTY with
+/// StorageDeviceSeekPenaltyProperty (id=7). Falls back to false on any error
+/// so the caller can safely default to "HDD".
+#[cfg(target_os = "windows")]
+fn is_fixed_ssd(root: &[u16]) -> bool {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
+
+    // Build "\\.\X:" (device path) from the volume root "X:\".
+    // We only handle single-letter drive paths (root starts with "X:").
+    let root_end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+    if root_end < 2 { return false; }
+
+    // \\.\  prefix in UTF-16
+    let mut dev: Vec<u16> = vec![b'\\' as u16, b'\\' as u16, b'.' as u16, b'\\' as u16];
+    dev.extend_from_slice(&root[..2]); // "X:"
+    dev.push(0);
+
+    // Open the volume device (no read/write access needed for IOCTL).
+    let h = unsafe {
+        CreateFileW(
+            dev.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE { return false; }
+
+    // Input: STORAGE_PROPERTY_QUERY { PropertyId=7 (SeekPenalty), QueryType=0 (Standard) }
+    #[repr(C)] struct Query   { prop: u32, qtype: u32, extra: u8 }
+    // Output: DEVICE_SEEK_PENALTY_DESCRIPTOR
+    #[repr(C)] struct Penalty { _ver: u32, _sz: u32, incurs: u8 }
+
+    let q     = Query   { prop: 7, qtype: 0, extra: 0 };
+    let mut p = Penalty { _ver: 0, _sz: 0, incurs: 1 }; // default incurs=1 (HDD) as safe fallback
+    let mut returned = 0u32;
+
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            0x002D_1400u32, // IOCTL_STORAGE_QUERY_PROPERTY
+            &q     as *const Query    as *const c_void,
+            std::mem::size_of::<Query>() as u32,
+            &mut p as *mut   Penalty  as *mut   c_void,
+            std::mem::size_of::<Penalty>() as u32,
+            &mut returned,
+            std::ptr::null_mut::<OVERLAPPED>(),
+        )
+    };
+    unsafe { CloseHandle(h) };
+    ok != 0 && p.incurs == 0
+}
+
+#[cfg(target_os = "windows")]
+fn vol_label_type(path: &str) -> (String, String) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+        DRIVE_CDROM, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_REMOVABLE,
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    let mut root = vec![0u16; 260];
+    if unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return (String::new(), "Unknown".to_string());
+    }
+    let mtype = match unsafe { GetDriveTypeW(root.as_ptr()) } {
+        DRIVE_REMOVABLE => "Flash",
+        DRIVE_FIXED     => if is_fixed_ssd(&root) { "SSD" } else { "HDD" },
+        DRIVE_REMOTE    => "Network",
+        DRIVE_CDROM     => "CD-ROM",
+        _               => "Unknown",
+    };
+    let mut lbuf = vec![0u16; 260];
+    unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(), lbuf.as_mut_ptr(), lbuf.len() as u32,
+            std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(),
+            std::ptr::null_mut(), 0,
+        );
+    }
+    let lend  = lbuf.iter().position(|&c| c == 0).unwrap_or(lbuf.len());
+    let label = String::from_utf16_lossy(&lbuf[..lend]);
+    (label, mtype.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn vol_label_type(_path: &str) -> (String, String) {
     (String::new(), "Unknown".to_string())
 }
@@ -1327,4 +1444,64 @@ fn save_log(content: String) -> Result<String, String> {
     std::fs::write(&path, &content)
         .map_err(|e| format!("Cannot write log file: {}", e))?;
     Ok(path.to_string_lossy().to_string())
+}
+
+// ── Verifier window commands ──────────────────────────────────────────────────
+
+/// Open (or focus) the verification tool window.
+#[tauri::command]
+fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("verifier") {
+        w.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "verifier",
+        tauri::WebviewUrl::App("verifier.html".into()),
+    )
+    .title("Bartleby — Verification")
+    .inner_size(980.0, 700.0)
+    .min_inner_size(700.0, 500.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Start verifying a checksum or MHL file in a background thread.
+/// Progress and results are emitted as `"verify-progress"` / `"verify-done"` /
+/// `"verify-error"` events on the verifier window.
+#[tauri::command]
+fn start_verification(window: tauri::WebviewWindow, file_path: String) {
+    verify_engine::run(std::path::PathBuf::from(file_path), window);
+}
+
+/// Save a verification result as a self-contained HTML report.
+#[tauri::command]
+fn save_verify_html(
+    result:      verify_engine::VerifyResult,
+    output_path: String,
+) -> Result<(), String> {
+    verify_engine::write_html_report(&result, std::path::Path::new(&output_path))
+        .map_err(|e| e.to_string())
+}
+
+/// Generate a post-verification MHL (`<process>verify</process>`, generation N+1)
+/// for the original MHL that was just verified.
+#[tauri::command]
+fn generate_post_verify_mhl(
+    verified_mhl: String,
+    result:       verify_engine::VerifyResult,
+    state:        tauri::State<AppState>,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    verify_engine::write_post_verify_mhl(
+        std::path::Path::new(&verified_mhl),
+        &result,
+        &settings,
+    )
+    .map(|p| p.display().to_string())
+    .map_err(|e| e.to_string())
 }

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bartleby — Verification</title>
+  <link rel="stylesheet" href="style.css" />
+  <link id="theme-link" rel="stylesheet" href="themes/mint-y-aqua.css" />
+  <style>
+    /* ── Verifier-specific styles ─────────────────────────────────────────── */
+    #verifier-root { display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+    #verifier-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:0 10px; height:46px; flex-shrink:0;
+      background:var(--titlebar-bg); color:var(--titlebar-txt);
+      border-bottom:1px solid var(--titlebar-border);
+      box-shadow:var(--titlebar-shadow);
+      -webkit-app-region:drag; }
+    #verifier-header * { -webkit-app-region:no-drag; }
+    #verifier-body { flex:1; overflow-y:auto; padding:16px 20px; }
+
+    /* File input row */
+    #file-path-row { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+    #file-path-row input { flex:1; }
+    #file-path-row.drag-over input { border-color:var(--accent); box-shadow:0 0 0 2px rgba(31,158,222,.25); }
+    #browse-btn { flex-shrink:0; }
+
+    /* Verify button row */
+    #verifier-btn-row { display:flex; justify-content:center; margin-bottom:16px; }
+
+    /* Progress */
+    #progress-section { margin-bottom:16px; display:none; }
+    #prog-track { height:6px; background:rgba(128,128,128,.18); border-radius:3px; overflow:hidden; }
+    #prog-fill { height:100%; background:var(--accent); border-radius:3px;
+      transition:width .2s ease; width:0%; }
+    #prog-label { font-size:12px; color:var(--text-dim); margin-top:6px; }
+
+    /* Summary bar */
+    #summary-section { display:none; margin-bottom:16px; }
+    .summary-bar { display:flex; gap:12px; flex-wrap:wrap; }
+    .stat-chip { padding:6px 14px; border-radius:20px; font-size:12px; font-weight:600;
+      background:var(--card-bg); border:1px solid var(--separator); }
+    .stat-chip.ok   { background:#d4f0dc; color:#1a7a3e; border-color:#b8e0c4; }
+    .stat-chip.fail { background:#fde8e6; color:#c0271a; border-color:#f5c5c0; }
+    .stat-chip.miss { background:#fef3e2; color:#a05a10; border-color:#f0deb8; }
+
+    /* MHL metadata */
+    #mhl-meta { display:none; margin-bottom:16px; }
+    .meta-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:8px; }
+    .meta-item { background:var(--card-bg); border:1px solid var(--separator);
+      border-radius:6px; padding:10px 12px; font-size:12px; }
+    .meta-item label { display:block; font-size:10px; text-transform:uppercase;
+      letter-spacing:.06em; color:var(--text-dim); margin-bottom:4px; }
+    .meta-item span { word-break:break-all; }
+    .chain-ref { font-family:monospace; font-size:10px; word-break:break-all; color:var(--text-dim); }
+
+    /* Results table */
+    #results-section { display:none; }
+    #results-table-wrap { overflow-x:auto; border:1px solid var(--separator);
+      border-radius:6px; background:var(--card-bg); }
+    #results-table { width:100%; border-collapse:collapse; font-size:12px; }
+    #results-table th { background:var(--surface); font-size:10px; text-transform:uppercase;
+      letter-spacing:.05em; padding:7px 10px; text-align:left;
+      border-bottom:1px solid var(--separator); white-space:nowrap; }
+    #results-table td { padding:5px 10px; border-bottom:1px solid var(--separator);
+      vertical-align:top; }
+    #results-table tr:last-child td { border-bottom:none; }
+    .row-ok   { background:rgba(42,157,83,.06); }
+    .row-fail { background:rgba(214,58,43,.07); }
+    .row-miss { background:rgba(192,112,32,.07); }
+    .cell-path { font-family:monospace; word-break:break-all; }
+    .cell-hash { font-family:monospace; font-size:10px; color:var(--text-dim); word-break:break-all; }
+    .badge { display:inline-block; padding:1px 6px; border-radius:3px;
+      font-size:10px; font-weight:700; }
+    .badge-ok   { background:#d4f0dc; color:#1a7a3e; }
+    .badge-fail { background:#fde8e6; color:#c0271a; }
+    .badge-miss { background:#fef3e2; color:#a05a10; }
+    .badge-err  { background:#ede8ff; color:#5a2d91; }
+    .tick-ok   { color:#2a9d53; font-weight:700; }
+    .tick-fail { color:#d63a2b; font-weight:700; }
+
+    /* Action buttons row */
+    #action-row { display:none; gap:10px; flex-wrap:wrap;
+      padding:14px 0 4px; border-top:1px solid var(--separator); margin-top:16px; }
+    #post-verify-mhl-btn { display:none; }
+  </style>
+</head>
+<body class="theme-default">
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <symbol id="ico-folder" viewBox="0 0 24 24">
+    <path d="M3 7a2 2 0 0 1 2-2h4.586a1 1 0 0 1 .707.293L11.707 6.707A1 1 0 0 0 12.414 7H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
+      fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+  </symbol>
+</svg>
+
+<div id="verifier-root">
+
+  <!-- Header -->
+  <header id="verifier-header"></header>
+
+  <!-- Body -->
+  <div id="verifier-body">
+
+    <div id="file-path-row">
+      <input id="file-path-input" type="text" class="modal-input"
+             placeholder="Drop or browse a checksum / MHL file…" readonly />
+      <button id="browse-btn" class="icon-btn" title="Browse for checksum file">
+        <svg width="18" height="18"><use href="#ico-folder"/></svg>
+      </button>
+    </div>
+
+    <div id="verifier-btn-row">
+      <button id="verify-action-btn" class="action-btn suggested">Verify</button>
+    </div>
+
+    <!-- Progress -->
+    <div id="progress-section">
+      <div id="prog-track"><div id="prog-fill"></div></div>
+      <div id="prog-label">Starting…</div>
+    </div>
+
+    <!-- Summary chips -->
+    <div id="summary-section">
+      <div class="summary-bar">
+        <span id="chip-total" class="stat-chip"></span>
+        <span id="chip-ok"    class="stat-chip ok"></span>
+        <span id="chip-fail"  class="stat-chip fail"></span>
+        <span id="chip-miss"  class="stat-chip miss"></span>
+      </div>
+    </div>
+
+    <!-- MHL metadata -->
+    <div id="mhl-meta">
+      <div class="meta-grid" id="meta-grid"></div>
+    </div>
+
+    <!-- Results table -->
+    <div id="results-section">
+      <div id="results-table-wrap">
+        <table id="results-table">
+          <thead id="results-thead"></thead>
+          <tbody id="results-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Action row -->
+    <div id="action-row">
+      <button id="save-html-btn"       class="action-btn">Save HTML report</button>
+      <button id="post-verify-mhl-btn" class="action-btn suggested">Generate verify MHL</button>
+    </div>
+
+  </div><!-- /#verifier-body -->
+</div><!-- /#verifier-root -->
+<script src="verifier.js"></script>
+</body>
+</html>

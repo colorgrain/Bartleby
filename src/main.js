@@ -124,6 +124,12 @@ var userCancelledQueue = false;
 var currentJobIndex    = -1;
 var menuBtn            = document.getElementById('menu-btn');
 var settingsOverlay    = document.getElementById('settings-overlay');
+var verifyBtn          = document.getElementById('verify-btn');
+if (verifyBtn) {
+    verifyBtn.addEventListener('click', function() {
+        invoke('open_verifier_window').catch(function(e) { console.error('open_verifier_window:', e); });
+    });
+}
 
 // ── Job creation defaults ─────────────────────────────────────────────────────
 // Loaded from settings on startup. Used to initialise the toggles on new job cards.
@@ -132,6 +138,7 @@ var defaultHashAlgo = 'md5';
 var defaultGenCsv   = false;
 var defaultGenPdf   = false;
 var defaultGenHtml  = false;
+var defaultGenMhl   = false;
 
 // ── Transport control helpers ─────────────────────────────────────────────────
 function setCopyInProgress(active) {
@@ -154,11 +161,13 @@ async function loadSettings() {
 
         // Derive hash algorithm — handle old settings that stored gen_md5/gen_xxh booleans.
         var algo = currentSettings.hash_algo;
-        if (!algo) algo = currentSettings.gen_xxh ? 'xxh3' : (currentSettings.gen_md5 ? 'md5' : 'none');
+        if (!algo) algo = currentSettings.gen_xxh ? 'xxh128' : (currentSettings.gen_md5 ? 'md5' : 'none');
+        if (algo === 'xxh3') algo = 'xxh128'; // migrate renamed algo
         defaultHashAlgo = algo;
         defaultGenCsv   = currentSettings.gen_csv  || false;
         defaultGenPdf   = currentSettings.gen_pdf  || false;
         defaultGenHtml  = currentSettings.gen_html || false;
+        defaultGenMhl   = currentSettings.gen_mhl  || false;
 
         // Restore open-destinations toggle (now lives in Report tweaks tab).
         var chkOpenEl = document.getElementById('chk-open');
@@ -550,7 +559,16 @@ function addJob() {
     var hashSel = document.createElement('select');
     hashSel.className = 'job-hash-select';
     hashSel.title = 'Hash algorithm — controls verification and checksum file output';
-    [['none', 'No hash'], ['size', 'Size'], ['md5', '.MD5'], ['xxh3', '.XXH3']].forEach(function(pair) {
+    [
+        ['none',   'No hash'],
+        ['size',   'Size only'],
+        ['md5',    '.MD5'],
+        ['sha1',   '.SHA1'],
+        ['xxh64',  '.XXH64'],
+        ['xxh3',   '.XXH3-64'],
+        ['xxh128', '.XXH128'],
+        ['c4',     'C4 ID'],
+    ].forEach(function(pair) {
         var opt = document.createElement('option');
         opt.value       = pair[0];
         opt.textContent = pair[1];
@@ -562,6 +580,22 @@ function addJob() {
     jobOptsRow.appendChild(makeJobToggle('job-chk-csv',  '.CSV',  defaultGenCsv));
     jobOptsRow.appendChild(makeJobToggle('job-chk-pdf',  '.PDF',  defaultGenPdf));
     jobOptsRow.appendChild(makeJobToggle('job-chk-html', '.HTML', defaultGenHtml));
+
+    var mhlLbl = makeJobToggle('job-chk-mhl', '.MHL', defaultGenMhl);
+    var mhlChkInit = mhlLbl.querySelector('.job-chk-mhl');
+    if (hashSel.value === 'none' || hashSel.value === 'size') {
+        mhlChkInit.disabled = true;
+        mhlLbl.classList.add('toggle-disabled');
+    }
+    jobOptsRow.appendChild(mhlLbl);
+
+    hashSel.addEventListener('change', function() {
+        var mhlChkEl = jobOptsRow.querySelector('.job-chk-mhl');
+        var mhlLblEl = mhlChkEl ? mhlChkEl.closest('.toggle-label') : null;
+        var disable  = hashSel.value === 'none' || hashSel.value === 'size';
+        if (mhlChkEl) mhlChkEl.disabled = disable;
+        if (mhlLblEl) mhlLblEl.classList.toggle('toggle-disabled', disable);
+    });
 
     var commentBtn = document.createElement('button');
     commentBtn.className = 'job-comment-btn';
@@ -604,7 +638,7 @@ function renumberJobs() {
     });
 }
 
-// Returns [{src, dsts, copyAsSubfolder, hashAlgo, genCsv, genPdf, genHtml}]
+// Returns [{src, dsts, copyAsSubfolder, hashAlgo, genCsv, genPdf, genHtml, genMhl, comment, location}]
 function getJobs() {
     var result = [];
     jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
@@ -614,6 +648,7 @@ function getJobs() {
         var csvEl       = card.querySelector('.job-chk-csv');
         var pdfEl       = card.querySelector('.job-chk-pdf');
         var htmlEl      = card.querySelector('.job-chk-html');
+        var mhlEl       = card.querySelector('.job-chk-mhl');
         var src  = srcEl ? expandPath(srcEl.value.trim()) : '';
         var dsts = Array.from(card.querySelectorAll('.job-dest-list input[type="text"]'))
             .map(function(i) { return expandPath(i.value.trim()); })
@@ -626,7 +661,9 @@ function getJobs() {
             genCsv:          csvEl       ? csvEl.checked       : false,
             genPdf:          pdfEl       ? pdfEl.checked       : false,
             genHtml:         htmlEl      ? htmlEl.checked      : false,
-            comment:         card.dataset.comment || '',
+            genMhl:          mhlEl       ? (mhlEl.checked && !mhlEl.disabled) : false,
+            comment:         card.dataset.comment  || '',
+            location:        card.dataset.location || '',
         });
     });
     return result;
@@ -680,9 +717,6 @@ async function registerListeners() {
 
 // runJob starts one copy operation and resolves when copy-done fires.
 async function runJob(job) {
-    var hashAlgo = job.hashAlgo || 'none';
-    var verify   = hashAlgo !== 'none';
-
     return new Promise(async function(resolve) {
         var unlisten = await listen('copy-done', function(event) {
             unlisten();
@@ -694,15 +728,14 @@ async function runJob(job) {
                 args: {
                     src:               job.src,
                     destinations:      job.dsts,
-                    verify:            verify,
-                    gen_md5:           hashAlgo === 'md5',
-                    gen_xxh:           hashAlgo === 'xxh3',
-                    gen_size:          hashAlgo === 'size',
-                    gen_csv:           job.genCsv  || false,
-                    gen_pdf:           job.genPdf  || false,
-                    gen_html:          job.genHtml || false,
+                    hash_algo:         job.hashAlgo  || 'none',
+                    gen_csv:           job.genCsv    || false,
+                    gen_pdf:           job.genPdf    || false,
+                    gen_html:          job.genHtml   || false,
+                    gen_mhl:           job.genMhl    || false,
                     copy_as_subfolder: job.copyAsSubfolder || false,
-                    comment:           job.comment || '',
+                    comment:           job.comment   || '',
+                    location:          job.location  || '',
                     open_dest:         false // handled at the end of launchCopy()
                 }
             });
@@ -870,7 +903,19 @@ function showPrompt(kind, items, conflictItems) {
         message.innerHTML = '';
         message.removeAttribute('style');
 
-        if (kind === 'non_empty') {
+        if (kind === 'mhl_conflict') {
+            title.textContent = 'Existing MHL at destination';
+            message.textContent =
+                'A previous MHL was found at this destination:\n\n' +
+                items[1] + '\n\n' +
+                'Destination: ' + items[0] + '\n\n' +
+                'This usually means a previous copy was attempted here. ' +
+                '"Replace" removes the old MHL and writes a fresh one. ' +
+                '"Keep both" appends a new generation alongside it.';
+            addPromptBtn(btnRow, 'Skip MHL',  'cancel',   false, false, resolve);
+            addPromptBtn(btnRow, 'Keep both', 'skip',     false, false, resolve);
+            addPromptBtn(btnRow, 'Replace',   'continue', true,  false, resolve);
+        } else if (kind === 'non_empty') {
             title.textContent = 'Non-empty destination';
             message.textContent =
                 'The following destination(s) already contain files:\n\n' +
@@ -1137,6 +1182,8 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
 
     window.openCommentModal = function(jobCard) {
         activeCard = jobCard;
+        var locEl = document.getElementById('comment-location');
+        if (locEl) locEl.value = jobCard.dataset.location || '';
         editor.innerHTML = jobCard.dataset.comment || '';
         overlay.classList.remove('hidden');
         // Small delay so the overlay is visible before focus fires
@@ -1145,13 +1192,16 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
 
     function doSave() {
         if (!activeCard) return;
+        var locEl = document.getElementById('comment-location');
+        var loc   = locEl ? locEl.value.trim() : '';
+        activeCard.dataset.location = loc;
         var html  = editor.innerHTML.trim();
         // Treat markup that resolves to no visible text as empty
         var plain = html.replace(/<[^>]+>/g, '').replace(/\s/g, '');
         if (!plain) html = '';
         activeCard.dataset.comment = html;
         var btn = activeCard.querySelector('.job-comment-btn');
-        if (btn) btn.classList.toggle('has-comment', html.length > 0);
+        if (btn) btn.classList.toggle('has-comment', html.length > 0 || loc.length > 0);
         overlay.classList.add('hidden');
         activeCard = null;
     }

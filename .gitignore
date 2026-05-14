@@ -26,3 +26,8 @@ desktop.ini
 
 # Tauri dev cache
 .tauri/
+
+# Sidecar binaries — platform-specific executables, not stored in git.
+# Download instructions: see README or scripts/download_sidecars.sh
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep

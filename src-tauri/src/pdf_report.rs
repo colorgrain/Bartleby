@@ -100,6 +100,11 @@ fn no_window(cmd: &mut Command) -> &mut Command {
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW Win32 API flag
     cmd
 }
+
+fn ffmpeg_cmd() -> Command {
+    crate::sidecar::sidecar_cmd("ffmpeg")
+}
+
 // `std::process::Command` : builds and spawns external child processes.
 // Used to call `ffmpeg` (video frames, audio waveforms) and `python3` (MIME icons).
 // `.arg(…)` appends command-line arguments.
@@ -402,6 +407,26 @@ fn wrap_rich_words(words: &[RichWord], max_mm: f32, fs: f32) -> Vec<Vec<RichWord
 /// Draws the rich-text comment block with a "Comments:" label and advances `cursor`.
 ///
 /// Renders "Comments:" bold on its own line, then the comment text below.
+fn draw_location_line(
+    layer:     &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_reg:  &IndirectFontRef,
+    location:  &str,
+    cursor:    &mut f32,
+) {
+    if location.is_empty() { return; }
+    const FS:     f32 = 7.5;
+    const TEXT_X: f32 = M + 2.0;
+    *cursor -= 2.5;
+    let ty = *cursor - 3.2;
+    set_color(layer, TEXT_DARK);
+    layer.use_text("Location:", 8.0, Mm(TEXT_X), Mm(ty), font_bold);
+    let lw = text_width_mm("Location:", 8.0, true);
+    fill_rect(layer, TEXT_X, ty - 1.0, TEXT_X + lw, ty - 0.5, 0.0, 0.0, 0.0);
+    layer.use_text(location, FS, Mm(TEXT_X + lw + 2.0), Mm(ty), font_reg);
+    *cursor -= 4.5 + 3.0;
+}
+
 fn draw_rich_comment(
     layer:     &PdfLayerReference,
     font_reg:  &IndirectFontRef,
@@ -482,11 +507,11 @@ pub fn write_pdf(
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
-    entries:         &[(FileMeta, String, String, String, Option<bool>)],
+    entries:         &[(FileMeta, String, String, Option<bool>)],
     settings:        &Settings,
-    gen_md5:         bool,
-    gen_xxh:         bool,
+    hash_col:        &str,
     comment:         &str,
+    location:        &str,
 ) -> std::io::Result<()> {
     let accent1 = hex_to_rgb(&settings.accent_color_1, DEFAULT_ACCENT1);
 
@@ -547,8 +572,8 @@ pub fn write_pdf(
     //   Short-circuits on the first `true` — does not process all entries unnecessarily.
     // The closure destructures the 4-tuple: `(_, _, _, ok)` — the `_` discards fields
     // we don't need. `ok.is_some()` checks if verify_ok is Some(true) or Some(false).
-    // The tuple is now (FileMeta, md5, xxh3, rel, ok) — 5 fields.
-    let has_status = entries.iter().any(|(_, _, _, _, ok)| ok.is_some());
+    // The tuple is (FileMeta, hash, rel, ok) — 4 fields.
+    let has_status = entries.iter().any(|(_, _, _, ok)| ok.is_some());
 
     // ── Draw page 1 header ─────────────────────────────────────────────────────
     // A block scope `{ … }` creates a lexical scope for `layer`. This ensures `layer`
@@ -562,9 +587,10 @@ pub fn write_pdf(
         let layer   = doc.get_page(pages[0].0).get_layer(pages[0].1);
         let rule_y  = draw_header(&layer, &font_bold, &font_reg, src_path, src_total_bytes, &now, settings, &destinations);
         cursor      = rule_y;
+        draw_location_line(&layer, &font_bold, &font_reg, location, &mut cursor);
         draw_rich_comment(&layer, &font_reg, &font_bold, &font_ital, &font_bold_it, comment, &mut cursor);
         cursor -= 2.0;
-        draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
+        draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, hash_col, accent1);
     } // `layer` is dropped here, releasing the borrow on `doc`
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -575,14 +601,14 @@ pub fn write_pdf(
     // lower-cased so the sort is case-insensitive.
     let mut sorted_indices: Vec<usize> = (0..entries.len()).collect();
     sorted_indices.sort_by(|&a, &b| {
-        sort_key_for_rel(&entries[a].3).cmp(&sort_key_for_rel(&entries[b].3))
+        sort_key_for_rel(&entries[a].2).cmp(&sort_key_for_rel(&entries[b].2))
     });
 
     let mut current_dir: Option<String> = None; // tracks the last-drawn directory
     let mut file_row_i:  usize = 0;             // counts file rows for alternating bg
 
     for &entry_idx in &sorted_indices {
-        let (meta, md5, xxh3, rel, verify_ok) = &entries[entry_idx];
+        let (meta, hash, rel, verify_ok) = &entries[entry_idx];
 
         // Compute the directory component of this entry's relative path.
         let dir = {
@@ -602,7 +628,7 @@ pub fn write_pdf(
                 pages.push((np, nl));
                 cursor = H - M;
                 let layer = doc.get_page(np).get_layer(nl);
-                draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
+                draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, hash_col, accent1);
             }
             {
                 let (pi, li) = *pages.last().unwrap();
@@ -619,7 +645,7 @@ pub fn write_pdf(
             pages.push((np, nl));
             cursor = H - M;
             let layer = doc.get_page(np).get_layer(nl);
-            draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, gen_md5, gen_xxh, accent1);
+            draw_col_headers(&layer, &font_bold, settings, &mut cursor, has_status, hash_col, accent1);
         }
 
         // ── Get the layer for the current (last) page ──────────────────────────
@@ -669,8 +695,8 @@ pub fn write_pdf(
         }
 
         // ── Data columns ───────────────────────────────────────────────────────
-        let cols   = active_cols(meta, md5, xxh3, settings, gen_md5, gen_xxh);
-        let widths = col_widths(settings, gen_md5, gen_xxh);
+        let cols   = active_cols(meta, hash, settings, hash_col);
+        let widths = col_widths(settings, hash_col);
 
         for (idx, (val, w)) in cols.iter().zip(widths.iter()).enumerate() {
             if idx == 0 && settings.col_name {
@@ -958,8 +984,7 @@ fn draw_col_headers(
     settings:   &Settings,
     cursor:     &mut f32,
     has_status: bool,
-    gen_md5:    bool,
-    gen_xxh:    bool,
+    hash_col:   &str,
     accent1:    (f32, f32, f32),
 ) {
     // Header band height: 8 mm fits FS_HEAD (7 pt ≈ 2.5 mm) with ~2.7 mm top/bottom padding.
@@ -983,8 +1008,8 @@ fn draw_col_headers(
     // Data column labels: retrieved from `active_col_names` in the same order
     // as the column widths from `col_widths`. Both functions check the same
     // `settings.col_*` flags in the same sequence, ensuring they stay in sync.
-    let names  = active_col_names(settings, gen_md5, gen_xxh);
-    let widths = col_widths(settings, gen_md5, gen_xxh);
+    let names  = active_col_names(settings, hash_col);
+    let widths = col_widths(settings, hash_col);
 
     // `tx` advances left-to-right across the page as labels are drawn.
     // Start after the thumbnail column (M + TW) plus 2 mm gap.
@@ -1070,8 +1095,8 @@ fn draw_footer(
 /// The order here must exactly match the order in `active_cols()` and `col_widths()`.
 /// All three functions iterate the same `settings.col_*` flags in the same sequence.
 /// If you add a column, add it in all three functions at the same position.
-fn active_col_names(s: &Settings, gen_md5: bool, gen_xxh: bool) -> Vec<&'static str> {
-    let mut v = Vec::new();
+fn active_col_names<'a>(s: &Settings, hash_col: &'a str) -> Vec<&'a str> {
+    let mut v: Vec<&'a str> = Vec::new();
     if s.col_name        { v.push("Name"); }
     if s.col_type        { v.push("Type"); }
     if s.col_size        { v.push("Size"); }
@@ -1082,13 +1107,7 @@ fn active_col_names(s: &Settings, gen_md5: bool, gen_xxh: bool) -> Vec<&'static 
     if s.col_chroma      { v.push("Chroma"); }
     if s.col_color_space { v.push("Color Space"); }
     if s.col_sample_rate { v.push("Sample Rate"); }
-    // Single checksum column — label reflects the active algorithm(s).
-    if gen_md5 && gen_xxh { v.push("Checksum"); }
-    else if gen_md5        { v.push("MD5"); }
-    else if gen_xxh        { v.push("XXH3"); }
-    // NOTE: "Status" is not listed here. The status column is drawn separately
-    // (before the data columns) because it is not user-configurable in Settings —
-    // it appears automatically whenever verify_ok is Some(…).
+    if !hash_col.is_empty() { v.push(hash_col); }
     v
 }
 
@@ -1101,15 +1120,12 @@ fn active_col_names(s: &Settings, gen_md5: bool, gen_xxh: bool) -> Vec<&'static 
 /// The MD5 hash is passed separately from `meta` because `FileMeta` does not store
 /// the hash (hashing is not a metadata concern — it is a copy-engine concern).
 fn active_cols(
-    meta:    &FileMeta,
-    md5:     &str,      // MD5 hash string, empty if not computed
-    xxh3:    &str,      // XXH3 hash string, empty if not computed
-    s:       &Settings,
-    gen_md5: bool,      // true → include MD5 column value
-    gen_xxh: bool,      // true → include XXH3 column value
+    meta:     &FileMeta,
+    hash:     &str,
+    s:        &Settings,
+    hash_col: &str,
 ) -> Vec<String> {
     let mut v = Vec::new();
-    // Each field is cloned from the FileMeta reference into an owned String.
     if s.col_name        { v.push(meta.name.clone()); }
     if s.col_type        { v.push(meta.file_type.clone()); }
     if s.col_size        { v.push(meta.size_human.clone()); }
@@ -1120,18 +1136,7 @@ fn active_cols(
     if s.col_chroma      { v.push(meta.chroma.clone()); }
     if s.col_color_space { v.push(meta.color_space.clone()); }
     if s.col_sample_rate { v.push(meta.sample_rate.clone()); }
-    // Single checksum cell: one or two hash values depending on what was computed.
-    // When both MD5 and XXH3 are present, they are joined with a newline so the
-    // PDF renderer can split them across two lines within the same cell.
-    // "MD5: " and "XXH3: " prefixes make the values unambiguous when both appear.
-    if gen_md5 && gen_xxh {
-        v.push(format!("MD5:  {}
-XXH3: {}", md5, xxh3));
-    } else if gen_md5 {
-        v.push(md5.to_string());
-    } else if gen_xxh {
-        v.push(xxh3.to_string());
-    }
+    if !hash_col.is_empty() { v.push(hash.to_string()); }
     v
 }
 
@@ -1150,22 +1155,20 @@ XXH3: {}", md5, xxh3));
 /// The MD5 column is 68 mm because a 32-character hash at 6.5 pt Helvetica requires
 /// approximately 32 × 6.5 pt × 0.3528 mm/pt × 0.50 char_ratio ≈ 36.7 mm minimum.
 /// We use 68 mm to display without truncation and give visual breathing room.
-fn col_widths(s: &Settings, gen_md5: bool, gen_xxh: bool) -> Vec<f32> {
+fn col_widths(s: &Settings, hash_col: &str) -> Vec<f32> {
     let mut v = Vec::new();
-    if s.col_name        { v.push(40.0_f32); } // Name — widest; needs 2 lines for long filenames
-    if s.col_type        { v.push(13.0_f32); } // Type — short extension (MP4, MXF, WAV…)
-    if s.col_size        { v.push(18.0_f32); } // Size — "2.34 GB" is ~7 chars
-    if s.col_resolution  { v.push(20.0_f32); } // Resolution — "4096x3072" is 9 chars
-    if s.col_codec       { v.push(16.0_f32); } // Codec — "ProRes 422 HQ" is 13 chars
-    if s.col_duration    { v.push(15.0_f32); } // Duration — "01:32:07" is 8 chars
-    if s.col_bit_depth   { v.push(14.0_f32); } // Bit Depth — "10 bit" is 6 chars
-    if s.col_chroma      { v.push(15.0_f32); } // Chroma — "4:2:2" is 5 chars
-    if s.col_color_space { v.push(18.0_f32); } // Color Space — "BT.2020" is 7 chars
-    if s.col_sample_rate { v.push(17.0_f32); } // Sample Rate — "96 kHz" is 6 chars
-    // Single "Checksum" column — present if either MD5 or XXH3 was computed.
-    // Width 52 mm fits a 32-char hash at ~6pt font (≈ 1.5 mm/char × 32 + margin).
-    // When both hashes appear on two lines, the column is tall enough (RH = 8 mm).
-    if gen_md5 || gen_xxh { v.push(52.0_f32); }
+    if s.col_name        { v.push(40.0_f32); }
+    if s.col_type        { v.push(13.0_f32); }
+    if s.col_size        { v.push(18.0_f32); }
+    if s.col_resolution  { v.push(20.0_f32); }
+    if s.col_codec       { v.push(16.0_f32); }
+    if s.col_duration    { v.push(15.0_f32); }
+    if s.col_bit_depth   { v.push(14.0_f32); }
+    if s.col_chroma      { v.push(15.0_f32); }
+    if s.col_color_space { v.push(18.0_f32); }
+    if s.col_sample_rate { v.push(17.0_f32); }
+    // Hash column: 52 mm fits a 32-char MD5/XXH128 hash; C4 (90 chars) is clipped.
+    if !hash_col.is_empty() { v.push(52.0_f32); }
     v
 }
 
@@ -1475,7 +1478,7 @@ fn video_frame(path: &Path) -> Option<RgbImage> {
     // the cmd.exe console window flash on Windows (no-op on Linux/macOS).
     // no_window() takes &mut Command and returns &mut Command, so it fits
     // naturally into the builder chain.
-    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    let mut ffmpeg_cmd = ffmpeg_cmd();
     ffmpeg_cmd
         .arg("-y")                    // overwrite output without prompt
         .arg("-ss").arg("00:00:01")   // seek to 1 second before decoding
@@ -1538,7 +1541,7 @@ fn audio_wave(path: &Path) -> Option<RgbImage> {
     let tmp = std::env::temp_dir().join("_bartleby_wave.png");
 
     // Suppress console window on Windows, then run ffmpeg.
-    let mut wave_cmd = Command::new("ffmpeg");
+    let mut wave_cmd = ffmpeg_cmd();
     wave_cmd
         .arg("-y")
         .arg("-i").arg(path)

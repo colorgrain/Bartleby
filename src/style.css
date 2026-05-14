@@ -300,8 +300,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   display:         inline-flex;
   align-items:     center;
   justify-content: center;
-  background:      rgba(128,128,128,0.08);
-  border:          1px solid var(--input-border);
+  background:      transparent;
+  border:          none;
   border-radius:   var(--radius-sm);
   width:           28px;
   height:          28px;
@@ -370,7 +370,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   border-radius:   var(--radius-sm);
 }
 #menu-btn:hover { background: rgba(128,128,128,0.15); }
-#menu-btn svg   { width: 22px; height: 22px; stroke: var(--titlebar-txt); fill: none; }
+#menu-btn svg   { width: 20px; height: 20px; stroke: var(--titlebar-txt); fill: none; }
 
 /* ── Settings modal — full tabbed window ────────────────────────────────────
    Opened by the hamburger button. Contains Appearance / Report tweaks / About.
@@ -565,11 +565,12 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   display:         flex;
   align-items:     center;
   justify-content: center;
-  color:           var(--accent);
+  color:           var(--neon);
   font-size:       32px;
   font-weight:     300;
   line-height:     1;
   padding:         0 2px;
+  text-shadow:     0 0 6px var(--neon-glow), 0 0 14px var(--neon-glow);
 }
 .job-vsep::after {
   content: '›';
@@ -619,7 +620,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #status-label.success  { color: var(--success); font-weight: 500; }
 #status-label.error    { color: var(--error);   font-weight: 500; }
 
-/* ── Log panel toggle ─────────────────────────────────────────────────────── */
+/* ── Header icon buttons (verify + log-toggle) ────────────────────────────── */
+#verify-btn,
 #log-toggle-btn {
   width: 38px; height: 38px;
   display:         inline-flex;
@@ -627,8 +629,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   justify-content: center;
   border-radius:   var(--radius-sm);
 }
+#verify-btn:hover,
 #log-toggle-btn:hover { background: rgba(128,128,128,0.15); }
-#log-toggle-btn svg   { width: 18px; height: 18px; stroke: var(--titlebar-txt); fill: none; }
+#verify-btn svg     { width: 20px; height: 20px; stroke: var(--titlebar-txt); fill: none; }
+#log-toggle-btn svg { width: 20px; height: 20px; stroke: var(--titlebar-txt); fill: none; }
 
 /* ── Toggle switch ────────────────────────────────────────────────────────── */
 .toggle-label {
@@ -671,6 +675,13 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 .toggle-label input[type="checkbox"]:checked + .toggle-track .toggle-thumb {
   transform: translateX(12px);
+}
+
+/* Disabled state for toggles (e.g. MHL when no hash algo selected) */
+.toggle-disabled {
+  opacity: 0.38;
+  cursor:  not-allowed;
+  pointer-events: none;
 }
 
 /* ── Per-job options row: hash + CSV + PDF + HTML ─────────────────────────── */
@@ -905,27 +916,33 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   font-weight:     700;
   font-family:     Georgia, "Times New Roman", serif;
   font-style:      italic;
-  border:          1px solid var(--input-border);
+  border:          none;
   border-radius:   var(--radius-sm);
   background:      transparent;
   color:           var(--text-dim);
   padding:         0;
   flex-shrink:     0;
-  transition:      background 0.12s, color 0.12s, border-color 0.12s;
+  transition:      background 0.12s, color 0.12s, text-shadow 0.12s;
 }
 .job-comment-btn:hover { background: rgba(128,128,128,0.12); color: var(--text); }
 .job-comment-btn.has-comment {
-  background:   var(--success);
-  border-color: var(--success);
-  color:        #fff;
+  background:  transparent;
+  color:       var(--neon);
+  text-shadow: 0 0 6px var(--neon-glow), 0 0 14px var(--neon-glow);
 }
-.job-comment-btn.has-comment:hover { filter: brightness(0.88); }
+.job-comment-btn.has-comment:hover {
+  background:  rgba(128,128,128,0.12);
+  text-shadow: 0 0 8px var(--neon-glow), 0 0 18px var(--neon-glow), 0 0 28px var(--neon-glow);
+}
 
 /* ── Comment modal ─────────────────────────────────────────────────────────── */
 .comment-modal {
   width:      560px;
   max-width:  96vw;
   overflow-y: visible;
+}
+.comment-location-input {
+  margin-bottom: 8px;
 }
 .comment-toolbar {
   display:        flex;

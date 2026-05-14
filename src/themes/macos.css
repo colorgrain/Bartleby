@@ -1,5 +1,5 @@
 /*
-  themes/macos.css — Bartleby skin: macOS Sequoia / Sonoma
+  themes/macos.css — Bartleby skin: macOS Tahoe (macOS 26) / Sequoia / Sonoma
   ══════════════════════════════════════════════════════════════════════════════
 
   This skin makes Bartleby look native on macOS by reproducing the visual
@@ -62,17 +62,16 @@
 :root {
 
   /* ── Backgrounds ── */
-  --bg:          #f2f2f7;
-  /* NSColor.systemGroupedBackground — the macOS "inset grouped" background.
-     Used for the main window area and behind-card space. */
+  --bg:          #f5f5f5;
+  /* NSColor.windowBackgroundColor — Tahoe window background (Liquid Glass light).
+     Sequoia used #f2f2f7; Tahoe shifted to a slightly lighter, less grey-tinted value. */
 
   --surface:     #ffffff;
   /* NSColor.systemBackground — pure white panels and modal dialogs. */
 
-  --card-bg:     rgba(255, 255, 255, 0.85);
-  /* Slightly transparent white — approximates macOS vibrancy (frosted glass).
-     In a native app this would be NSVisualEffectView; here rgba is our best
-     approximation without native API access from a WebView. */
+  --card-bg:     rgba(255, 255, 255, 0.78);
+  /* Tahoe Liquid Glass approximation — more translucent than Sequoia (0.85) to
+     echo the frosted-glass depth of the new material system. */
 
   --card-border: rgba(0, 0, 0, 0.08);
   /* macOS uses very subtle separators — almost invisible borders on cards. */
@@ -98,9 +97,9 @@
   /* Text links and flat button colour. Darker for WCAG AA contrast on white. */
 
   /* ── Title bar ── */
-  --titlebar-bg:     #e8e8ed;
-  /* Very slightly darker than --bg. Matches the NSToolbar background in
-     typical macOS apps (lighter than classic titlebars, blends with content). */
+  --titlebar-bg:     #ebebeb;
+  /* Tahoe toolbar background — slightly warmer and lighter than Sequoia's #e8e8ed,
+     matches the NSToolbar glass appearance in Tahoe light mode. */
 
   --titlebar-txt:    rgba(0, 0, 0, 0.85);
   --titlebar-border: rgba(0, 0, 0, 0.12);
@@ -151,10 +150,10 @@ body.theme-dark {
   --surface:     #2c2c2e;
   /* NSColor.secondarySystemBackground (dark) — modal dialogs. */
 
-  --card-bg:     rgba(44, 44, 46, 0.90);
-  /* Slightly transparent dark surface — approximates Dark vibrancy. */
+  --card-bg:     rgba(44, 44, 46, 0.85);
+  /* Tahoe Liquid Glass dark — slightly more translucent than Sequoia (0.90). */
 
-  --card-border: rgba(255, 255, 255, 0.08);
+  --card-border: rgba(255, 255, 255, 0.10);
 
   --text:     rgba(255, 255, 255, 0.85);
   /* NSColor.label (dark). */
@@ -201,8 +200,8 @@ body.theme-dark {
   body.theme-default {
     --bg:              #1c1c1e;
     --surface:         #2c2c2e;
-    --card-bg:         rgba(44, 44, 46, 0.90);
-    --card-border:     rgba(255, 255, 255, 0.08);
+    --card-bg:         rgba(44, 44, 46, 0.85);
+    --card-border:     rgba(255, 255, 255, 0.10);
     --text:            rgba(255, 255, 255, 0.85);
     --text-dim:        rgba(235, 235, 245, 0.60);
     --accent:          #0a84ff;

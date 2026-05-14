@@ -92,7 +92,118 @@ use rayon::prelude::*;
 use crate::metadata;
 use crate::pdf_report;
 use crate::html_report;
+use crate::mhl_report;
 use crate::settings::Settings;
+
+// ── Hash algorithm selector ───────────────────────────────────────────────────
+
+/// Which hash algorithm (if any) to compute and verify during Phase 2.
+///
+/// This enum replaces the previous three boolean flags (`gen_md5`, `gen_xxh`,
+/// `gen_size`).  Exactly one algorithm is active per copy job.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HashAlgo {
+    None,    // copy-only — no verification
+    Size,    // fast file-size comparison via stat()
+    Md5,     // MD5 via system crypto library → .md5 checksum file
+    Sha1,    // SHA-1 via RustCrypto → .sha1 checksum file
+    Xxh64,   // XXHash 64-bit → .xxh64 checksum file
+    Xxh3_64, // XXH3 64-bit variant → .xxh3 checksum file
+    Xxh128,  // XXH3 128-bit variant → .xxh128 checksum file
+    C4,      // C4 ID (SHA-512 + base58) → .c4 checksum file
+}
+
+impl HashAlgo {
+    /// Parse the string value sent from JavaScript.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "md5"    => Self::Md5,
+            "sha1"   => Self::Sha1,
+            "xxh64"  => Self::Xxh64,
+            "xxh3"   => Self::Xxh3_64,
+            "xxh128" => Self::Xxh128,
+            "c4"     => Self::C4,
+            "size"   => Self::Size,
+            _        => Self::None,
+        }
+    }
+
+    /// `true` when a cryptographic hash (or size check) must run in Phase 2.
+    pub fn needs_verify(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// `true` when a hash digest is computed (excludes None and Size).
+    pub fn needs_hash(&self) -> bool {
+        !matches!(self, Self::None | Self::Size)
+    }
+
+    /// File extension for the checksum sidecar file (without the leading dot).
+    pub fn checksum_ext(&self) -> Option<&'static str> {
+        match self {
+            Self::Md5    => Some("md5"),
+            Self::Sha1   => Some("sha1"),
+            Self::Xxh64  => Some("xxh64"),
+            Self::Xxh3_64 => Some("xxh3"),
+            Self::Xxh128 => Some("xxh128"),
+            Self::C4     => Some("c4"),
+            _             => None,
+        }
+    }
+
+    /// Human-readable name shown in log messages.
+    pub fn log_name(&self) -> &'static str {
+        match self {
+            Self::Md5    => "MD5",
+            Self::Sha1   => "SHA-1",
+            Self::Xxh64  => "XXH64",
+            Self::Xxh3_64 => "XXH3-64",
+            Self::Xxh128 => "XXH3-128",
+            Self::C4     => "C4",
+            Self::Size   => "file size",
+            Self::None   => "",
+        }
+    }
+
+    /// Column label for CSV / PDF / HTML report headers.
+    pub fn col_label(&self) -> &'static str {
+        match self {
+            Self::Md5    => "MD5",
+            Self::Sha1   => "SHA-1",
+            Self::Xxh64  => "XXH64",
+            Self::Xxh3_64 => "XXH3",
+            Self::Xxh128 => "XXH3-128",
+            Self::C4     => "C4",
+            _             => "",
+        }
+    }
+
+    /// Reverse of `mhl_element()`: parse an XML element name into a `HashAlgo`.
+    pub fn from_mhl_element(s: &str) -> Self {
+        match s {
+            "md5"    => Self::Md5,
+            "sha1"   => Self::Sha1,
+            "xxh64"  => Self::Xxh64,
+            "xxh3"   => Self::Xxh3_64,
+            "xxh128" => Self::Xxh128,
+            "c4"     => Self::C4,
+            _        => Self::None,
+        }
+    }
+
+    /// MHL XML element name for the hash value.
+    pub fn mhl_element(&self) -> Option<&'static str> {
+        match self {
+            Self::Md5    => Some("md5"),
+            Self::Sha1   => Some("sha1"),
+            Self::Xxh64  => Some("xxh64"),
+            Self::Xxh3_64 => Some("xxh3"),
+            Self::Xxh128 => Some("xxh128"),
+            Self::C4     => Some("c4"),
+            _             => None,
+        }
+    }
+}
 
 /// Size of each read chunk in the hash pipeline (bytes).
 ///
@@ -153,86 +264,25 @@ impl PauseCancel {
 
 // ── Hash result ───────────────────────────────────────────────────────────────
 
-/// Holds the computed hash digests for one file.
-///
-/// Both fields are `Option<String>` because each hash type is independently
-/// optional — controlled by the MD5 and XXH3 checkboxes in the UI.
-///
-/// `None`         = this hash type was not requested (checkbox unchecked).
-/// `Some(String)` = 32-character lowercase hexadecimal digest string.
-///
-/// ### Why `Option` instead of an empty string for "not computed"?
-/// An empty string is ambiguous — it could mean "not requested" or "hash of
-/// an empty file". `Option` makes the distinction explicit and forces callers
-/// to handle both cases, preventing silent bugs where a missing hash is
-/// compared against another missing hash and incorrectly reported as matching.
-///
-/// ### Derive attributes
-/// - `Clone`   : needed when passing results from the parallel rayon closure
-///               back to the main thread via a `Mutex<Vec<FileHashes>>`.
-/// - `Default` : `FileHashes::default()` produces `{ md5: None, xxh: None }`,
-///               used as a sentinel for files that were skipped during copy.
-/// - `Debug`   : enables `println!("{:?}", hashes)` for development logging.
+/// Holds the computed hash digest for one file (single algorithm, one at a time).
 #[derive(Clone, Default, Debug)]
 struct FileHashes {
-    /// MD5 digest: 32-char lowercase hex, e.g. `"d41d8cd98f00b204e9800998ecf8427e"`.
-    /// `None` if MD5 was not requested by the user.
-    md5: Option<String>,
-    /// XXH3-128 digest: 32-char lowercase hex.
-    /// `None` if XXH3 was not requested by the user.
-    xxh: Option<String>,
+    /// Hex-encoded digest for the selected algorithm, or `None` if not computed.
+    hash: Option<String>,
 }
 
 impl FileHashes {
-    /// Returns `true` if all hash types present in both `self` and `other`
-    /// have identical digests.
-    ///
-    /// Only compares hash types that are `Some(…)` in **both** structs.
-    /// If a hash type is `None` in either (was not requested), it is skipped.
-    ///
-    /// ### Pattern: `if let (Some(a), Some(b)) = (…, …)`
-    /// This is a tuple destructuring `if let`. It binds `a` and `b` only when
-    /// *both* Options are `Some`. If either is `None`, the block is skipped.
-    /// Equivalent to:
-    /// ```rust
-    /// if self.md5.is_some() && other.md5.is_some() {
-    ///     if self.md5.unwrap() != other.md5.unwrap() { return false; }
-    /// }
-    /// ```
-    /// The `if let` version is more idiomatic and avoids repeated unwraps.
     fn matches(&self, other: &FileHashes) -> bool {
-        if let (Some(a), Some(b)) = (&self.md5, &other.md5) {
-            if a != b { return false; }
+        match (&self.hash, &other.hash) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
         }
-        if let (Some(a), Some(b)) = (&self.xxh, &other.xxh) {
-            if a != b { return false; }
-        }
-        true
     }
 
-    /// Returns a compact string showing the first 8 characters of each digest.
-    ///
-    /// Used in UI log lines: `"✓  clip001.mxf  [md5:db4802d7 xxh:ecd0a128]"`
-    ///
-    /// 8 hex characters = 32 bits of the hash — enough to distinguish files
-    /// visually without cluttering the log with 32-character strings.
-    ///
-    /// ### `&m[..8.min(m.len())]`
-    /// `8.min(m.len())` : the smaller of 8 and the string length.
-    /// For normal MD5/XXH3 digests `m.len()` is always 32, so this is `8`.
-    /// The `.min()` is a safety guard for empty strings (e.g. hash of empty file).
-    /// `&m[..8]` : a string slice of the first 8 bytes (safe for ASCII hex).
     fn short(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(ref m) = self.md5 {
-            parts.push(format!("md5:{}", &m[..8.min(m.len())]));
-        }
-        if let Some(ref x) = self.xxh {
-            parts.push(format!("xxh:{}", &x[..8.min(x.len())]));
-        }
-        // `parts.join(" ")` : ["md5:db4802d7", "xxh:ecd0a128"] → "md5:db4802d7 xxh:ecd0a128"
-        // Returns an empty string if no hashes were computed.
-        parts.join(" ")
+        self.hash.as_deref()
+            .map(|h| h[..8.min(h.len())].to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -277,6 +327,13 @@ pub enum Msg {
     /// Pre-copy prompt: specific files already exist in a destination.
     /// Same blocking mechanism as `NonEmptyDest`.
     Conflicts(Vec<ConflictInfo>),
+    /// Phase-3 prompt: a previous MHL for this source already exists at the destination.
+    /// Reply::Continue → replace (delete old MHL), Reply::Skip → keep both (increment gen),
+    /// Reply::Cancel → skip MHL for this destination.
+    MhlConflict {
+        dst:          String,  // display path of destination
+        existing_mhl: String,  // filename of the conflicting MHL
+    },
 }
 
 /// User replies sent from the UI thread back to the blocked copy engine.
@@ -356,15 +413,14 @@ fn ts(start: &Instant) -> String {
 pub fn run(
     src:               PathBuf,
     destinations:      Vec<PathBuf>,
-    verify:            bool,
-    gen_md5:           bool,
-    gen_xxh:           bool,
-    gen_size:          bool,
+    hash_algo:         HashAlgo,
     gen_csv:           bool,
     gen_pdf:           bool,
     gen_html:          bool,
+    gen_mhl:           bool,
     copy_as_subfolder: bool,
     comment:           String,
+    location:          String,
     settings:          Settings,
     tx:                Sender<Msg>,
     reply_rx:          std::sync::mpsc::Receiver<Reply>,
@@ -372,11 +428,12 @@ pub fn run(
 ) {
     let start = Instant::now();
 
+    let verify   = hash_algo.needs_verify();
+    let gen_hash = hash_algo.needs_hash();
+
     log(&tx, &format!("→  Source : {}\n", src.display()));
     for dst in &destinations { log(&tx, &format!("→  Dest   : {}\n", dst.display())); }
-    if gen_md5  { log(&tx, "→  Hash   : MD5\n"); }
-    if gen_xxh  { log(&tx, "→  Hash   : XXH3-128\n"); }
-    if gen_size { log(&tx, "→  Verify : file size\n"); }
+    if verify { log(&tx, &format!("→  Hash   : {}\n", hash_algo.log_name())); }
     log(&tx, "\n");
 
     let src_name = src.file_name()
@@ -494,9 +551,9 @@ pub fn run(
         .collect();
     let total_bytes: u64 = file_sizes.iter().sum();
     let n_dst = destinations.len() as u64;
-    // gen_size Phase 2 is pure stat() calls — no bytes read, no progress weight.
+    // Size-only Phase 2 is pure stat() calls — no bytes read, no progress weight.
     let grand_total = total_bytes * n_dst
-        + if gen_md5 || gen_xxh { total_bytes * (1 + n_dst) } else { 0 };
+        + if gen_hash { total_bytes * (1 + n_dst) } else { 0 };
     let mut bytes_done: u64 = 0;
 
     // Phase 1 — separate read (source) and write (destinations) byte counters
@@ -734,7 +791,8 @@ pub fn run(
             copied.iter().map(|_| (FileHashes::default(), true)).collect();
         generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                          &meta_entries, &no_hashes,
-                         gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, false, &comment, &settings);
+                         hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
+                         &comment, &location, &settings, &reply_rx);
         let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
             copied.len(), destinations.len());
         log(&tx, &format!("\n{}\n", summary));
@@ -762,7 +820,7 @@ pub fn run(
         vec![(FileHashes::default(), true); n_files];
     let mut verify_errors = 0usize;
 
-    if gen_size {
+    if hash_algo == HashAlgo::Size {
         // ── Path A: fast file-size comparison ────────────────────────────────
         for (file_idx, (_src_path, rel_str)) in copied.iter().enumerate() {
             if let Err(_) = pc.wait_if_paused() {
@@ -872,7 +930,7 @@ pub fn run(
             }
 
             let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
-                .map(|path| hash_direct(path, gen_md5, gen_xxh, &pc))
+                .map(|path| hash_direct(path, hash_algo, &pc))
                 .collect();
 
             let mut read_error = false;
@@ -928,7 +986,8 @@ pub fn run(
     // ── Phase 3: reports ──────────────────────────────────────────────────────
     generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                      &meta_entries, &results,
-                     gen_csv, gen_pdf, gen_html, gen_md5, gen_xxh, true, &comment, &settings);
+                     hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
+                     &comment, &location, &settings, &reply_rx);
 
     if verify_errors > 0 {
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -941,12 +1000,10 @@ pub fn run(
 
     let total_errors = copy_errors + verify_errors;
     let _ = tx.send(Msg::Progress(1.0, "Done".into()));
-    let hash_label = match (gen_md5, gen_xxh, gen_size) {
-        (true,  true,  _) => " — MD5 + XXH3 verified",
-        (true,  false, _) => " — MD5 verified",
-        (false, true,  _) => " — XXH3 verified",
-        (false, false, true) => " — size verified",
-        _                    => "",
+    let hash_label = if verify {
+        format!(" — {} verified", hash_algo.log_name())
+    } else {
+        String::new()
     };
     if total_errors == 0 {
         let summary = format!("✓  {} file(s) — {} destination(s){}",
@@ -1007,9 +1064,9 @@ pub fn run(
 /// If direct I/O fails (unsupported filesystem, insufficient permissions,
 /// very small files), we fall back to standard buffered I/O automatically.
 /// The hash result is still correct — only the cache-bypass guarantee is lost.
-fn hash_direct(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
+fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
     // Try platform-specific direct I/O first, fall back to buffered on error.
-    let result = hash_direct_impl(path, gen_md5, gen_xxh, pc);
+    let result = hash_direct_impl(path, algo, pc);
     match result {
         Ok(h)  => Ok(h),
         Err(_) => {
@@ -1020,18 +1077,18 @@ fn hash_direct(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>)
             // so this buffered read goes to the FUSE driver → physical disk.
             // On non-FUSE filesystems, syncfs()/sync_all() guarantees that
             // cache == disk, so the buffered read is still correct.
-            hash_buffered(path, gen_md5, gen_xxh, pc)
+            hash_buffered(path, algo, pc)
         }
     }
 }
 
 /// Platform-specific direct I/O implementation.
-fn hash_direct_impl(path: &Path, gen_md5: bool, gen_xxh: bool, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
+fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
     // Open with cache-bypassing flags — the file is moved into hash_buffered_file()
     // which passes it to the reader thread. No buffer needed here: the pipeline
     // allocates its own per-chunk buffers inside the reader thread.
     let file = open_direct(path)?;
-    hash_buffered_file(file, gen_md5, gen_xxh, pc.clone())
+    hash_buffered_file(file, algo, pc.clone())
 }
 
 // ── Platform-specific file openers ───────────────────────────────────────────
@@ -1152,13 +1209,13 @@ fn open_direct(path: &Path) -> io::Result<fs::File> {
 /// No native platform API supports XXH3 — we keep `xxhash-rust` which is
 /// already heavily SIMD-optimised and reaches ~10 GB/s on modern CPUs.
 fn hash_buffered_file(
-    file:    fs::File,
-    gen_md5: bool,
-    gen_xxh: bool,
-    pc:      Arc<PauseCancel>,
+    file: fs::File,
+    algo: HashAlgo,
+    pc:   Arc<PauseCancel>,
 ) -> io::Result<FileHashes> {
-    // twox-hash 2.x: xxhash3_128::Hasher has its own write() and finish_128() methods
-    use twox_hash::xxhash3_128::Hasher as Xxh3Hasher;
+    use twox_hash::xxhash3_128::Hasher as Xxh128Hasher;
+    use twox_hash::xxhash3_64::Hasher  as Xxh3Hasher;
+    use twox_hash::xxhash64::Hasher    as Xxh64Hasher;
     use std::sync::mpsc;
 
     // Pipeline channel — bounded to 2 slots (one being hashed, one being read)
@@ -1253,46 +1310,63 @@ fn hash_buffered_file(
         }
     });
 
-    // ── Hasher loop — native MD5 + xxhash-rust XXH3 ──────────────────────────
+    // ── Hasher loop — dispatch by algorithm ──────────────────────────────────
 
-    // Initialise platform-specific MD5 context
-    let mut md5_state = if gen_md5 { Some(NativeMd5::new()?) } else { None };
-    let mut xxh_ctx   = Xxh3Hasher::with_seed(0);
+    let mut md5_h:    Option<NativeMd5>    = None;
+    let mut sha1_h:   Option<sha1::Sha1>   = None;
+    let mut xxh64_h:  Option<Xxh64Hasher>  = None;
+    let mut xxh3_h:   Option<Xxh3Hasher>   = None;
+    let mut xxh128_h: Option<Xxh128Hasher> = None;
+    let mut sha512_h: Option<sha2::Sha512> = None;
+
+    match algo {
+        HashAlgo::Md5     => { md5_h    = Some(NativeMd5::new()?); }
+        HashAlgo::Sha1    => { sha1_h   = Some(<sha1::Sha1 as sha1::Digest>::new()); }
+        HashAlgo::Xxh64   => { xxh64_h  = Some(Xxh64Hasher::with_seed(0)); }
+        HashAlgo::Xxh3_64 => { xxh3_h   = Some(Xxh3Hasher::with_seed(0)); }
+        HashAlgo::Xxh128  => { xxh128_h = Some(Xxh128Hasher::with_seed(0)); }
+        HashAlgo::C4      => { sha512_h = Some(<sha2::Sha512 as sha2::Digest>::new()); }
+        _                 => {}
+    }
 
     loop {
         match rx.recv() {
             Ok(Ok(chunk)) => {
-                if let Some(ref mut ctx) = md5_state {
-                    ctx.update(&chunk)?;
-                }
-                if gen_xxh { xxh_ctx.write(&chunk); }
+                if let Some(ref mut h) = md5_h    { h.update(&chunk)?; }
+                if let Some(ref mut h) = sha1_h   { sha1::Digest::update(h, &chunk); }
+                if let Some(ref mut h) = xxh64_h  { std::hash::Hasher::write(h, &chunk); }
+                if let Some(ref mut h) = xxh3_h   { std::hash::Hasher::write(h, &chunk); }
+                if let Some(ref mut h) = xxh128_h { h.write(&chunk); }
+                if let Some(ref mut h) = sha512_h { sha2::Digest::update(h, &chunk); }
             }
             Ok(Err(e)) => return Err(e),
-            Err(_)     => break, // channel closed = EOF
+            Err(_)     => break,
         }
     }
 
-    let md5 = if let Some(ctx) = md5_state {
-        Some(ctx.finish()?)
-    } else {
-        None
+    let hash = match algo {
+        HashAlgo::Md5     => md5_h.map(|h| h.finish()).transpose()?,
+        HashAlgo::Sha1    => sha1_h.map(|h| format!("{:x}", sha1::Digest::finalize(h))),
+        HashAlgo::Xxh64   => xxh64_h.map(|h| format!("{:016x}", std::hash::Hasher::finish(&h))),
+        HashAlgo::Xxh3_64 => xxh3_h.map(|h| format!("{:016x}", std::hash::Hasher::finish(&h))),
+        HashAlgo::Xxh128  => xxh128_h.map(|h| format!("{:032x}", h.finish_128())),
+        HashAlgo::C4      => sha512_h.map(|h| {
+            use sha2::Digest;
+            let digest = h.finalize();
+            let b58 = bs58::encode(&digest[..]).into_string();
+            let pad = 88usize.saturating_sub(b58.len());
+            format!("c4{}{}", "1".repeat(pad), b58)
+        }),
+        _ => None,
     };
 
-    Ok(FileHashes {
-        md5,
-        xxh: if gen_xxh { Some(format!("{:032x}", xxh_ctx.finish_128())) } else { None },
-    })
+    Ok(FileHashes { hash })
 }
 
 /// Hashes a file using standard buffered I/O (fallback when direct I/O fails).
-fn hash_buffered(
-    path:    &Path,
-    gen_md5: bool,
-    gen_xxh: bool,
-    pc:      &Arc<PauseCancel>,
-) -> io::Result<FileHashes> {
+fn hash_buffered(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
     let file = fs::File::open(path)?;
-    hash_buffered_file(file, gen_md5, gen_xxh, pc.clone())
+    hash_buffered_file(file, algo, pc.clone())
 }
 
 // ── Native MD5 implementations ────────────────────────────────────────────────
@@ -1542,91 +1616,231 @@ impl NativeMd5 {
 /// necessary — grouping them into a struct would add complexity without clarity.
 /// Alternative: pass a `ReportConfig` struct. Trade-off: more code, no real benefit.
 #[allow(clippy::too_many_arguments)]
+/// Hash a small file (e.g. an MHL file) for the `<references>` chain entry.
+/// Delegates to `hash_file_path` — defined below, after `generate_reports`.
+fn hash_small_file(path: &Path, algo: HashAlgo) -> io::Result<String> {
+    hash_file_path(path, algo)
+}
+
+/// Hash a file at `path` in streaming 4 MiB chunks using buffered I/O.
+/// On Linux, evicts the page cache before reading so the hash covers disk data.
+/// Used by `verify_engine` and `mhl_report` (source MHL reference hash).
+pub(crate) fn hash_file_path(path: &Path, algo: HashAlgo) -> io::Result<String> {
+    use twox_hash::xxhash3_128::Hasher as Xxh128Hasher;
+    use twox_hash::xxhash3_64::Hasher  as Xxh3Hasher;
+    use twox_hash::xxhash64::Hasher    as Xxh64Hasher;
+    use std::io::Read;
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(f) = fs::File::open(path) {
+            unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED); }
+        }
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut buf  = vec![0u8; HASH_CHUNK];
+
+    enum State {
+        Md5(NativeMd5),
+        Sha1(sha1::Sha1),
+        Xxh64(Xxh64Hasher),
+        Xxh3_64(Xxh3Hasher),
+        Xxh128(Xxh128Hasher),
+        Sha512(sha2::Sha512),
+    }
+
+    let mut state = match algo {
+        HashAlgo::Md5     => State::Md5(NativeMd5::new()?),
+        HashAlgo::Sha1    => State::Sha1(<sha1::Sha1 as sha1::Digest>::new()),
+        HashAlgo::Xxh64   => State::Xxh64(Xxh64Hasher::with_seed(0)),
+        HashAlgo::Xxh3_64 => State::Xxh3_64(Xxh3Hasher::with_seed(0)),
+        HashAlgo::Xxh128  => State::Xxh128(Xxh128Hasher::with_seed(0)),
+        HashAlgo::C4      => State::Sha512(<sha2::Sha512 as sha2::Digest>::new()),
+        _ => return Ok(String::new()),
+    };
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 { break; }
+        let chunk = &buf[..n];
+        match &mut state {
+            State::Md5(h)     => h.update(chunk)?,
+            State::Sha1(h)    => sha1::Digest::update(h, chunk),
+            State::Xxh64(h)   => { use std::hash::Hasher; h.write(chunk); }
+            State::Xxh3_64(h) => { use std::hash::Hasher; h.write(chunk); }
+            State::Xxh128(h)  => h.write(chunk),
+            State::Sha512(h)  => sha2::Digest::update(h, chunk),
+        }
+    }
+
+    Ok(match state {
+        State::Md5(h)     => h.finish()?,
+        State::Sha1(h)    => format!("{:x}", sha1::Digest::finalize(h)),
+        State::Xxh64(h)   => { use std::hash::Hasher; format!("{:016x}", h.finish()) }
+        State::Xxh3_64(h) => { use std::hash::Hasher; format!("{:016x}", h.finish()) }
+        State::Xxh128(h)  => format!("{:032x}", h.finish_128()),
+        State::Sha512(h)  => {
+            let digest = sha2::Digest::finalize(h);
+            let b58 = bs58::encode(&digest[..]).into_string();
+            let pad = 88usize.saturating_sub(b58.len());
+            format!("c4{}{}", "1".repeat(pad), b58)
+        }
+    })
+}
+
 fn generate_reports(
-    tx:              &Sender<Msg>,
-    destinations:    &[PathBuf],
-    src_name:        &str,
-    src:             &Path,
-    total_bytes:     u64,
-    meta_entries:    &[(String, metadata::FileMeta)],
-    hashes:          &[(FileHashes, bool)],
-    gen_csv:         bool,
-    gen_pdf:         bool,
-    gen_html:        bool,
-    gen_md5:         bool,
-    gen_xxh:         bool,
-    has_verify:      bool,
-    comment:         &str,
-    settings:        &Settings,
+    tx:           &Sender<Msg>,
+    destinations: &[PathBuf],
+    src_name:     &str,
+    src:          &Path,
+    total_bytes:  u64,
+    meta_entries: &[(String, metadata::FileMeta)],
+    hashes:       &[(FileHashes, bool)],
+    hash_algo:    HashAlgo,
+    gen_csv:      bool,
+    gen_pdf:      bool,
+    gen_html:     bool,
+    gen_mhl:      bool,
+    has_verify:   bool,
+    comment:      &str,
+    location:     &str,
+    settings:     &Settings,
+    reply_rx:     &std::sync::mpsc::Receiver<Reply>,
 ) {
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
-    for dst in destinations {
-        if gen_md5 {
-            let p = dst.join(format!("{}_checksum.md5", src_name));
-            match write_checksum(&p, meta_entries, hashes, |h| h.md5.clone()) {
-                Ok(_)  => log(tx, &format!("◈  MD5 : {}\n", p.display())),
-                Err(e) => log(tx, &format!("✖  MD5 error: {}\n", e)),
+    let col_label = hash_algo.col_label();
+
+    // ── MHL: scan source for generational chain (once, before the dst loop) ──
+    let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
+        let src_ascmhl = src.join("ascmhl");
+        mhl_report::scan_ascmhl_dir(&src_ascmhl).and_then(|(src_mhl_path, src_gen)| {
+            match hash_small_file(&src_mhl_path, hash_algo) {
+                Ok(hash) => Some(mhl_report::MhlRef {
+                    path:       src_mhl_path.to_string_lossy().to_string(),
+                    hash,
+                    generation: src_gen,
+                }),
+                Err(_) => None,
             }
-        }
-        if gen_xxh {
-            let p = dst.join(format!("{}_checksum.xxh3", src_name));
-            match write_checksum(&p, meta_entries, hashes, |h| h.xxh.clone()) {
-                Ok(_)  => log(tx, &format!("◈  XXH3: {}\n", p.display())),
-                Err(e) => log(tx, &format!("✖  XXH3 error: {}\n", e)),
+        })
+    } else {
+        None
+    };
+
+    for dst in destinations {
+        // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
+        if let Some(ext) = hash_algo.checksum_ext() {
+            let p = dst.join(format!("{}_checksum.{}", src_name, ext));
+            match write_checksum(&p, meta_entries, hashes) {
+                Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
+                Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
             }
         }
         if gen_csv {
-            // Build CSV entries carrying both md5 and xxh3 hashes separately.
-            // The tuple is (FileMeta, md5: String, xxh3: String, status: Option<bool>).
-            // Empty string means that hash type was not computed.
-            let csv_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
+            let csv_entries: Vec<(metadata::FileMeta, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((_, meta), (fh, ok))| {
-                        let md5  = fh.md5.clone().unwrap_or_default();
-                        let xxh3 = fh.xxh.clone().unwrap_or_default();
-                        (meta.clone(), md5, xxh3, if has_verify { Some(*ok) } else { None })
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(),
+                         if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(dst, src_name, src, total_bytes, destinations, &csv_entries, settings, gen_md5, gen_xxh, comment) {
+            match metadata::write_csv(dst, src_name, src, total_bytes, destinations,
+                                      &csv_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
                     dst.join(format!("{}_report.csv", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
         if gen_pdf {
-            // PDF entries: (FileMeta, md5: String, xxh3: String, rel_path: String, status).
-            // Both md5 and xxh3 are passed separately so the PDF can show the right column.
-            let pdf_entries: Vec<(metadata::FileMeta, String, String, String, Option<bool>)> =
+            let pdf_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((rel, meta), (fh, ok))| {
-                        let md5  = fh.md5.clone().unwrap_or_default();
-                        let xxh3 = fh.xxh.clone().unwrap_or_default();
-                        (meta.clone(), md5, xxh3, rel.clone(),
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(dst, src_name, src, total_bytes, destinations, &pdf_entries, settings, gen_md5, gen_xxh, comment) {
+            match pdf_report::write_pdf(dst, src_name, src, total_bytes, destinations,
+                                        &pdf_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
                     dst.join(format!("{}_report.pdf", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
             }
         }
         if gen_html {
-            let html_entries: Vec<(metadata::FileMeta, String, String, String, Option<bool>)> =
+            let html_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((rel, meta), (fh, ok))| {
-                        let md5  = fh.md5.clone().unwrap_or_default();
-                        let xxh3 = fh.xxh.clone().unwrap_or_default();
-                        (meta.clone(), md5, xxh3, rel.clone(),
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(dst, src_name, src, total_bytes, destinations, &html_entries, settings, gen_md5, gen_xxh, comment) {
+            match html_report::write_html(dst, src_name, src, total_bytes, destinations,
+                                          &html_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
                     dst.join(format!("{}_report.html", src_name)).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
+            }
+        }
+        if gen_mhl {
+            if let Some(mhl_elem) = hash_algo.mhl_element() {
+                let mhl_entries: Vec<(String, String)> =
+                    meta_entries.iter().zip(hashes.iter())
+                        .map(|((rel, _), (fh, _))| {
+                            (rel.clone(), fh.hash.clone().unwrap_or_default())
+                        })
+                        .collect();
+
+                // Determine generation number; prompt if a previous MHL exists.
+                let (generation, should_write) =
+                    match mhl_report::find_dst_mhl_for_src(dst, src_name) {
+                        Some((existing_path, existing_gen)) => {
+                            let existing_name = existing_path
+                                .file_name().unwrap_or_default()
+                                .to_string_lossy().to_string();
+                            let _ = tx.send(Msg::MhlConflict {
+                                dst:          dst.display().to_string(),
+                                existing_mhl: existing_name,
+                            });
+                            match reply_rx.recv().unwrap_or(Reply::Cancel) {
+                                Reply::Continue => {
+                                    // Replace: remove old MHL, start chain from source gen
+                                    let _ = std::fs::remove_file(&existing_path);
+                                    let gen = src_mhl_ref.as_ref()
+                                        .map(|r| r.generation + 1)
+                                        .unwrap_or(1);
+                                    (gen, true)
+                                }
+                                Reply::Skip => {
+                                    // Keep both: existing_gen is already the highest for this src
+                                    (existing_gen + 1, true)
+                                }
+                                Reply::Cancel => {
+                                    log(tx, "△  MHL skipped for this destination.\n");
+                                    (0, false)
+                                }
+                            }
+                        }
+                        None => {
+                            // Clean destination — start chain from source gen or 1
+                            let gen = src_mhl_ref.as_ref()
+                                .map(|r| r.generation + 1)
+                                .unwrap_or(1);
+                            (gen, true)
+                        }
+                    };
+
+                if should_write {
+                    match mhl_report::write_mhl(dst, src_name, &mhl_entries, mhl_elem,
+                                                comment, location, settings,
+                                                generation, src_mhl_ref.as_ref()) {
+                        Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
+                        Err(e) => log(tx, &format!("✖  MHL error: {}\n", e)),
+                    }
+                }
             }
         }
     }
@@ -1634,18 +1848,15 @@ fn generate_reports(
 
 // ── Checksum file writer ──────────────────────────────────────────────────────
 
-fn write_checksum<F>(
+fn write_checksum(
     path:    &Path,
     entries: &[(String, metadata::FileMeta)],
     hashes:  &[(FileHashes, bool)],
-    hash_fn: F,
-) -> io::Result<()>
-where F: Fn(&FileHashes) -> Option<String>
-{
+) -> io::Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, _)) in entries.iter().zip(hashes.iter()) {
-        if let Some(hash) = hash_fn(fh) {
+        if let Some(ref hash) = fh.hash {
             writeln!(f, "{}  {}", hash, rel)?;
         }
     }

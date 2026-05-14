@@ -197,6 +197,9 @@ pub struct Settings {
     /// Generate a self-contained `.html` report with thumbnails and metadata table.
     pub gen_html: bool,
 
+    /// Generate an ASC MHL v2.0 hash list (`.mhl`) in each destination.
+    pub gen_mhl:  bool,
+
     /// Open each destination directory in the system file manager after a successful
     /// copy. Handled entirely in JavaScript in the `copy-done` event handler.
     /// Uses `xdg-open` on Linux, `open` on macOS, `explorer` on Windows.
@@ -297,6 +300,7 @@ impl Default for Settings {
             gen_csv:   false,  // opt-in — adds processing time and an extra output file
             gen_pdf:   false,  // opt-in — adds processing time and an extra output file
             gen_html:  false,  // opt-in — produces a self-contained HTML report
+            gen_mhl:   false,  // opt-in — ASC MHL hash list for professional workflows
             open_dest: false,  // opt-in — avoids unexpected file manager windows
 
             theme: "default".to_string(), // follow the OS light/dark setting

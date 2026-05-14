@@ -285,19 +285,9 @@ pub fn extract(path: &Path) -> FileMeta {
 ///   .ok()?                    // Err (mediainfo not installed) → None, ? propagates
 /// ```
 fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
-    // Build the command, passing it through no_window() to suppress the console
-    // flash on Windows. no_window() takes &mut Command and returns &mut Command,
-    // so it fits naturally into the builder chain.
-    let out = no_window(
-        Command::new("mediainfo")
-            .arg(format!("--Inform={}", inform))
-            // The path is passed as OsStr (via `.arg(path)`) rather than a String.
-            // This handles paths with spaces, accents, or special characters
-            // correctly without any manual escaping.
-            .arg(path)
-    )
-    .output()
-    .ok()?; // Err if mediainfo is absent or not executable → return None
+    let mut cmd = crate::sidecar::sidecar_cmd("mediainfo");
+    cmd.arg(format!("--Inform={}", inform)).arg(path);
+    let out = no_window(&mut cmd).output().ok()?;
 
     // `String::from_utf8_lossy` : converts &[u8] → Cow<str>, replacing any
     // invalid UTF-8 sequences with '?'. Safe even if mediainfo returns
@@ -545,27 +535,22 @@ pub fn write_csv(
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
-    entries:         &[(FileMeta, String, String, Option<bool>)],
+    entries:         &[(FileMeta, String, Option<bool>)],
     settings:        &Settings,
-    gen_md5:         bool,
-    gen_xxh:         bool,
+    hash_col:        &str,
     comment:         &str,
+    location:        &str,
 ) -> std::io::Result<()> {
     use std::io::Write;
 
     let path = dst_dir.join(format!("{}_report.csv", src_name));
     let mut f = std::fs::File::create(path)?;
 
-    write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment)?;
+    write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment, location)?;
 
-    // Detect whether at least one entry has a verification status.
-    // `.any(|(_, _, s)| s.is_some())` : returns true on the first Some encountered.
-    // Tuple destructuring in the closure: only the third field is used.
-    let has_status = entries.iter().any(|(_, _, _, s)| s.is_some());
+    let has_status = entries.iter().any(|(_, _, s)| s.is_some());
+    let has_hash   = !hash_col.is_empty();
 
-    // Build the header row dynamically.
-    // We iterate the col_* flags to decide which columns to include.
-    // The order defined here is always preserved regardless of the active subset.
     let mut headers: Vec<&str> = Vec::new();
     if settings.col_name        { headers.push("Name"); }
     if settings.col_type        { headers.push("Type"); }
@@ -577,29 +562,12 @@ pub fn write_csv(
     if settings.col_chroma      { headers.push("Chroma Subsampling"); }
     if settings.col_color_space { headers.push("Color Space"); }
     if settings.col_sample_rate { headers.push("Sample Rate"); }
-    // "Status" column appears between metadata columns and checksum — only in verify mode.
-    if has_status { headers.push("Status"); }
+    if has_status               { headers.push("Status"); }
+    if has_hash                 { headers.push(hash_col); }
 
-    // Checksum column header — label depends on which algorithm(s) were computed.
-    // If both MD5 and XXH3 are active, two separate columns are added.
-    // If neither was computed (copy-only mode), no checksum column is added.
-    let has_hash = gen_md5 || gen_xxh;
-    if has_hash && gen_md5 && gen_xxh {
-        headers.push("MD5");
-        headers.push("XXH3");
-    } else if has_hash && gen_md5 {
-        headers.push("MD5");
-    } else if has_hash && gen_xxh {
-        headers.push("XXH3");
-    }
-
-    // `.join(",")` : concatenates elements with "," as separator.
-    // Example: ["Name", "Type", "Size"] → "Name,Type,Size"
     writeln!(f, "{}", headers.join(","))?;
 
-    // One row per file.
-    // Each entry is (FileMeta, md5_hash, xxh3_hash, verify_status).
-    for (meta, md5, xxh3, ok) in entries {
+    for (meta, hash, ok) in entries {
         let mut cols: Vec<String> = Vec::new();
         if settings.col_name        { cols.push(csv_escape(&meta.name)); }
         if settings.col_type        { cols.push(meta.file_type.clone()); }
@@ -612,24 +580,13 @@ pub fn write_csv(
         if settings.col_color_space { cols.push(meta.color_space.clone()); }
         if settings.col_sample_rate { cols.push(meta.sample_rate.clone()); }
         if has_status {
-            // Map Option<bool> → human-readable status string.
             cols.push(match ok {
                 Some(true)  => "OK".to_string(),
                 Some(false) => "ERROR".to_string(),
                 None        => String::new(),
             });
         }
-        // Emit checksum column(s) — each hash is now a separate String field.
-        // Empty strings are written when a hash was not computed, ensuring the
-        // column count always matches the header row (no misaligned columns).
-        if gen_md5 && gen_xxh {
-            cols.push(md5.clone());   // MD5 column — always populated when gen_md5
-            cols.push(xxh3.clone());  // XXH3 column — always populated when gen_xxh
-        } else if gen_md5 {
-            cols.push(md5.clone());
-        } else if gen_xxh {
-            cols.push(xxh3.clone());
-        }
+        if has_hash { cols.push(hash.clone()); }
         writeln!(f, "{}", cols.join(","))?;
     }
     Ok(())
@@ -642,6 +599,7 @@ fn write_custom_header_csv(
     src_total_bytes: u64,
     destinations:    &[PathBuf],
     comment:         &str,
+    location:        &str,
 ) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -656,7 +614,6 @@ fn write_custom_header_csv(
         writeln!(f, "# Company,{}", csv_escape(&s.company))?;
     }
 
-    // Contact / Email / Tel — combine on one line separated by " / "
     let contact_parts: Vec<&str> = [s.contact_name.as_str(), s.email.as_str(), s.phone.as_str()]
         .iter().filter(|s| !s.is_empty()).copied().collect();
     if !contact_parts.is_empty() {
@@ -670,6 +627,10 @@ fn write_custom_header_csv(
             i + 1, csv_escape(&dst.to_string_lossy()))?;
     }
 
+    if !location.is_empty() {
+        writeln!(f, "# Location,{}", csv_escape(location))?;
+    }
+
     let plain = html_to_plain(comment);
     if !plain.is_empty() {
         for line in plain.lines() {
@@ -679,7 +640,7 @@ fn write_custom_header_csv(
         }
     }
 
-    writeln!(f, "#")?; // blank separator line before column headers
+    writeln!(f, "#")?;
     Ok(())
 }
 

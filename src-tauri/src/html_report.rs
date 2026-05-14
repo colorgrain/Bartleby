@@ -55,6 +55,10 @@ fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+fn ffmpeg_cmd() -> Command {
+    crate::sidecar::sidecar_cmd("ffmpeg")
+}
+
 fn he(s: &str) -> String {
     s.replace('&', "&amp;")
      .replace('<', "&lt;")
@@ -110,7 +114,7 @@ fn image_thumb_uri(path: &Path) -> Option<String> {
 
 fn video_thumb_uri(path: &Path) -> Option<String> {
     let tmp = std::env::temp_dir().join("_bartleby_html_vthumb.jpg");
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg_cmd();
     cmd.arg("-y")
         .arg("-ss").arg("00:00:01")
         .arg("-i").arg(path)
@@ -132,7 +136,7 @@ fn video_thumb_uri(path: &Path) -> Option<String> {
 
 fn audio_wave_uri(path: &Path) -> Option<String> {
     let tmp = std::env::temp_dir().join("_bartleby_html_wave.png");
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg_cmd();
     cmd.arg("-y")
         .arg("-i").arg(path)
         .arg("-filter_complex")
@@ -276,11 +280,11 @@ pub fn write_html(
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
-    entries:         &[(FileMeta, String, String, String, Option<bool>)],
+    entries:         &[(FileMeta, String, String, Option<bool>)],
     settings:        &Settings,
-    gen_md5:         bool,
-    gen_xxh:         bool,
+    hash_col:        &str,
     comment:         &str,
+    location:        &str,
 ) -> io::Result<()> {
     let out_path = dst_dir.join(format!("{}_report.html", src_name));
     let mut out  = std::fs::File::create(&out_path)?;
@@ -290,12 +294,8 @@ pub fn write_html(
     let (r1, g1, b1) = hex_to_rgb(&settings.accent_color_1);
     let a1 = format!("rgb({},{},{})", r1, g1, b1);
 
-    let checksum_header = if gen_md5 && gen_xxh { "Checksum" }
-                          else if gen_md5        { "MD5" }
-                          else                   { "XXH3" };
-
-    let has_verify = entries.iter().any(|(_, _, _, _, ok)| ok.is_some());
-    let has_hash   = gen_md5 || gen_xxh;
+    let has_verify = entries.iter().any(|(_, _, _, ok)| ok.is_some());
+    let has_hash   = !hash_col.is_empty();
 
     // ── Inline CSS ────────────────────────────────────────────────────────────
     let css = format!(r#"
@@ -388,15 +388,23 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
 
     write!(out, "</div>\n")?; // #header
 
-    // ── Comment block (if present) — BEFORE the coloured rule ────────────────
-    let safe_comment = sanitize_comment(comment);
-    if !safe_comment.is_empty() {
-        write!(out,
-            "<div id=\"report-comment\" style=\"padding:6px 16px 10px;font-size:9px;line-height:1.6;\">\
-            <div style=\"font-weight:bold;text-decoration:underline;margin-bottom:2px;\">Comments:</div>\
-            <div>{note}</div></div>\n",
-            note = safe_comment
-        )?;
+    // ── Location + Comment block — BEFORE the coloured rule ──────────────────
+    let has_location_or_comment = !location.is_empty() || !sanitize_comment(comment).is_empty();
+    if has_location_or_comment {
+        write!(out, "<div style=\"padding:6px 16px 10px;font-size:9px;line-height:1.6;\">\n")?;
+        if !location.is_empty() {
+            write!(out,
+                "<div style=\"margin-bottom:4px;\"><span style=\"font-weight:bold;text-decoration:underline;\">Location:</span> {}</div>\n",
+                he(location))?;
+        }
+        let safe_comment = sanitize_comment(comment);
+        if !safe_comment.is_empty() {
+            write!(out,
+                "<div><div style=\"font-weight:bold;text-decoration:underline;margin-bottom:2px;\">Comments:</div>\
+                <div>{note}</div></div>\n",
+                note = safe_comment)?;
+        }
+        write!(out, "</div>\n")?;
     }
 
     // ── Table ─────────────────────────────────────────────────────────────────
@@ -413,7 +421,7 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     if settings.col_chroma      { write!(out, "<th>Chroma</th>\n")?; }
     if settings.col_color_space { write!(out, "<th>Color Space</th>\n")?; }
     if settings.col_sample_rate { write!(out, "<th>Sample Rate</th>\n")?; }
-    if has_hash                 { write!(out, "<th>{}</th>\n", checksum_header)?; }
+    if has_hash                 { write!(out, "<th>{}</th>\n", hash_col)?; }
     write!(out, "</tr></thead>\n<tbody>\n")?;
 
     // Count columns after the thumbnail (used for directory row colspan).
@@ -433,14 +441,14 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     // Sort entries by (directory, filename), case-insensitive.
     let mut sorted_indices: Vec<usize> = (0..entries.len()).collect();
     sorted_indices.sort_by(|&a, &b| {
-        html_sort_key(&entries[a].3).cmp(&html_sort_key(&entries[b].3))
+        html_sort_key(&entries[a].2).cmp(&html_sort_key(&entries[b].2))
     });
 
     let mut current_dir: Option<String> = None;
     let mut file_row_even = true;
 
     for &idx in &sorted_indices {
-        let (meta, md5, xxh3, rel, verify_ok) = &entries[idx];
+        let (meta, hash, rel, verify_ok) = &entries[idx];
 
         // Compute directory component of the relative path.
         let dir = {
@@ -499,13 +507,7 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
         if settings.col_sample_rate { write!(out, "<td>{}</td>\n", he(&meta.sample_rate))?; }
 
         if has_hash {
-            if gen_md5 && gen_xxh {
-                write!(out, "<td class=\"hash\">{}<br>{}</td>\n", he(md5), he(xxh3))?;
-            } else if gen_md5 {
-                write!(out, "<td class=\"hash\">{}</td>\n", he(md5))?;
-            } else {
-                write!(out, "<td class=\"hash\">{}</td>\n", he(xxh3))?;
-            }
+            write!(out, "<td class=\"hash\">{}</td>\n", he(hash))?;
         }
 
         write!(out, "</tr>\n")?;

@@ -38,9 +38,16 @@
     <rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
   </symbol>
 
-  <symbol id="ico-panel-right" viewBox="0 0 20 20">
-    <rect x="2" y="2.5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-    <line x1="12.5" y1="2.5" x2="12.5" y2="17.5" stroke="currentColor" stroke-width="1.5"/>
+  <symbol id="ico-panel-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="18" height="18" x="3" y="3" rx="2"/>
+    <path d="M15 3v18"/>
+    <path d="m8 9 3 3-3 3"/>
+  </symbol>
+
+  <symbol id="ico-verify" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m12 15 2 2 4-4"/>
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
   </symbol>
 
 </svg>
@@ -48,8 +55,11 @@
 <!-- ══ TITLE BAR ════════════════════════════════════════════════════════════ -->
 <header id="titlebar">
   <div id="header-controls">
+    <button id="verify-btn" title="Open verification tool">
+      <svg width="20" height="20"><use href="#ico-verify"/></svg>
+    </button>
     <button id="log-toggle-btn" title="Hide log panel">
-      <svg width="16" height="16"><use href="#ico-panel-right"/></svg>
+      <svg width="20" height="20"><use href="#ico-panel-right"/></svg>
     </button>
     <button id="menu-btn" title="Settings">
       <svg width="20" height="20"><use href="#ico-menu"/></svg>
@@ -192,7 +202,7 @@
             <img id="about-icon" src="bartleby.svg" width="80" height="80" alt="Bartleby" />
             <p id="about-tagline">If you would prefer not to, use</p>
             <h1 id="about-name">Bartleby</h1>
-            <p id="about-version">0.1 Beta</p>
+            <p id="about-version">0.1 Beta 4</p>
             <p id="about-desc">Multi-destination file copy with MD5 / XXH3 integrity<br/>verification and metadata reports.</p>
             <p id="about-licence">GNU General Public Licence v3</p>
           </div>
@@ -210,6 +220,8 @@
 <div id="comment-overlay" class="overlay hidden">
   <div class="modal comment-modal" role="dialog" aria-modal="true">
     <div class="modal-header">Job note</div>
+    <input id="comment-location" class="modal-input comment-location-input"
+           type="text" placeholder="Location (optional)" />
     <div class="comment-toolbar">
       <button class="comment-fmt-btn" data-cmd="bold"      title="Bold"><b>B</b></button>
       <button class="comment-fmt-btn" data-cmd="italic"    title="Italic"><i>I</i></button>
