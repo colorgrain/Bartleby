@@ -118,8 +118,9 @@ jobs:
           curl -fsSL "https://mediaarea.net/download/binary/mediainfo/${MI_VER}/MediaInfo_CLI_${MI_VER}_Mac.dmg" \
             -o /tmp/mi.dmg
           hdiutil attach -quiet -mountpoint /tmp/mi_vol /tmp/mi.dmg
-          cp /tmp/mi_vol/MediaInfo src-tauri/binaries/mediainfo-aarch64-apple-darwin
-          cp /tmp/mi_vol/MediaInfo src-tauri/binaries/mediainfo-x86_64-apple-darwin
+          MIBIN=$(find /tmp/mi_vol -maxdepth 3 -type f -iname "mediainfo" | head -1)
+          cp "$MIBIN" src-tauri/binaries/mediainfo-aarch64-apple-darwin
+          cp "$MIBIN" src-tauri/binaries/mediainfo-x86_64-apple-darwin
           hdiutil detach -quiet /tmp/mi_vol
           chmod +x src-tauri/binaries/mediainfo-aarch64-apple-darwin \
                    src-tauri/binaries/mediainfo-x86_64-apple-darwin
