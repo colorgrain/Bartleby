@@ -115,13 +115,10 @@ jobs:
           codesign -s - src-tauri/binaries/ffmpeg-x86_64-apple-darwin
 
           # ── mediainfo ─────────────────────────────────────────────────────
-          curl -fsSL "https://mediaarea.net/download/binary/mediainfo/${MI_VER}/MediaInfo_CLI_${MI_VER}_Mac.dmg" \
-            -o /tmp/mi.dmg
-          hdiutil attach -quiet -mountpoint /tmp/mi_vol /tmp/mi.dmg
-          MIBIN=$(find /tmp/mi_vol -maxdepth 3 -type f -iname "mediainfo" | head -1)
+          brew install media-info
+          MIBIN=$(which mediainfo)
           cp "$MIBIN" src-tauri/binaries/mediainfo-aarch64-apple-darwin
           cp "$MIBIN" src-tauri/binaries/mediainfo-x86_64-apple-darwin
-          hdiutil detach -quiet /tmp/mi_vol
           chmod +x src-tauri/binaries/mediainfo-aarch64-apple-darwin \
                    src-tauri/binaries/mediainfo-x86_64-apple-darwin
           codesign -s - src-tauri/binaries/mediainfo-aarch64-apple-darwin
@@ -135,8 +132,8 @@ jobs:
           $MI_VER = "26.05"
           New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
 
-          # ffmpeg
-          Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
+          # ffmpeg — BtbN builds (same source as Linux, reliable)
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" `
             -OutFile "$env:TEMP\ffmpeg.zip" -UseBasicParsing
           Expand-Archive "$env:TEMP\ffmpeg.zip" -DestinationPath "$env:TEMP\ffmpeg_ex" -Force
           $ff = Get-ChildItem "$env:TEMP\ffmpeg_ex" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
