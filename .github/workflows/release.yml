@@ -121,8 +121,8 @@ jobs:
           cp "$MIBIN" src-tauri/binaries/mediainfo-x86_64-apple-darwin
           chmod +x src-tauri/binaries/mediainfo-aarch64-apple-darwin \
                    src-tauri/binaries/mediainfo-x86_64-apple-darwin
-          codesign -s - src-tauri/binaries/mediainfo-aarch64-apple-darwin
-          codesign -s - src-tauri/binaries/mediainfo-x86_64-apple-darwin
+          codesign -f -s - src-tauri/binaries/mediainfo-aarch64-apple-darwin
+          codesign -f -s - src-tauri/binaries/mediainfo-x86_64-apple-darwin
 
       - name: Download ffmpeg + mediainfo (Windows x86_64)
         if: runner.os == 'Windows'
