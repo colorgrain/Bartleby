@@ -1172,9 +1172,13 @@ fn open_direct(path: &Path) -> io::Result<fs::File> {
 #[cfg(target_os = "windows")]
 fn open_direct(path: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
-    // FILE_FLAG_NO_BUFFERING (0x20000000): bypasses the Windows cache manager.
-    // Combined with FILE_FLAG_SEQUENTIAL_SCAN (0x08000000) for sequential access hint.
-    const FILE_FLAG_NO_BUFFERING:    u32 = 0x20000000;
+    // FILE_FLAG_NO_BUFFERING (0x20000000): bypasses the Windows cache manager,
+    // ensuring Phase 2 reads physical disk data — true end-to-end verification.
+    // Requires buffer alignment and read sizes to be multiples of the sector size.
+    // The reader thread handles the last partial chunk via sector-padded reads:
+    // it pre-reads file size, pads the final request to the next 4096-byte
+    // boundary, and discards the padding after ReadFile returns the actual count.
+    const FILE_FLAG_NO_BUFFERING:   u32 = 0x20000000;
     const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x08000000;
     fs::OpenOptions::new()
         .read(true)
@@ -1273,6 +1277,15 @@ fn hash_buffered_file(
     // Reader thread — reads chunks and sends them through the channel
     std::thread::spawn(move || {
         let mut file = file;
+        // FILE_FLAG_NO_BUFFERING requires every ReadFile call to request a
+        // multiple of the sector size. For intermediate chunks this is already
+        // satisfied (HASH_CHUNK = 4 MiB is a multiple of 4096). For the last
+        // partial chunk we compute a padded request size and discard the surplus
+        // after ReadFile returns the actual byte count.
+        #[cfg(target_os = "windows")]
+        let win_file_size: u64 = file.metadata().map(|m| m.len()).unwrap_or(0);
+        #[cfg(target_os = "windows")]
+        let mut win_bytes_read: u64 = 0;
         loop {
             // ── Aligned buffer allocation via aligned-vec ────────────────────
             //
@@ -1308,7 +1321,25 @@ fn hash_buffered_file(
                 (ptr, HASH_CHUNK)
             };
 
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            // Windows: compute sector-padded size for FILE_FLAG_NO_BUFFERING.
+            // For full chunks: wanted == HASH_CHUNK (already sector-aligned), padded == HASH_CHUNK.
+            // For the last partial chunk: padded rounds up to the next 4096-byte boundary.
+            // ReadFile succeeds (aligned request) and returns the actual file byte count in `n`.
+            #[cfg(target_os = "windows")]
+            let (ptr, buf_len) = {
+                let wanted = (win_file_size - win_bytes_read).min(HASH_CHUNK as u64) as usize;
+                if wanted == 0 { break; } // all file bytes accounted for
+                let padded = (wanted + 4095) & !4095;
+                let layout = std::alloc::Layout::from_size_align(padded, 4096).unwrap();
+                let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+                if raw.is_null() {
+                    tx.send(Err(io::Error::new(io::ErrorKind::OutOfMemory, "alloc failed"))).ok();
+                    break;
+                }
+                (raw, padded)
+            };
+
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             let (ptr, buf_len) = {
                 let layout = std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap();
                 let raw = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -1332,7 +1363,7 @@ fn hash_buffered_file(
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
                     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
                     break; // EOF
                 }
                 Ok(n) => {
@@ -1340,7 +1371,9 @@ fn hash_buffered_file(
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
                     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
+                    #[cfg(target_os = "windows")]
+                    { win_bytes_read += n as u64; }
                     if tx.send(Ok(chunk)).is_err() { break; }
                     if pc.wait_if_paused().is_err() {
                         tx.send(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))).ok();
@@ -1351,7 +1384,7 @@ fn hash_buffered_file(
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     unsafe { libc::free(ptr); }
                     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap()); }
+                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
                     tx.send(Err(e)).ok();
                     break;
                 }

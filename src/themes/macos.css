@@ -97,9 +97,9 @@
   /* Text links and flat button colour. Darker for WCAG AA contrast on white. */
 
   /* ── Title bar ── */
-  --titlebar-bg:     #ebebeb;
-  /* Tahoe toolbar background — slightly warmer and lighter than Sequoia's #e8e8ed,
-     matches the NSToolbar glass appearance in Tahoe light mode. */
+  --titlebar-bg:     #f3f4f5;
+  /* Tahoe light: the liquid-glass window chrome appears noticeably lighter
+     than earlier macOS releases; #f3f4f5 reduces the seam with the native frame. */
 
   --titlebar-txt:    rgba(0, 0, 0, 0.85);
   --titlebar-border: rgba(0, 0, 0, 0.12);
@@ -171,8 +171,9 @@ body.theme-dark {
   --accent-text:  #409cff;
   /* Even lighter for text links on very dark backgrounds (#1c1c1e). */
 
-  --titlebar-bg:     #1c1c1e;
-  /* Same as --bg in dark mode — title bar blends seamlessly with the window. */
+  --titlebar-bg:     #2c2c2e;
+  /* Tahoe dark: liquid-glass chrome is lighter than the content background;
+     #2c2c2e (= --surface) reduces the visible seam with the native frame. */
 
   --titlebar-txt:    rgba(255, 255, 255, 0.85);
   --titlebar-border: rgba(255, 255, 255, 0.10);
@@ -208,7 +209,7 @@ body.theme-dark {
     --accent-fg:       #ffffff;
     --accent-hover:    #0070d8;
     --accent-text:     #409cff;
-    --titlebar-bg:     #1c1c1e;
+    --titlebar-bg:     #2c2c2e;
     --titlebar-txt:    rgba(255, 255, 255, 0.85);
     --titlebar-border: rgba(255, 255, 255, 0.10);
     --titlebar-shadow: none;

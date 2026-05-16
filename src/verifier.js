@@ -20,21 +20,13 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
         if (theme === 'default') {
             invoke('is_system_dark_mode').then(function(isDark) {
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
+                invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
             }).catch(function() {
                 document.body.className = 'theme-light';
             });
         } else {
             document.body.className = 'theme-' + theme;
-        }
-
-        var company = s.company || '';
-        var name    = s.contact_name || '';
-        if (company || name) {
-            var html = '<div class="verifier-id">';
-            if (company) html += '<div class="verifier-id-company">' + esc(company) + '</div>';
-            if (name)    html += '<div class="verifier-id-name">'    + esc(name)    + '</div>';
-            html += '</div>';
-            document.getElementById('verifier-header').innerHTML = html;
+            invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
         }
     }).catch(function() {});
 })();
@@ -64,7 +56,7 @@ listen('tauri://drag-drop', function(event) {
     if (paths && paths.length > 0) {
         setFile(paths[0]);
     }
-});
+}).catch(function() {});
 
 // ── Browse button ─────────────────────────────────────────────────────────────
 
@@ -142,14 +134,14 @@ listen('verify-paused', function() {
     var btn = document.getElementById('verify-pause-btn');
     btn.innerHTML = '<svg width="18" height="18"><use href="#ico-play"/></svg>';
     btn.title = 'Resume verification';
-});
+}).catch(function() {});
 
 listen('verify-resumed', function() {
     verifyIsPaused = false;
     var btn = document.getElementById('verify-pause-btn');
     btn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
     btn.title = 'Pause verification';
-});
+}).catch(function() {});
 
 listen('verify-cancelled', function() {
     verifyIsPaused = false;
@@ -158,14 +150,14 @@ listen('verify-cancelled', function() {
     var btn = document.getElementById('verify-pause-btn');
     btn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
     btn.title = 'Pause verification';
-});
+}).catch(function() {});
 
 // ── Progress events ───────────────────────────────────────────────────────────
 
 listen('verify-progress', function(event) {
     var p = event.payload;
     setProgress(p.fraction, p.label);
-});
+}).catch(function() {});
 
 // Per-file result: update just the result columns of the matching row
 listen('verify-entry', function(event) {
@@ -188,7 +180,7 @@ listen('verify-entry', function(event) {
     }
     if (sizeCell)  sizeCell.innerHTML  = tickIcon(e.size_ok);
     if (mtimeCell) mtimeCell.innerHTML = tickIcon(e.mtime_ok);
-});
+}).catch(function() {});
 
 listen('verify-done', function(event) {
     lastResult = event.payload;
@@ -199,14 +191,14 @@ listen('verify-done', function(event) {
     // Table rows already updated by verify-entry events — just refresh summary
     renderSummary(lastResult);
     showActionRow(lastResult);
-});
+}).catch(function() {});
 
 listen('verify-error', function(event) {
     verifyIsPaused = false;
     showProgress(false);
     setVerifyActive(false);
     showError(event.payload);
-});
+}).catch(function() {});
 
 // ── Progress bar helpers ──────────────────────────────────────────────────────
 

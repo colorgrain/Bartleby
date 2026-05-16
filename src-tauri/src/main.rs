@@ -1198,8 +1198,10 @@ fn set_window_theme(app: tauri::AppHandle, theme: String) {
         "light" => Some(Theme::Light),
         _       => None,
     };
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_theme(t);
+    for label in &["main", "verifier"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.set_theme(t);
+        }
     }
 }
 
