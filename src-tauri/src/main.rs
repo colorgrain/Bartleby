@@ -112,7 +112,7 @@ use serde::{Serialize, Deserialize};
 // - `Deserialize` → constructs a Rust struct from JSON (received from JavaScript)
 // Both traits are derived (auto-implemented) via `#[derive(…)]` macros.
 
-use tauri::{State, Emitter, Manager};
+use tauri::{State, Emitter, Manager, Theme};
 use tauri::webview::Color;
 //           │      └─ The `Emitter` trait adds the `.emit()` method to `WebviewWindow`.
 //           │         Without this `use`, the method would not be in scope.
@@ -316,6 +316,7 @@ fn main() {
             get_home_dir,
             get_volume_info,
             set_webview_bg,
+            set_window_theme,
             open_verifier_window,
             parse_verification_file,
             start_verification,
@@ -1185,6 +1186,20 @@ fn is_system_dark_mode() -> bool {
 fn set_webview_bg(app: tauri::AppHandle, r: u8, g: u8, b: u8) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_background_color(Some(Color(r, g, b, 255)));
+    }
+}
+
+/// Sets the window decoration theme (light/dark) to match Bartleby's active theme.
+/// Called by JS on every theme change so the OS window border follows the app, not the OS.
+#[tauri::command]
+fn set_window_theme(app: tauri::AppHandle, theme: String) {
+    let t = match theme.as_str() {
+        "dark"  => Some(Theme::Dark),
+        "light" => Some(Theme::Light),
+        _       => None,
+    };
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_theme(t);
     }
 }
 

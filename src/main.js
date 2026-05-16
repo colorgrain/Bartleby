@@ -183,6 +183,7 @@ async function loadSettings() {
                 var isDark = await invoke('is_system_dark_mode');
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
                 syncWindowBackground();
+                invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
                 document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
                     btn.classList.toggle('appearance-btn-active', btn.dataset.theme === 'default');
                 });
@@ -230,6 +231,7 @@ async function syncWindowBackground() {
 function applyTheme(theme, save) {
     document.body.className = 'theme-' + theme;
     syncWindowBackground();
+    invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
     if (currentSettings) currentSettings.theme = theme;
     document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
         btn.classList.toggle('appearance-btn-active', btn.dataset.theme === theme);
