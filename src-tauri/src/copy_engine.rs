@@ -86,7 +86,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use rayon::prelude::*;
 use crate::metadata;
@@ -420,6 +420,7 @@ pub fn run(
     gen_mhl:           bool,
     copy_as_subfolder: bool,
     comment:           String,
+    mhl_comment:       String,
     location:          String,
     settings:          Settings,
     tx:                Sender<Msg>,
@@ -556,18 +557,75 @@ pub fn run(
         + if gen_hash { total_bytes * (1 + n_dst) } else { 0 };
     let mut bytes_done: u64 = 0;
 
-    // Phase 1 — separate read (source) and write (destinations) byte counters
-    let mut p1_src_bytes: u64 = 0;
-    let mut p1_src_snap:  u64 = 0;
-    let mut p1_src_t           = Instant::now();
-    let mut p1_dst_bytes: u64 = 0;
-    let mut p1_dst_snap:  u64 = 0;
-    let mut p1_dst_t           = Instant::now();
+    // Atomic counters shared with the ticker thread.
+    // bytes_done_arc: updated after each file completes (end-of-file state).
+    // in_flight:      updated per chunk inside copy_file / hash_direct (intra-file).
+    // is_verifying:   false during Phase 1 (copy), true during Phase 2 (verify).
+    let bytes_done_arc = Arc::new(AtomicU64::new(0u64));
+    let in_flight      = Arc::new(AtomicU64::new(0u64));
+    let is_verifying   = Arc::new(AtomicBool::new(false));
+    // Current file label shared with the ticker (e.g. "Copying clip.mxf").
+    let action = Arc::new(std::sync::Mutex::new(String::new()));
 
-    // Phase 2 — aggregate verify read counter
-    let mut p2_bytes: u64 = 0;
-    let mut p2_snap:  u64 = 0;
-    let mut p2_t           = Instant::now();
+    // Ticker: emits Msg::Progress every 500 ms with a 2-second speed window.
+    // Runs on a dedicated thread so it never blocks the copy/hash threads.
+    let ticker_stop = Arc::new(AtomicBool::new(false));
+    {
+        let tx_t    = tx.clone();
+        let bd      = bytes_done_arc.clone();
+        let inf     = in_flight.clone();
+        let is_ver  = is_verifying.clone();
+        let act     = action.clone();
+        let stop    = ticker_stop.clone();
+        let gt      = grand_total;
+        let n_dst_f = destinations.len() as f64;
+        std::thread::spawn(move || {
+            let mut snap: u64    = 0;
+            let mut snap_t       = Instant::now();
+            let     global_start = Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if stop.load(Ordering::Relaxed) { break; }
+                let done  = bd.load(Ordering::Relaxed);
+                let inflt = inf.load(Ordering::Relaxed);
+                let total = done + inflt;
+                let fraction = if gt > 0 { (total as f64 / gt as f64).min(0.98) } else { 0.0 };
+                // Speed: 2-second sliding window; cumulative average during warmup.
+                let elapsed = snap_t.elapsed().as_secs_f64();
+                let bps = if elapsed >= 2.0 {
+                    let b = total.saturating_sub(snap) as f64 / elapsed;
+                    snap   = total;
+                    snap_t = Instant::now();
+                    b
+                } else {
+                    let g = global_start.elapsed().as_secs_f64();
+                    if g > 0.5 && total > 0 { total as f64 / g } else { 0.0 }
+                };
+                // Phase 1: in_flight tracks dst writes → W = bps, R = bps / n_dst.
+                // Phase 2: in_flight tracks reads from src + all dsts → per-device = bps / (1+n_dst).
+                let verifying  = is_ver.load(Ordering::Relaxed);
+                let divisor    = if verifying { n_dst_f + 1.0 } else { n_dst_f };
+                let action_str = act.lock().unwrap().clone();
+                let label = if bps >= 100.0 {
+                    let r = fmt_speed(bps / divisor.max(1.0));
+                    let speed_str = if verifying {
+                        format!("R: {}", r)
+                    } else {
+                        format!("R: {}  W: {}", r, fmt_speed(bps))
+                    };
+                    if action_str.is_empty() { speed_str }
+                    else { format!("{} — {}", action_str, speed_str) }
+                } else {
+                    action_str
+                };
+                let _ = tx_t.send(Msg::Progress(fraction, label));
+            }
+        });
+    }
+    // RAII guard: sets ticker_stop on every return path so the ticker exits cleanly.
+    struct TickerGuard(Arc<AtomicBool>);
+    impl Drop for TickerGuard { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); } }
+    let _ticker = TickerGuard(ticker_stop);
 
     // ══════════════════════════════════════════════════════════════════════════
     // PHASE 1 — Kernel copy, file by file, destinations in parallel
@@ -635,12 +693,8 @@ pub fn run(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let fsize   = file_sizes[idx];
 
-        let pct = if grand_total > 0 {
-            (bytes_done as f64 / grand_total as f64).min(0.98)
-        } else { 0.0 };
-        let rs = fmt_speed(speed_bps(p1_src_bytes, &mut p1_src_snap, &mut p1_src_t, &start));
-        let ws = fmt_speed(speed_bps(p1_dst_bytes, &mut p1_dst_snap, &mut p1_dst_t, &start));
-        let _ = tx.send(Msg::Progress(pct, format!("Copying {} — R: {}  W: {}", rel_str, rs, ws)));
+        in_flight.store(0, Ordering::Relaxed);
+        *action.lock().unwrap() = format!("Copying {}", rel_str);
 
         // Filter destinations: exclude those where this file is already complete (size + date match).
         let dst_entries: Vec<(usize, PathBuf)> = destinations.iter().enumerate()
@@ -658,6 +712,7 @@ pub fn run(
             // All destinations already have this file — add to `copied` for verification/reports.
             copied.push((src_path.clone(), rel_str.clone()));
             bytes_done += fsize * n_dst;
+            bytes_done_arc.store(bytes_done, Ordering::Relaxed);
             continue;
         }
 
@@ -675,7 +730,7 @@ pub fn run(
 
         // Copy to active destinations in parallel.
         let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter()
-            .map(|dst_path| copy_file(src_path, dst_path, &pc))
+            .map(|dst_path| copy_file(src_path, dst_path, &pc, &in_flight))
             .collect();
 
         let mut any_error = false;
@@ -716,9 +771,8 @@ pub fn run(
             }
         }
 
-        bytes_done   += fsize * n_dst;
-        p1_src_bytes += fsize;
-        p1_dst_bytes += fsize * (dst_entries.len() as u64);
+        bytes_done += fsize * n_dst;
+        bytes_done_arc.store(bytes_done, Ordering::Relaxed);
         copied.push((src_path.clone(), rel_str.clone()));
         log(&tx, &format!("  ✓  {}\n", rel_str));
     }
@@ -792,7 +846,7 @@ pub fn run(
         generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                          &meta_entries, &no_hashes,
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
-                         &comment, &location, &settings, &reply_rx);
+                         &comment, &mhl_comment, &location, &settings, &reply_rx);
         let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
             copied.len(), destinations.len());
         log(&tx, &format!("\n{}\n", summary));
@@ -814,6 +868,7 @@ pub fn run(
     //    physically on disk, then compare digests.
     // ══════════════════════════════════════════════════════════════════════════
     log(&tx, &format!("\n── Phase 2 — Verification {} ──────────────\n", ts(&start)));
+    is_verifying.store(true, Ordering::Relaxed);
 
     let n_files = copied.len();
     let mut results: Vec<(FileHashes, bool)> =
@@ -830,11 +885,7 @@ pub fn run(
             }
             let src_size = file_sizes[file_idx];
 
-            let pct = if grand_total > 0 {
-                (bytes_done as f64 / grand_total as f64).min(0.98)
-            } else { 0.98 };
-            let _ = tx.send(Msg::Progress(pct,
-                format!("Checking size {}/{} — {}", file_idx + 1, n_files, rel_str)));
+            *action.lock().unwrap() = format!("Checking size {}/{} — {}", file_idx + 1, n_files, rel_str);
 
             let mut mismatch = false;
             for (i, dst) in destinations.iter().enumerate() {
@@ -882,12 +933,8 @@ pub fn run(
             }
             let fsize = fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
 
-            let pct = if grand_total > 0 {
-                (bytes_done as f64 / grand_total as f64).min(0.98)
-            } else { 0.0 };
-            let vs = fmt_speed(speed_bps(p2_bytes, &mut p2_snap, &mut p2_t, &start));
-            let _ = tx.send(Msg::Progress(pct,
-                format!("Verifying {}/{} — {} — R: {}", file_idx + 1, n_files, rel_str, vs)));
+            in_flight.store(0, Ordering::Relaxed);
+            *action.lock().unwrap() = format!("Verifying {}/{} — {}", file_idx + 1, n_files, rel_str);
 
             // Build the list of paths to hash: [source, destination1, destination2, …]
             let mut all_paths: Vec<PathBuf> = vec![src_path.clone()];
@@ -930,7 +977,7 @@ pub fn run(
             }
 
             let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
-                .map(|path| hash_direct(path, hash_algo, &pc))
+                .map(|path| hash_direct(path, hash_algo, &pc, &in_flight))
                 .collect();
 
             let mut read_error = false;
@@ -951,6 +998,7 @@ pub fn run(
                 verify_errors += 1;
                 results[file_idx].1 = false;
                 bytes_done += fsize * (1 + n_dst);
+                bytes_done_arc.store(bytes_done, Ordering::Relaxed);
                 continue;
             }
 
@@ -977,7 +1025,7 @@ pub fn run(
             }
 
             bytes_done += fsize * (1 + n_dst);
-            p2_bytes   += fsize * (1 + n_dst);
+            bytes_done_arc.store(bytes_done, Ordering::Relaxed);
         }
     }
 
@@ -987,7 +1035,7 @@ pub fn run(
     generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
                      &meta_entries, &results,
                      hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
-                     &comment, &location, &settings, &reply_rx);
+                     &comment, &mhl_comment, &location, &settings, &reply_rx);
 
     if verify_errors > 0 {
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -1064,9 +1112,9 @@ pub fn run(
 /// If direct I/O fails (unsupported filesystem, insufficient permissions,
 /// very small files), we fall back to standard buffered I/O automatically.
 /// The hash result is still correct — only the cache-bypass guarantee is lost.
-fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
+fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
     // Try platform-specific direct I/O first, fall back to buffered on error.
-    let result = hash_direct_impl(path, algo, pc);
+    let result = hash_direct_impl(path, algo, pc, bytes_out);
     match result {
         Ok(h)  => Ok(h),
         Err(_) => {
@@ -1077,18 +1125,18 @@ fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result
             // so this buffered read goes to the FUSE driver → physical disk.
             // On non-FUSE filesystems, syncfs()/sync_all() guarantees that
             // cache == disk, so the buffered read is still correct.
-            hash_buffered(path, algo, pc)
+            hash_buffered(path, algo, pc, bytes_out)
         }
     }
 }
 
 /// Platform-specific direct I/O implementation.
-fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
+fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
     // Open with cache-bypassing flags — the file is moved into hash_buffered_file()
     // which passes it to the reader thread. No buffer needed here: the pipeline
     // allocates its own per-chunk buffers inside the reader thread.
     let file = open_direct(path)?;
-    hash_buffered_file(file, algo, pc.clone())
+    hash_buffered_file(file, algo, pc.clone(), bytes_out)
 }
 
 // ── Platform-specific file openers ───────────────────────────────────────────
@@ -1209,9 +1257,10 @@ fn open_direct(path: &Path) -> io::Result<fs::File> {
 /// No native platform API supports XXH3 — we keep `xxhash-rust` which is
 /// already heavily SIMD-optimised and reaches ~10 GB/s on modern CPUs.
 fn hash_buffered_file(
-    file: fs::File,
-    algo: HashAlgo,
-    pc:   Arc<PauseCancel>,
+    file:      fs::File,
+    algo:      HashAlgo,
+    pc:        Arc<PauseCancel>,
+    bytes_out: &Arc<AtomicU64>,
 ) -> io::Result<FileHashes> {
     use twox_hash::xxhash3_128::Hasher as Xxh128Hasher;
     use twox_hash::xxhash3_64::Hasher  as Xxh3Hasher;
@@ -1338,6 +1387,7 @@ fn hash_buffered_file(
                 if let Some(ref mut h) = xxh3_h   { std::hash::Hasher::write(h, &chunk); }
                 if let Some(ref mut h) = xxh128_h { h.write(&chunk); }
                 if let Some(ref mut h) = sha512_h { sha2::Digest::update(h, &chunk); }
+                bytes_out.fetch_add(chunk.len() as u64, Ordering::Relaxed);
             }
             Ok(Err(e)) => return Err(e),
             Err(_)     => break,
@@ -1364,9 +1414,9 @@ fn hash_buffered_file(
 }
 
 /// Hashes a file using standard buffered I/O (fallback when direct I/O fails).
-fn hash_buffered(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<FileHashes> {
+fn hash_buffered(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
     let file = fs::File::open(path)?;
-    hash_buffered_file(file, algo, pc.clone())
+    hash_buffered_file(file, algo, pc.clone(), bytes_out)
 }
 
 // ── Native MD5 implementations ────────────────────────────────────────────────
@@ -1618,10 +1668,6 @@ impl NativeMd5 {
 #[allow(clippy::too_many_arguments)]
 /// Hash a small file (e.g. an MHL file) for the `<references>` chain entry.
 /// Delegates to `hash_file_path` — defined below, after `generate_reports`.
-fn hash_small_file(path: &Path, algo: HashAlgo) -> io::Result<String> {
-    hash_file_path(path, algo)
-}
-
 /// Hash a file at `path` in streaming 4 MiB chunks using buffered I/O.
 /// On Linux, evicts the page cache before reading so the hash covers disk data.
 /// Used by `verify_engine` and `mhl_report` (source MHL reference hash).
@@ -1705,6 +1751,7 @@ fn generate_reports(
     gen_mhl:      bool,
     has_verify:   bool,
     comment:      &str,
+    mhl_comment:  &str,
     location:     &str,
     settings:     &Settings,
     reply_rx:     &std::sync::mpsc::Receiver<Reply>,
@@ -1715,14 +1762,10 @@ fn generate_reports(
     // ── MHL: scan source for generational chain (once, before the dst loop) ──
     let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
         let src_ascmhl = src.join("ascmhl");
-        mhl_report::scan_ascmhl_dir(&src_ascmhl).and_then(|(src_mhl_path, src_gen)| {
-            match hash_small_file(&src_mhl_path, hash_algo) {
-                Ok(hash) => Some(mhl_report::MhlRef {
-                    path:       src_mhl_path.to_string_lossy().to_string(),
-                    hash,
-                    generation: src_gen,
-                }),
-                Err(_) => None,
+        mhl_report::scan_ascmhl_dir(&src_ascmhl).map(|(src_mhl_path, src_gen)| {
+            mhl_report::MhlRef {
+                path:       src_mhl_path.to_string_lossy().to_string(),
+                generation: src_gen,
             }
         })
     } else {
@@ -1834,8 +1877,8 @@ fn generate_reports(
                     };
 
                 if should_write {
-                    match mhl_report::write_mhl(dst, src_name, &mhl_entries, mhl_elem,
-                                                comment, location, settings,
+                    match mhl_report::write_mhl(dst, src_name, src, &mhl_entries, mhl_elem,
+                                                mhl_comment, location, settings,
                                                 generation, src_mhl_ref.as_ref()) {
                         Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
                         Err(e) => log(tx, &format!("✖  MHL error: {}\n", e)),
@@ -1915,7 +1958,7 @@ fn log(tx: &Sender<Msg>, msg: &str) {
 /// Copy a file with pause/cancel support, using chunked copy_file_range on Linux
 /// (64 MiB per call) or a 4 MiB buffered read/write loop on other platforms.
 /// `wait_if_paused()` is checked between each chunk.
-fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
+fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64>) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -1938,7 +1981,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
             };
             match ret.cmp(&0) {
                 std::cmp::Ordering::Equal   => break,
-                std::cmp::Ordering::Greater => { total += ret as u64; }
+                std::cmp::Ordering::Greater => { total += ret as u64; bytes_out.fetch_add(ret as u64, Ordering::Relaxed); }
                 std::cmp::Ordering::Less    => {
                     let err = io::Error::last_os_error();
                     let raw = err.raw_os_error().unwrap_or(0);
@@ -1953,7 +1996,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
         if !use_cfr {
             drop(src_file);
             drop(dst_file);
-            return copy_file_buffered_chunked(src, dst, pc);
+            return copy_file_buffered_chunked(src, dst, pc, bytes_out);
         }
         drop(dst_file);
         if let Some(mtime) = src_mtime { set_mtime_via_path(dst, mtime); }
@@ -1962,7 +2005,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
     #[cfg(not(target_os = "linux"))]
     {
         let src_mtime = fs::metadata(src).ok().and_then(|m| m.modified().ok());
-        let total = copy_file_buffered_chunked(src, dst, pc)?;
+        let total = copy_file_buffered_chunked(src, dst, pc, bytes_out)?;
         if let Some(mtime) = src_mtime {
             if let Ok(f) = fs::OpenOptions::new().write(true).open(dst) {
                 let _ = f.set_modified(mtime);
@@ -1973,7 +2016,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
 }
 
 /// Buffered chunked copy fallback — 4 MiB chunks with pause/cancel checks.
-fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel) -> io::Result<u64> {
+fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64>) -> io::Result<u64> {
     use std::io::{Read, Write};
     let mut src_file = fs::File::open(src)?;
     #[cfg(target_os = "linux")]
@@ -1994,6 +2037,7 @@ fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel) -> io::R
         if n == 0 { break; }
         dst_file.write_all(&buf[..n])?;
         total += n as u64;
+        bytes_out.fetch_add(n as u64, Ordering::Relaxed);
     }
     // On non-Linux: set mtime on the open fd — macOS/Windows don't override on close.
     // On Linux:     close first, then utimensat via path — FUSE drivers (ntfs-3g,
@@ -2005,24 +2049,6 @@ fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel) -> io::R
     #[cfg(target_os = "linux")]
     if let Some(mtime) = src_mtime { set_mtime_via_path(dst, mtime); }
     Ok(total)
-}
-
-/// Returns bytes-per-second from a sliding 2-second window.
-/// Returns 0.0 during the initial warmup period.
-fn speed_bps(
-    done: u64, snap_bytes: &mut u64, snap_time: &mut Instant, global: &Instant,
-) -> f64 {
-    let elapsed = global.elapsed().as_secs_f64();
-    if elapsed < 0.5 || done == 0 { return 0.0; }
-    let snap_elapsed = snap_time.elapsed().as_secs_f64();
-    if snap_elapsed >= 1.5 {
-        let bps = done.saturating_sub(*snap_bytes) as f64 / snap_elapsed;
-        *snap_bytes = done;
-        *snap_time = Instant::now();
-        return bps;
-    }
-    // Fallback : moyenne cumulative — toujours correcte quelle que soit la taille des fichiers
-    done as f64 / elapsed
 }
 
 /// Formats a byte-per-second value as a human-readable speed string.

@@ -7,6 +7,7 @@ var listen = window.__TAURI__.event.listen;
 
 var currentFile   = null;   // absolute path to the loaded checksum / MHL file
 var lastResult    = null;   // VerifyResult from the last completed verification
+var currentIsMhl  = false;  // whether the loaded file is an MHL
 
 // ── Theme / skin on startup ───────────────────────────────────────────────────
 
@@ -24,6 +25,16 @@ var lastResult    = null;   // VerifyResult from the last completed verification
             });
         } else {
             document.body.className = 'theme-' + theme;
+        }
+
+        var company = s.company || '';
+        var name    = s.contact_name || '';
+        if (company || name) {
+            var html = '<div class="verifier-id">';
+            if (company) html += '<div class="verifier-id-company">' + esc(company) + '</div>';
+            if (name)    html += '<div class="verifier-id-name">'    + esc(name)    + '</div>';
+            html += '</div>';
+            document.getElementById('verifier-header').innerHTML = html;
         }
     }).catch(function() {});
 })();
@@ -76,7 +87,12 @@ function browseFile() {
 function setFile(path) {
     currentFile = path;
     document.getElementById('file-path-input').value = path;
-    resetResults();
+    clearAll();
+    invoke('parse_verification_file', { filePath: path }).then(function(result) {
+        renderFileList(result);
+    }).catch(function(e) {
+        showError('Could not parse file: ' + e);
+    });
 }
 
 // ── Verify button ─────────────────────────────────────────────────────────────
@@ -87,17 +103,62 @@ document.getElementById('verify-action-btn').addEventListener('click', function(
 });
 
 function startVerification(filePath) {
-    resetResults();
+    resetVerificationColumns();
     showProgress(true);
     setProgress(0, 'Starting…');
-    document.getElementById('verify-action-btn').disabled = true;
+    setVerifyActive(true);
 
     invoke('start_verification', { filePath: filePath }).catch(function(e) {
         showProgress(false);
-        document.getElementById('verify-action-btn').disabled = false;
+        setVerifyActive(false);
         showError('Could not start verification: ' + e);
     });
 }
+
+function setVerifyActive(active) {
+    document.getElementById('verify-action-btn').classList.toggle('hidden', active);
+    document.getElementById('verify-pause-btn').classList.toggle('hidden', !active);
+    document.getElementById('verify-stop-btn').classList.toggle('hidden', !active);
+}
+
+// ── Pause / Stop buttons ──────────────────────────────────────────────────────
+
+var verifyIsPaused = false;
+
+document.getElementById('verify-pause-btn').addEventListener('click', function() {
+    if (verifyIsPaused) {
+        invoke('resume_verification').catch(function() {});
+    } else {
+        invoke('pause_verification').catch(function() {});
+    }
+});
+
+document.getElementById('verify-stop-btn').addEventListener('click', function() {
+    invoke('cancel_verification').catch(function() {});
+});
+
+listen('verify-paused', function() {
+    verifyIsPaused = true;
+    var btn = document.getElementById('verify-pause-btn');
+    btn.innerHTML = '<svg width="18" height="18"><use href="#ico-play"/></svg>';
+    btn.title = 'Resume verification';
+});
+
+listen('verify-resumed', function() {
+    verifyIsPaused = false;
+    var btn = document.getElementById('verify-pause-btn');
+    btn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
+    btn.title = 'Pause verification';
+});
+
+listen('verify-cancelled', function() {
+    verifyIsPaused = false;
+    showProgress(false);
+    setVerifyActive(false);
+    var btn = document.getElementById('verify-pause-btn');
+    btn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
+    btn.title = 'Pause verification';
+});
 
 // ── Progress events ───────────────────────────────────────────────────────────
 
@@ -106,17 +167,44 @@ listen('verify-progress', function(event) {
     setProgress(p.fraction, p.label);
 });
 
+// Per-file result: update just the result columns of the matching row
+listen('verify-entry', function(event) {
+    var e   = event.payload;
+    var row = document.querySelector('#results-tbody tr[data-idx="' + e.index + '"]');
+    if (!row) return;
+
+    var rowCls = {ok:'row-ok', mismatch:'row-fail', missing:'row-miss'}[e.status] || 'row-fail';
+    row.className = rowCls;
+
+    var statusCell   = row.querySelector('.cell-status');
+    var computedCell = row.querySelector('.cell-computed');
+    var sizeCell     = row.querySelector('.cell-size');
+    var mtimeCell    = row.querySelector('.cell-mtime');
+
+    if (statusCell)   statusCell.innerHTML   = statusBadge(e.status);
+    if (computedCell) {
+        computedCell.title     = e.computed || '';
+        computedCell.innerHTML = e.computed ? truncHash(e.computed) : '—';
+    }
+    if (sizeCell)  sizeCell.innerHTML  = tickIcon(e.size_ok);
+    if (mtimeCell) mtimeCell.innerHTML = tickIcon(e.mtime_ok);
+});
+
 listen('verify-done', function(event) {
     lastResult = event.payload;
+    verifyIsPaused = false;
     setProgress(1.0, 'Done');
     setTimeout(function() { showProgress(false); }, 400);
-    document.getElementById('verify-action-btn').disabled = false;
-    renderResult(lastResult);
+    setVerifyActive(false);
+    // Table rows already updated by verify-entry events — just refresh summary
+    renderSummary(lastResult);
+    showActionRow(lastResult);
 });
 
 listen('verify-error', function(event) {
+    verifyIsPaused = false;
     showProgress(false);
-    document.getElementById('verify-action-btn').disabled = false;
+    setVerifyActive(false);
     showError(event.payload);
 });
 
@@ -131,25 +219,149 @@ function setProgress(fraction, label) {
     document.getElementById('prog-label').textContent = label;
 }
 
-// ── Render result ─────────────────────────────────────────────────────────────
+// ── Render from pre-parsed file list ─────────────────────────────────────────
 
-function resetResults() {
+function clearAll() {
     lastResult = null;
-    document.getElementById('summary-section').style.display = 'none';
-    document.getElementById('mhl-meta').style.display        = 'none';
-    document.getElementById('results-section').style.display = 'none';
-    document.getElementById('action-row').style.display      = 'none';
+    currentIsMhl = false;
+    document.getElementById('summary-section').style.display  = 'none';
+    document.getElementById('mhl-meta').style.display         = 'none';
+    document.getElementById('results-section').style.display  = 'none';
+    document.getElementById('action-row').style.display       = 'none';
     document.getElementById('post-verify-mhl-btn').style.display = 'none';
     document.getElementById('results-thead').innerHTML = '';
     document.getElementById('results-tbody').innerHTML = '';
     document.getElementById('meta-grid').innerHTML     = '';
+    showProgress(false);
 }
 
-function renderResult(r) {
-    renderSummary(r);
-    if (r.mhl_meta) renderMhlMeta(r.mhl_meta);
-    renderTable(r);
-    showActionRow(r);
+function renderFileList(r) {
+    currentIsMhl = r.file_type === 'mhl';
+    if (r.mhl_chain && r.mhl_chain.length > 0) {
+        renderMhlChain(r.mhl_chain);
+    } else if (r.mhl_meta) {
+        renderMhlChain([r.mhl_meta]);
+    }
+    renderPendingTable(r);
+}
+
+// Render the MHL generation chain as a table — one row per generation
+function renderMhlChain(chain) {
+    var grid = document.getElementById('meta-grid');
+    grid.innerHTML = '';
+
+    var wrap = document.createElement('div');
+    wrap.className = 'mhl-chain-wrap';
+
+    var table = document.createElement('table');
+    table.className = 'mhl-chain-table';
+
+    var thead = document.createElement('thead');
+    thead.innerHTML = '<tr>' +
+        '<th>Gen</th><th>Date</th><th>Process / Hash</th>' +
+        '<th>Author</th><th>Software</th><th>Location</th><th>Comment</th>' +
+        '</tr>';
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    var currentGen = chain.length > 0 ? chain[chain.length - 1].generation : 0;
+
+    chain.forEach(function(meta) {
+        var tr = document.createElement('tr');
+        if (meta.generation === currentGen) tr.className = 'mhl-gen-current';
+
+        // Gen
+        var cells = '<td class="mhl-td-gen">' + String(meta.generation).padStart(4, '0') + '</td>';
+
+        // Date
+        var dateStr = meta.finish_date
+            ? meta.finish_date.replace('T', ' ').replace(/\.\d+Z$/, 'Z').slice(0, 19)
+            : '';
+        cells += '<td>' + esc(dateStr) + '</td>';
+
+        // Process / Hash
+        var processLines = [];
+        if (meta.process)    processLines.push(esc(meta.process));
+        if (meta.hash_algo)  processLines.push('<span class="mhl-dim">' + esc(meta.hash_algo.toUpperCase()) + '</span>');
+        cells += '<td class="mhl-td-process">' + processLines.join('<br>') + '</td>';
+
+        // Author — company / name / email / phone each on its own line
+        var authorLines = [];
+        if (meta.author_company) authorLines.push(esc(meta.author_company));
+        if (meta.author_name)    authorLines.push(esc(meta.author_name));
+        if (meta.author_email)   authorLines.push('<span class="mhl-dim">' + esc(meta.author_email) + '</span>');
+        if (meta.author_phone)   authorLines.push('<span class="mhl-dim">' + esc(meta.author_phone) + '</span>');
+        cells += '<td>' + authorLines.join('<br>') + '</td>';
+
+        // Software
+        cells += '<td>' + esc(meta.creator || '') + '</td>';
+
+        // Location
+        cells += '<td>' + esc(meta.location || '') + '</td>';
+
+        // Comment
+        cells += '<td>' + esc(meta.comment || '') + '</td>';
+
+        tr.innerHTML = cells;
+        tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    grid.appendChild(wrap);
+    document.getElementById('mhl-meta').style.display = 'block';
+}
+
+// Build the table with all files visible immediately, result columns as "pending"
+function renderPendingTable(r) {
+    var isMhl   = r.file_type === 'mhl';
+    var algoUp  = (r.algo || '').toUpperCase();
+    var thead   = document.getElementById('results-thead');
+    var tbody   = document.getElementById('results-tbody');
+
+    var headerCells = '<th>File</th><th>Status</th>' +
+        '<th>Expected ' + esc(algoUp) + '</th>' +
+        '<th>Computed ' + esc(algoUp) + '</th>';
+    if (isMhl) { headerCells += '<th>Size</th><th>Mtime</th>'; }
+    thead.innerHTML = '<tr>' + headerCells + '</tr>';
+
+    var rows = '';
+    r.entries.forEach(function(e, idx) {
+        var expHash = truncHash(e.expected_hash);
+        rows += '<tr class="row-pending" data-idx="' + idx + '">' +
+            '<td class="cell-path">' + esc(e.rel_path) + '</td>' +
+            '<td class="cell-status"><span class="badge badge-pending">…</span></td>' +
+            '<td class="cell-hash" title="' + esc(e.expected_hash) + '">' + expHash + '</td>' +
+            '<td class="cell-hash cell-computed">—</td>';
+        if (isMhl) {
+            rows += '<td class="cell-size">—</td><td class="cell-mtime">—</td>';
+        }
+        rows += '</tr>';
+    });
+    tbody.innerHTML = rows;
+
+    document.getElementById('results-section').style.display = 'block';
+}
+
+// Reset only the verification result columns (called before re-verification)
+function resetVerificationColumns() {
+    document.getElementById('summary-section').style.display = 'none';
+    document.getElementById('action-row').style.display      = 'none';
+    document.getElementById('post-verify-mhl-btn').style.display = 'none';
+    lastResult = null;
+
+    var rows = document.querySelectorAll('#results-tbody tr');
+    rows.forEach(function(row) {
+        row.className = 'row-pending';
+        var statusCell   = row.querySelector('.cell-status');
+        var computedCell = row.querySelector('.cell-computed');
+        var sizeCell     = row.querySelector('.cell-size');
+        var mtimeCell    = row.querySelector('.cell-mtime');
+        if (statusCell)   statusCell.innerHTML   = '<span class="badge badge-pending">…</span>';
+        if (computedCell) { computedCell.textContent = '—'; computedCell.title = ''; }
+        if (sizeCell)  sizeCell.textContent  = '—';
+        if (mtimeCell) mtimeCell.textContent  = '—';
+    });
 }
 
 function renderSummary(r) {
@@ -160,72 +372,9 @@ function renderSummary(r) {
     document.getElementById('summary-section').style.display = 'block';
 }
 
-function renderMhlMeta(meta) {
-    var grid = document.getElementById('meta-grid');
-    grid.innerHTML = '';
-
-    var items = [];
-    if (meta.creator)      items.push(['Creator',     esc(meta.creator)]);
-    if (meta.finish_date)  items.push(['Date',         esc(meta.finish_date)]);
-    if (meta.process)      items.push(['Process',      esc(meta.process)]);
-    if (meta.generation)   items.push(['Generation',   String(meta.generation).padStart(4, '0')]);
-    if (meta.author_name)  items.push(['Author',       esc(meta.author_name)]);
-    if (meta.author_email) items.push(['Email',        esc(meta.author_email)]);
-    if (meta.location)     items.push(['Location',     esc(meta.location)]);
-    if (meta.comment)      items.push(['Comment',      esc(meta.comment)]);
-    if (meta.parent_ref)   items.push(['Parent MHL',   '<span class="chain-ref">' + esc(meta.parent_ref) + '</span>']);
-
-    items.forEach(function(pair) {
-        var div = document.createElement('div');
-        div.className = 'meta-item';
-        div.innerHTML = '<label>' + pair[0] + '</label><span>' + pair[1] + '</span>';
-        grid.appendChild(div);
-    });
-
-    if (items.length > 0) {
-        document.getElementById('mhl-meta').style.display = 'block';
-    }
-}
-
-function renderTable(r) {
-    var isMhl    = r.file_type === 'mhl';
-    var algoUp   = (r.algo || '').toUpperCase();
-    var thead    = document.getElementById('results-thead');
-    var tbody    = document.getElementById('results-tbody');
-
-    var headerCells = '<th>File</th><th>Status</th>' +
-        '<th>Expected ' + esc(algoUp) + '</th>' +
-        '<th>Computed ' + esc(algoUp) + '</th>';
-    if (isMhl) { headerCells += '<th>Size</th><th>Mtime</th>'; }
-    thead.innerHTML = '<tr>' + headerCells + '</tr>';
-
-    var rows = '';
-    r.entries.forEach(function(e) {
-        var rowCls   = {ok:'row-ok', mismatch:'row-fail', missing:'row-miss'}[e.status] || 'row-fail';
-        var badge    = statusBadge(e.status);
-        var expHash  = truncHash(e.expected);
-        var compHash = e.computed ? truncHash(e.computed) : '—';
-        var row      = '<tr class="' + rowCls + '">' +
-            '<td class="cell-path">' + esc(e.rel_path) + '</td>' +
-            '<td>' + badge + '</td>' +
-            '<td class="cell-hash" title="' + esc(e.expected) + '">' + expHash + '</td>' +
-            '<td class="cell-hash" title="' + esc(e.computed) + '">' + compHash + '</td>';
-        if (isMhl) {
-            row += '<td>' + tickIcon(e.size_ok) + '</td>' +
-                   '<td>' + tickIcon(e.mtime_ok) + '</td>';
-        }
-        row += '</tr>';
-        rows += row;
-    });
-    tbody.innerHTML = rows;
-
-    document.getElementById('results-section').style.display = 'block';
-}
-
 function showActionRow(r) {
     var actionRow = document.getElementById('action-row');
     actionRow.style.display = 'flex';
-
     var mhlBtn = document.getElementById('post-verify-mhl-btn');
     mhlBtn.style.display = (r.file_type === 'mhl') ? 'inline-flex' : 'none';
 }
@@ -248,7 +397,7 @@ function tickIcon(val) {
 }
 
 function truncHash(h) {
-    if (!h || h.length <= 16) return esc(h);
+    if (!h || h.length <= 16) return esc(h || '');
     return esc(h.slice(0, 8) + '…' + h.slice(-8));
 }
 

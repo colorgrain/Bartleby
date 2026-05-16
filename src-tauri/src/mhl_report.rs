@@ -18,7 +18,7 @@
 //! <?xml version="1.0" encoding="UTF-8"?>
 //! <hashlist xmlns="urn:ASC:MHL:v2.0" version="2.0">
 //!   <creatorinfo>…</creatorinfo>
-//!   <processinfo><process>copy</process></processinfo>
+//!   <processinfo><process>transfer</process></processinfo>
 //!   <hashes>
 //!     <hash>
 //!       <file><path>rel/path.mov</path><size>123456789</size></file>
@@ -37,18 +37,16 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use chrono::{Local, Utc, DateTime};
+use chrono::{Utc, DateTime};
 use crate::settings::Settings;
 
 // ── Generational chain helpers ────────────────────────────────────────────────
 
 /// Reference to a parent MHL file — used to build the generational chain.
 pub struct MhlRef {
-    /// Absolute path to the source MHL file (used verbatim in `<references>`).
+    /// Absolute path to the source MHL file.
+    /// Used to compute a relative path (if within dst scope) and the C4 hash.
     pub path:       String,
-    /// Hash of the source MHL file itself, hex-encoded, using the same algorithm
-    /// as this copy job. Empty string when the algorithm is unsupported for references.
-    pub hash:       String,
     /// Generation number parsed from the source MHL filename prefix.
     pub generation: u32,
 }
@@ -95,6 +93,17 @@ pub fn find_dst_mhl_for_src(dst: &Path, src_name: &str) -> Option<(PathBuf, u32)
     best
 }
 
+// ── Hostname ──────────────────────────────────────────────────────────────────
+
+pub fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 // ── MHL writer ────────────────────────────────────────────────────────────────
 
 /// Writes an ASC MHL v2.0 file into `{dst}/ascmhl/` and returns its path.
@@ -112,6 +121,7 @@ pub fn find_dst_mhl_for_src(dst: &Path, src_name: &str) -> Option<(PathBuf, u32)
 pub fn write_mhl(
     dst:        &Path,
     src_name:   &str,
+    _src_path:  &Path,
     entries:    &[(String, String)],
     hash_elem:  &str,
     comment:    &str,
@@ -120,9 +130,8 @@ pub fn write_mhl(
     generation: u32,
     src_ref:    Option<&MhlRef>,
 ) -> io::Result<PathBuf> {
-    let now_local: DateTime<Local> = Local::now();
     let now_utc:   DateTime<Utc>   = Utc::now();
-    let date_str   = now_local.format("%Y-%m-%d").to_string();
+    let date_str   = now_utc.format("%Y-%m-%d").to_string();
     let time_str   = now_utc.format("%H%M%SZ").to_string();
     let finish_iso = now_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -138,40 +147,33 @@ pub fn write_mhl(
 
     // ── creatorinfo ───────────────────────────────────────────────────────────
     writeln!(f, "  <creatorinfo>")?;
-    writeln!(f, "    <name>Bartleby {}</name>", crate::VERSION)?;
-    writeln!(f, "    <finishdate>{}</finishdate>", finish_iso)?;
-    writeln!(f, "    <author>")?;
-    let author_name = if !settings.company.is_empty() && !settings.contact_name.is_empty() {
-        format!("{} / {}", xml_escape(&settings.company), xml_escape(&settings.contact_name))
-    } else if !settings.contact_name.is_empty() {
-        xml_escape(&settings.contact_name)
-    } else if !settings.company.is_empty() {
-        xml_escape(&settings.company)
-    } else {
-        String::new()
-    };
-    if !author_name.is_empty() {
-        writeln!(f, "      <name>{}</name>", author_name)?;
+    writeln!(f, "    <creationdate>{}</creationdate>", finish_iso)?;
+    writeln!(f, "    <hostname>{}</hostname>", xml_escape(&hostname()))?;
+    writeln!(f, "    <tool version=\"{}\">Bartleby</tool>", xml_escape(crate::VERSION))?;
+    let company = settings.company.trim();
+    let name    = settings.contact_name.trim();
+    let email   = settings.email.trim();
+    let phone   = settings.phone.trim();
+    if !company.is_empty() {
+        writeln!(f, "    <author role=\"organization\">{}</author>", xml_escape(company))?;
     }
-    if !settings.email.is_empty() {
-        writeln!(f, "      <email>{}</email>", xml_escape(&settings.email))?;
+    if !name.is_empty() || !email.is_empty() || !phone.is_empty() {
+        write!(f, "    <author")?;
+        if !email.is_empty() { write!(f, " email=\"{}\"", xml_escape(email))?; }
+        if !phone.is_empty() { write!(f, " phone=\"{}\"", xml_escape(phone))?; }
+        writeln!(f, ">{}</author>", xml_escape(name))?;
     }
-    if !settings.phone.is_empty() {
-        writeln!(f, "      <phone>{}</phone>", xml_escape(&settings.phone))?;
-    }
-    writeln!(f, "    </author>")?;
     if !location.is_empty() {
         writeln!(f, "    <location>{}</location>", xml_escape(location))?;
     }
-    let plain_comment = html_to_plain(comment);
-    if !plain_comment.is_empty() {
-        writeln!(f, "    <comment>{}</comment>", xml_escape(&plain_comment))?;
+    if !comment.is_empty() {
+        writeln!(f, "    <comment>{}</comment>", xml_escape(comment))?;
     }
     writeln!(f, "  </creatorinfo>")?;
 
     // ── processinfo ───────────────────────────────────────────────────────────
     writeln!(f, "  <processinfo>")?;
-    writeln!(f, "    <process>copy</process>")?;
+    writeln!(f, "    <process>transfer</process>")?;
     writeln!(f, "  </processinfo>")?;
 
     // ── hashes ────────────────────────────────────────────────────────────────
@@ -194,28 +196,34 @@ pub fn write_mhl(
         };
 
         writeln!(f, "    <hash>")?;
-        writeln!(f, "      <file>")?;
-        writeln!(f, "        <path>{}</path>", xml_escape(rel))?;
-        writeln!(f, "        <size>{}</size>", size)?;
-        writeln!(f, "      </file>")?;
-        writeln!(f, "      <{}>{}</{}>", hash_elem, hash, hash_elem)?;
-        if !mtime_iso.is_empty() {
-            writeln!(f, "      <lastmodificationdate>{}</lastmodificationdate>", mtime_iso)?;
-        }
+        write!(f, "      <path")?;
+        if size > 0              { write!(f, " size=\"{}\"", size)?; }
+        if !mtime_iso.is_empty() { write!(f, " lastmodificationdate=\"{}\"", mtime_iso)?; }
+        writeln!(f, ">{}</path>", xml_escape(rel))?;
+        writeln!(f, "      <{} action=\"original\">{}</{}>", hash_elem, hash, hash_elem)?;
         writeln!(f, "    </hash>")?;
     }
     writeln!(f, "  </hashes>")?;
 
     // ── references (generational chain) ───────────────────────────────────────
+    // The reference path must be relative to the scope of this manifest (dst root).
+    // Cross-volume references (source on a different drive) are omitted since
+    // RelativePathType cannot express them. The C4 hash is required by the spec.
     if let Some(r) = src_ref {
-        writeln!(f, "  <references>")?;
-        writeln!(f, "    <reference>")?;
-        writeln!(f, "      <path>{}</path>", xml_escape(&r.path))?;
-        if !r.hash.is_empty() {
-            writeln!(f, "      <{}>{}</{}>", hash_elem, r.hash, hash_elem)?;
+        let abs_ref = Path::new(&r.path);
+        if let Ok(rel) = abs_ref.strip_prefix(dst) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let c4 = crate::copy_engine::hash_file_path(abs_ref, crate::copy_engine::HashAlgo::C4)
+                .unwrap_or_default();
+            if !c4.is_empty() {
+                writeln!(f, "  <references>")?;
+                writeln!(f, "    <hashlistreference>")?;
+                writeln!(f, "      <path>{}</path>", xml_escape(&rel_str))?;
+                writeln!(f, "      <c4>{}</c4>", c4)?;
+                writeln!(f, "    </hashlistreference>")?;
+                writeln!(f, "  </references>")?;
+            }
         }
-        writeln!(f, "    </reference>")?;
-        writeln!(f, "  </references>")?;
     }
 
     writeln!(f, "</hashlist>")?;
@@ -232,29 +240,3 @@ fn xml_escape(s: &str) -> String {
      .replace('\'', "&apos;")
 }
 
-fn html_to_plain(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    let mut tag_buf = String::new();
-    for ch in html.chars() {
-        match ch {
-            '<' => { in_tag = true; tag_buf.clear(); }
-            '>' => {
-                let t = tag_buf.trim().to_lowercase();
-                if t == "br" || t == "br/" || t.starts_with("/p") || t.starts_with("/div") {
-                    result.push(' ');
-                }
-                in_tag = false;
-            }
-            _ if in_tag => { tag_buf.push(ch); }
-            _ => { result.push(ch); }
-        }
-    }
-    result
-        .replace("&amp;",  "&")
-        .replace("&lt;",   "<")
-        .replace("&gt;",   ">")
-        .replace("&nbsp;", " ")
-        .trim()
-        .to_string()
-}

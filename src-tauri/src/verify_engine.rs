@@ -10,9 +10,10 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 use tauri::Emitter;
-use crate::copy_engine::HashAlgo;
+use crate::copy_engine::{HashAlgo, PauseCancel};
 
 // ── Public data structures ────────────────────────────────────────────────────
 
@@ -29,15 +30,18 @@ pub struct VerifyEntry {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MhlMeta {
-    pub creator:      String,
-    pub finish_date:  String,
-    pub author_name:  String,
-    pub author_email: String,
-    pub location:     String,
-    pub comment:      String,
-    pub process:      String,       // "copy" | "verify" | ""
-    pub generation:   u32,
-    pub parent_ref:   Option<String>,
+    pub creator:        String,
+    pub finish_date:    String,
+    pub author_company: String,   // populated from <author role="organization">
+    pub author_name:    String,
+    pub author_email:   String,
+    pub author_phone:   String,
+    pub location:       String,
+    pub comment:        String,
+    pub process:        String,   // "in-place" | "transfer" | "flatten"
+    pub generation:     u32,
+    pub parent_ref:     Option<String>,
+    pub hash_algo:      String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,10 +57,168 @@ pub struct VerifyResult {
     pub missing_count: usize,
 }
 
+/// Pre-parse result: file list from a checksum/MHL file without hashing.
+/// Used to populate the table immediately when a file is loaded.
+#[derive(Serialize, Clone, Debug)]
+pub struct ParsedFileEntry {
+    pub rel_path:       String,
+    pub expected_hash:  String,
+    pub expected_size:  u64,
+    pub expected_mtime: Option<String>,
+    pub algo:           String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct FileListResult {
+    pub file_type: String,
+    pub algo:      String,
+    pub mhl_meta:  Option<MhlMeta>,
+    pub mhl_chain: Vec<MhlMeta>,  // all generations in the ascmhl/ dir, sorted ascending
+    pub entries:   Vec<ParsedFileEntry>,
+}
+
 #[derive(Serialize, Clone)]
 struct VerifyProgress {
     fraction: f64,
     label:    String,
+}
+
+// Per-file result emitted during verification so the table updates row by row
+#[derive(Serialize, Clone)]
+struct VerifyEntryEvent {
+    index:     usize,
+    computed:  String,
+    status:    String,
+    file_size: u64,
+    size_ok:   Option<bool>,
+    mtime_ok:  Option<bool>,
+}
+
+// ── Pre-parse (no hashing) ────────────────────────────────────────────────────
+
+/// Parse a checksum or MHL file and return the file list without hashing.
+/// Called when a file is dropped/browsed so the table populates immediately.
+pub fn parse_file(file_path: PathBuf) -> io::Result<FileListResult> {
+    let ext = file_path.extension()
+        .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if ext == "mhl" {
+        parse_mhl_file_list(&file_path)
+    } else {
+        parse_checksum_file_list(&file_path)
+    }
+}
+
+fn parse_checksum_file_list(file_path: &Path) -> io::Result<FileListResult> {
+    let ext  = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let algo = algo_from_ext(&ext);
+    if algo == HashAlgo::None {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            format!("Unrecognised checksum extension: .{}", ext)));
+    }
+    let raw = parse_checksum_file(file_path)?;
+    let entries = raw.iter().map(|e| ParsedFileEntry {
+        rel_path:       e.rel_path.clone(),
+        expected_hash:  e.expected.clone(),
+        expected_size:  0,
+        expected_mtime: None,
+        algo:           ext.clone(),
+    }).collect();
+    Ok(FileListResult { file_type: "checksum".into(), algo: ext, mhl_meta: None, mhl_chain: vec![], entries })
+}
+
+fn parse_mhl_file_list(file_path: &Path) -> io::Result<FileListResult> {
+    let doc   = parse_mhl_file(file_path)?;
+    let chain = build_mhl_chain(file_path);
+    let algo_str = doc.algo.mhl_element().unwrap_or("").to_string();
+    let entries = doc.entries.iter().map(|e| ParsedFileEntry {
+        rel_path:       e.rel_path.clone(),
+        expected_hash:  e.expected_hash.clone(),
+        expected_size:  e.expected_size,
+        expected_mtime: e.expected_mtime.clone(),
+        algo:           e.algo.mhl_element().unwrap_or("").to_string(),
+    }).collect();
+    Ok(FileListResult {
+        file_type: "mhl".into(),
+        algo:      algo_str,
+        mhl_meta:  Some(doc.meta),
+        mhl_chain: chain,
+        entries,
+    })
+}
+
+/// Parse only creatorinfo/processinfo from an MHL — no hash entries needed for the chain display.
+fn parse_mhl_meta_only(path: &Path) -> io::Result<MhlMeta> {
+    let text = std::fs::read_to_string(path)?;
+    let doc  = roxmltree::Document::parse(&text)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let root = doc.root_element();
+    let mut meta = MhlMeta::default();
+    for child in root.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "creatorinfo" => {
+                for ci in child.children().filter(|n| n.is_element()) {
+                    match ci.tag_name().name() {
+                        "creationdate" => meta.finish_date = text_of(&ci),
+                        "tool"         => meta.creator     = text_of(&ci),
+                        "location"     => meta.location    = text_of(&ci),
+                        "comment"      => meta.comment     = text_of(&ci),
+                        "author" => {
+                            if ci.attribute("role") == Some("organization") {
+                                meta.author_company = text_of(&ci);
+                            } else {
+                                meta.author_name = text_of(&ci);
+                                if let Some(e) = ci.attribute("email") { meta.author_email = e.to_string(); }
+                                if let Some(p) = ci.attribute("phone") { meta.author_phone = p.to_string(); }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "processinfo" => {
+                for pi in child.children().filter(|n| n.is_element()) {
+                    if pi.tag_name().name() == "process" {
+                        meta.process = text_of(&pi);
+                    }
+                }
+            }
+            "hashes" => {
+                'algo_scan: for hash_el in child.children().filter(|n| n.is_element()) {
+                    if hash_el.tag_name().name() != "hash" { continue; }
+                    for he in hash_el.children().filter(|n| n.is_element()) {
+                        if HashAlgo::from_mhl_element(he.tag_name().name()) != HashAlgo::None {
+                            meta.hash_algo = he.tag_name().name().to_string();
+                            break 'algo_scan;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        meta.generation = name.split('_').next()
+            .and_then(|g| g.parse::<u32>().ok()).unwrap_or(0);
+    }
+    Ok(meta)
+}
+
+/// Collect all MHL generations from the same ascmhl/ directory, sorted ascending.
+fn build_mhl_chain(mhl_path: &Path) -> Vec<MhlMeta> {
+    let dir = match mhl_path.parent() { Some(d) => d, None => return vec![] };
+    let mut chain = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("mhl") {
+                if let Ok(meta) = parse_mhl_meta_only(&p) {
+                    chain.push(meta);
+                }
+            }
+        }
+    }
+    chain.sort_by_key(|m| m.generation);
+    chain
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -66,7 +228,7 @@ struct VerifyProgress {
 /// - `"verify-progress"` → `VerifyProgress` (fraction 0.0–1.0, label)
 /// - `"verify-done"`     → `VerifyResult`
 /// - `"verify-error"`    → String error message
-pub fn run(file_path: PathBuf, win: tauri::WebviewWindow) {
+pub fn run(file_path: PathBuf, win: tauri::WebviewWindow, pc: Arc<PauseCancel>) {
     std::thread::spawn(move || {
         let ext = file_path.extension()
             .and_then(|e| e.to_str())
@@ -74,13 +236,16 @@ pub fn run(file_path: PathBuf, win: tauri::WebviewWindow) {
             .to_lowercase();
 
         let result = if ext == "mhl" {
-            run_mhl_verify(&file_path, &win)
+            run_mhl_verify(&file_path, &win, &pc)
         } else {
-            run_checksum_verify(&file_path, &win)
+            run_checksum_verify(&file_path, &win, &pc)
         };
 
         match result {
             Ok(r)  => { let _ = win.emit("verify-done",  r); }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                let _ = win.emit("verify-cancelled", ());
+            }
             Err(e) => { let _ = win.emit("verify-error", e.to_string()); }
         }
     });
@@ -127,7 +292,7 @@ fn algo_from_ext(ext: &str) -> HashAlgo {
     }
 }
 
-fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Result<VerifyResult> {
+fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel) -> io::Result<VerifyResult> {
     let ext  = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let algo = algo_from_ext(&ext);
     if algo == HashAlgo::None {
@@ -142,6 +307,8 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Resu
     let mut entries = Vec::with_capacity(total);
 
     for (i, raw_e) in raw.iter().enumerate() {
+        pc.wait_if_paused().map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "cancelled"))?;
+
         let _ = win.emit("verify-progress", VerifyProgress {
             fraction: i as f64 / total.max(1) as f64,
             label:    format!("Verifying {} / {}", i + 1, total),
@@ -162,6 +329,10 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Resu
             Err(e) => (String::new(), 0, format!("error: {}", e)),
         };
 
+        let _ = win.emit("verify-entry", VerifyEntryEvent {
+            index: i, computed: computed.clone(), status: status.clone(),
+            file_size, size_ok: None, mtime_ok: None,
+        });
         entries.push(VerifyEntry {
             rel_path:  raw_e.rel_path.clone(),
             expected:  raw_e.expected.clone(),
@@ -227,17 +398,17 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
             "creatorinfo" => {
                 for ci in child.children().filter(|n| n.is_element()) {
                     match ci.tag_name().name() {
-                        "name"       => meta.creator     = text_of(&ci),
-                        "finishdate" => meta.finish_date = text_of(&ci),
-                        "location"   => meta.location    = text_of(&ci),
-                        "comment"    => meta.comment     = text_of(&ci),
-                        "author"     => {
-                            for a in ci.children().filter(|n| n.is_element()) {
-                                match a.tag_name().name() {
-                                    "name"  => meta.author_name  = text_of(&a),
-                                    "email" => meta.author_email = text_of(&a),
-                                    _       => {}
-                                }
+                        "creationdate" => meta.finish_date = text_of(&ci),
+                        "tool"         => meta.creator     = text_of(&ci),
+                        "location"     => meta.location    = text_of(&ci),
+                        "comment"      => meta.comment     = text_of(&ci),
+                        "author" => {
+                            if ci.attribute("role") == Some("organization") {
+                                meta.author_company = text_of(&ci);
+                            } else {
+                                meta.author_name = text_of(&ci);
+                                if let Some(e) = ci.attribute("email") { meta.author_email = e.to_string(); }
+                                if let Some(p) = ci.attribute("phone") { meta.author_phone = p.to_string(); }
                             }
                         }
                         _ => {}
@@ -246,7 +417,9 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
             }
             "processinfo" => {
                 for pi in child.children().filter(|n| n.is_element()) {
-                    if pi.tag_name().name() == "process" { meta.process = text_of(&pi); }
+                    if pi.tag_name().name() == "process" {
+                        meta.process = text_of(&pi);
+                    }
                 }
             }
             "hashes" => {
@@ -261,17 +434,14 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
                     };
                     for he in hash_el.children().filter(|n| n.is_element()) {
                         match he.tag_name().name() {
-                            "file" => {
-                                for fe in he.children().filter(|n| n.is_element()) {
-                                    match fe.tag_name().name() {
-                                        "path" => entry.rel_path      = text_of(&fe),
-                                        "size" => entry.expected_size = text_of(&fe).parse().unwrap_or(0),
-                                        _      => {}
-                                    }
-                                }
-                            }
-                            "lastmodificationdate" => {
-                                entry.expected_mtime = Some(text_of(&he));
+                            // Spec §6.5: <path> is a direct child of <hash>,
+                            // with size and lastmodificationdate as XML attributes.
+                            "path" => {
+                                entry.rel_path      = text_of(&he);
+                                entry.expected_size = he.attribute("size")
+                                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                                entry.expected_mtime = he.attribute("lastmodificationdate")
+                                    .map(|s| s.to_string());
                             }
                             name => {
                                 let a = HashAlgo::from_mhl_element(name);
@@ -288,7 +458,7 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
             }
             "references" => {
                 for ref_el in child.children().filter(|n| n.is_element()) {
-                    if ref_el.tag_name().name() == "reference" {
+                    if ref_el.tag_name().name() == "hashlistreference" {
                         for re in ref_el.children().filter(|n| n.is_element()) {
                             if re.tag_name().name() == "path" {
                                 meta.parent_ref = Some(text_of(&re));
@@ -307,11 +477,12 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
             .and_then(|g| g.parse::<u32>().ok())
             .unwrap_or(1);
     }
+    meta.hash_algo = doc_algo.mhl_element().unwrap_or("").to_string();
 
     Ok(MhlDoc { meta, entries, algo: doc_algo })
 }
 
-fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Result<VerifyResult> {
+fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel) -> io::Result<VerifyResult> {
     let doc = parse_mhl_file(file_path)?;
     // Files are resolved relative to the MHL's parent-parent directory
     // (MHL lives in `{dst}/ascmhl/file.mhl`, files live in `{dst}/`)
@@ -323,6 +494,8 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Result<Ve
     let mut entries = Vec::with_capacity(total);
 
     for (i, raw) in doc.entries.iter().enumerate() {
+        pc.wait_if_paused().map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "cancelled"))?;
+
         let _ = win.emit("verify-progress", VerifyProgress {
             fraction: i as f64 / total.max(1) as f64,
             label:    format!("Verifying {} / {}", i + 1, total),
@@ -364,6 +537,10 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow) -> io::Result<Ve
             }
         };
 
+        let _ = win.emit("verify-entry", VerifyEntryEvent {
+            index: i, computed: computed.clone(), status: status.clone(),
+            file_size, size_ok, mtime_ok,
+        });
         entries.push(VerifyEntry {
             rel_path:  raw.rel_path.clone(),
             expected:  raw.expected_hash.clone(),
@@ -421,21 +598,11 @@ pub fn write_post_verify_mhl(
         .and_then(|p| p.parent())           // dst/
         .unwrap_or(Path::new("."));
 
-    // Build file entries from verification result (use computed hash)
-    let entries: Vec<(String, String)> = result.entries.iter()
+    // Build file entries from verification result (use computed hash + status for action attr)
+    let entries: Vec<(String, String, String)> = result.entries.iter()
         .filter(|e| !e.computed.is_empty())
-        .map(|e| (e.rel_path.clone(), e.computed.clone()))
+        .map(|e| (e.rel_path.clone(), e.computed.clone(), e.status.clone()))
         .collect();
-
-    // Compute hash of the verified MHL file to put in <references>
-    let ref_hash = crate::copy_engine::hash_file_path(verified_mhl_path, algo)
-        .unwrap_or_default();
-
-    let src_ref = mhl_report::MhlRef {
-        path:       verified_mhl_path.display().to_string(),
-        hash:       ref_hash,
-        generation: meta.generation,
-    };
 
     let new_gen = mhl_report::find_dst_mhl_for_src(dst, "")  // don't filter by src_name
         .map(|(_, g)| g + 1)
@@ -444,11 +611,10 @@ pub fn write_post_verify_mhl(
     // Write via mhl_report but override the process element afterward
     // Simpler: build the XML directly for verify MHLs
     use std::io::Write;
-    use chrono::{Local, Utc, DateTime};
+    use chrono::{Utc, DateTime};
 
-    let now_local: DateTime<Local> = Local::now();
     let now_utc:   DateTime<Utc>   = Utc::now();
-    let date_str   = now_local.format("%Y-%m-%d").to_string();
+    let date_str   = now_utc.format("%Y-%m-%d").to_string();
     let time_str   = now_utc.format("%H%M%SZ").to_string();
     let finish_iso = now_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -468,23 +634,28 @@ pub fn write_post_verify_mhl(
     writeln!(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
     writeln!(f, "<hashlist xmlns=\"urn:ASC:MHL:v2.0\" version=\"2.0\">")?;
     writeln!(f, "  <creatorinfo>")?;
-    writeln!(f, "    <name>Bartleby {}</name>", crate::VERSION)?;
-    writeln!(f, "    <finishdate>{}</finishdate>", finish_iso)?;
-    writeln!(f, "    <author>")?;
-    let author = if !settings.company.is_empty() && !settings.contact_name.is_empty() {
-        format!("{} / {}", xe(&settings.company), xe(&settings.contact_name))
-    } else if !settings.contact_name.is_empty() { xe(&settings.contact_name)
-    } else if !settings.company.is_empty()      { xe(&settings.company)
-    } else                                        { String::new() };
-    if !author.is_empty() { writeln!(f, "      <name>{}</name>", author)?; }
-    if !settings.email.is_empty() { writeln!(f, "      <email>{}</email>", xe(&settings.email))?; }
-    writeln!(f, "    </author>")?;
+    writeln!(f, "    <creationdate>{}</creationdate>", finish_iso)?;
+    writeln!(f, "    <hostname>{}</hostname>", xe(&crate::mhl_report::hostname()))?;
+    writeln!(f, "    <tool version=\"{}\">Bartleby</tool>", xe(crate::VERSION))?;
+    let company = settings.company.trim();
+    let name    = settings.contact_name.trim();
+    let email   = settings.email.trim();
+    let phone   = settings.phone.trim();
+    if !company.is_empty() {
+        writeln!(f, "    <author role=\"organization\">{}</author>", xe(company))?;
+    }
+    if !name.is_empty() || !email.is_empty() || !phone.is_empty() {
+        write!(f, "    <author")?;
+        if !email.is_empty() { write!(f, " email=\"{}\"", xe(email))?; }
+        if !phone.is_empty() { write!(f, " phone=\"{}\"", xe(phone))?; }
+        writeln!(f, ">{}</author>", xe(name))?;
+    }
     writeln!(f, "  </creatorinfo>")?;
     writeln!(f, "  <processinfo>")?;
-    writeln!(f, "    <process>verify</process>")?;
+    writeln!(f, "    <process>in-place</process>")?;
     writeln!(f, "  </processinfo>")?;
     writeln!(f, "  <hashes>")?;
-    for (rel, hash) in &entries {
+    for (rel, hash, status) in &entries {
         if hash.is_empty() { continue; }
         let rel_native = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
         let abs = dst.join(&rel_native);
@@ -494,23 +665,33 @@ pub fn write_post_verify_mhl(
                 .unwrap_or_default();
             (m.len(), mtime)
         } else { (0, String::new()) };
+        let action = if status == "ok" { "verified" } else { "failed" };
         writeln!(f, "    <hash>")?;
-        writeln!(f, "      <file><path>{}</path><size>{}</size></file>", xe(rel), size)?;
-        writeln!(f, "      <{}>{}</{}>", mhl_elem, hash, mhl_elem)?;
-        if !mtime_iso.is_empty() {
-            writeln!(f, "      <lastmodificationdate>{}</lastmodificationdate>", mtime_iso)?;
-        }
+        write!(f, "      <path")?;
+        if size > 0              { write!(f, " size=\"{}\"", size)?; }
+        if !mtime_iso.is_empty() { write!(f, " lastmodificationdate=\"{}\"", mtime_iso)?; }
+        writeln!(f, ">{}</path>", xe(rel))?;
+        writeln!(f, "      <{} action=\"{}\">{}</{}>", mhl_elem, action, hash, mhl_elem)?;
         writeln!(f, "    </hash>")?;
     }
     writeln!(f, "  </hashes>")?;
-    writeln!(f, "  <references>")?;
-    writeln!(f, "    <reference>")?;
-    writeln!(f, "      <path>{}</path>", xe(&src_ref.path))?;
-    if !src_ref.hash.is_empty() {
-        writeln!(f, "      <{}>{}</{}>", mhl_elem, src_ref.hash, mhl_elem)?;
+    // Reference to the verified MHL: relative path from dst root, C4 hash required by spec.
+    let rel_ref = verified_mhl_path.strip_prefix(dst)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    if !rel_ref.is_empty() {
+        let c4 = crate::copy_engine::hash_file_path(verified_mhl_path, crate::copy_engine::HashAlgo::C4)
+            .unwrap_or_default();
+        if !c4.is_empty() {
+            writeln!(f, "  <references>")?;
+            writeln!(f, "    <hashlistreference>")?;
+            writeln!(f, "      <path>{}</path>", xe(&rel_ref))?;
+            writeln!(f, "      <c4>{}</c4>", c4)?;
+            writeln!(f, "    </hashlistreference>")?;
+            writeln!(f, "  </references>")?;
+        }
     }
-    writeln!(f, "    </reference>")?;
-    writeln!(f, "  </references>")?;
     writeln!(f, "</hashlist>")?;
 
     Ok(out_path)
@@ -596,10 +777,13 @@ tr.row-miss{{background:#fffbf0}}
         if !meta.process.is_empty()     { writeln!(f, "<p><b>Process:</b> {}</p>", he(&meta.process))?; }
         writeln!(f, "<p><b>Generation:</b> {:04}</p>", meta.generation)?;
         writeln!(f, "</div>")?;
-        if !meta.author_name.is_empty() || !meta.author_email.is_empty() {
+        if !meta.author_company.is_empty() || !meta.author_name.is_empty()
+            || !meta.author_email.is_empty() || !meta.author_phone.is_empty() {
             writeln!(f, "<div class=\"meta-card\"><h3>Author</h3>")?;
-            if !meta.author_name.is_empty()  { writeln!(f, "<p>{}</p>", he(&meta.author_name))?; }
-            if !meta.author_email.is_empty() { writeln!(f, "<p>{}</p>", he(&meta.author_email))?; }
+            if !meta.author_company.is_empty() { writeln!(f, "<p>{}</p>", he(&meta.author_company))?; }
+            if !meta.author_name.is_empty()    { writeln!(f, "<p>{}</p>", he(&meta.author_name))?; }
+            if !meta.author_email.is_empty()   { writeln!(f, "<p style=\"color:#888\">{}</p>", he(&meta.author_email))?; }
+            if !meta.author_phone.is_empty()   { writeln!(f, "<p style=\"color:#888\">{}</p>", he(&meta.author_phone))?; }
             writeln!(f, "</div>")?;
         }
         if !meta.location.is_empty() || !meta.comment.is_empty() {

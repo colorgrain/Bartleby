@@ -202,6 +202,10 @@ struct AppState {
     /// `None` when no copy is running.
     pause_cancel: Mutex<Option<Arc<copy_engine::PauseCancel>>>,
 
+    /// Pause/cancel handle for an active verification.
+    /// `None` when no verification is running.
+    verify_pc: Mutex<Option<Arc<copy_engine::PauseCancel>>>,
+
     /// One-shot reply channel for interactive copy-engine prompts.
     ///
     /// ### Lifecycle
@@ -288,6 +292,8 @@ fn main() {
             settings: Mutex::new(Settings::load()),
             // No copy is running yet.
             pause_cancel: Mutex::new(None),
+            // No verification is running yet.
+            verify_pc: Mutex::new(None),
             // No copy is running yet, so no reply channel exists.
             reply_tx: Mutex::new(None),
         })
@@ -311,7 +317,11 @@ fn main() {
             get_volume_info,
             set_webview_bg,
             open_verifier_window,
+            parse_verification_file,
             start_verification,
+            pause_verification,
+            resume_verification,
+            cancel_verification,
             save_verify_html,
             generate_post_verify_mhl,
         ])
@@ -526,10 +536,14 @@ struct StartCopyArgs {
     /// Ignored when hash_algo is "none" or "size".
     #[serde(default)]
     gen_mhl:      bool,
-    /// Per-job comment/note written into report headers (CSV, PDF, HTML, MHL).
+    /// Per-job comment/note written into report headers (CSV, PDF, HTML).
     /// HTML string from the WYSIWYG editor (bold/italic/underline only).
     #[serde(default)]
     comment:      String,
+    /// Plain-text note written only into the MHL `<comment>` field.
+    /// Kept separate from `comment` so the MHL stays lightweight.
+    #[serde(default)]
+    mhl_comment:  String,
     /// Per-job shooting location written into report headers and MHL.
     #[serde(default)]
     location:     String,
@@ -657,8 +671,9 @@ fn start_copy(
     let gen_pdf   = args.gen_pdf;
     let gen_html  = args.gen_html;
     let gen_mhl   = args.gen_mhl;
-    let comment   = args.comment;
-    let location  = args.location;
+    let comment     = args.comment;
+    let mhl_comment = args.mhl_comment;
+    let location    = args.location;
 
     // ── Thread 1: Copy engine ──────────────────────────────────────────────────
     // `thread::spawn(move || { … })` starts a new OS thread.
@@ -686,6 +701,7 @@ fn start_copy(
             gen_mhl,
             args.copy_as_subfolder,
             comment,
+            mhl_comment,
             location,
             settings_snapshot,
             tx,
@@ -1473,12 +1489,45 @@ fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Parse a checksum or MHL file and return the file list without hashing.
+/// Called when a file is loaded so the table populates immediately.
+#[tauri::command]
+fn parse_verification_file(file_path: String) -> Result<verify_engine::FileListResult, String> {
+    verify_engine::parse_file(std::path::PathBuf::from(file_path))
+        .map_err(|e| e.to_string())
+}
+
 /// Start verifying a checksum or MHL file in a background thread.
 /// Progress and results are emitted as `"verify-progress"` / `"verify-done"` /
 /// `"verify-error"` events on the verifier window.
 #[tauri::command]
-fn start_verification(window: tauri::WebviewWindow, file_path: String) {
-    verify_engine::run(std::path::PathBuf::from(file_path), window);
+fn start_verification(window: tauri::WebviewWindow, state: State<AppState>, file_path: String) {
+    let pc = copy_engine::PauseCancel::new();
+    *state.verify_pc.lock().unwrap() = Some(pc.clone());
+    verify_engine::run(std::path::PathBuf::from(file_path), window, pc);
+}
+
+#[tauri::command]
+fn pause_verification(window: tauri::WebviewWindow, state: State<AppState>) {
+    if let Some(ref pc) = *state.verify_pc.lock().unwrap() {
+        pc.pause();
+        let _ = window.emit("verify-paused", ());
+    }
+}
+
+#[tauri::command]
+fn resume_verification(window: tauri::WebviewWindow, state: State<AppState>) {
+    if let Some(ref pc) = *state.verify_pc.lock().unwrap() {
+        pc.resume();
+        let _ = window.emit("verify-resumed", ());
+    }
+}
+
+#[tauri::command]
+fn cancel_verification(state: State<AppState>) {
+    if let Some(ref pc) = *state.verify_pc.lock().unwrap() {
+        pc.cancel();
+    }
 }
 
 /// Save a verification result as a self-contained HTML report.

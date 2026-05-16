@@ -528,6 +528,7 @@ function addJob() {
     // ── Vertical separator ────────────────────────────────────────────────────
     var vsep = document.createElement('div');
     vsep.className = 'job-vsep';
+    vsep.innerHTML = '<div class="job-vsep-line"></div>';
     jobBody.appendChild(vsep);
 
     // ── Destinations section ──────────────────────────────────────────────────
@@ -662,8 +663,9 @@ function getJobs() {
             genPdf:          pdfEl       ? pdfEl.checked       : false,
             genHtml:         htmlEl      ? htmlEl.checked      : false,
             genMhl:          mhlEl       ? (mhlEl.checked && !mhlEl.disabled) : false,
-            comment:         card.dataset.comment  || '',
-            location:        card.dataset.location || '',
+            comment:         card.dataset.comment     || '',
+            mhl_comment:     card.dataset.mhl_comment || '',
+            location:        card.dataset.location    || '',
         });
     });
     return result;
@@ -734,8 +736,9 @@ async function runJob(job) {
                     gen_html:          job.genHtml   || false,
                     gen_mhl:           job.genMhl    || false,
                     copy_as_subfolder: job.copyAsSubfolder || false,
-                    comment:           job.comment   || '',
-                    location:          job.location  || '',
+                    comment:           job.comment      || '',
+                    mhl_comment:       job.mhl_comment  || '',
+                    location:          job.location     || '',
                     open_dest:         false // handled at the end of launchCopy()
                 }
             });
@@ -776,7 +779,13 @@ async function launchCopy() {
         p.classList.add('hidden');
         var f = p.querySelector('.job-progress-fill');
         var t = p.querySelector('.job-progress-text');
-        if (f) { f.style.width = '0%'; f.classList.remove('job-progress-done', 'job-progress-error'); }
+        if (f) {
+            f.style.transition = 'none';
+            f.style.width = '0%';
+            f.classList.remove('job-progress-done', 'job-progress-error');
+            void f.offsetWidth;
+            f.style.transition = '';
+        }
         if (t) t.textContent = '';
     });
 
@@ -1185,6 +1194,8 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
         var locEl = document.getElementById('comment-location');
         if (locEl) locEl.value = jobCard.dataset.location || '';
         editor.innerHTML = jobCard.dataset.comment || '';
+        var mhlEl = document.getElementById('mhl-comment-editor');
+        if (mhlEl) mhlEl.value = jobCard.dataset.mhl_comment || '';
         overlay.classList.remove('hidden');
         // Small delay so the overlay is visible before focus fires
         setTimeout(function() { editor.focus(); }, 30);
@@ -1200,8 +1211,11 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
         var plain = html.replace(/<[^>]+>/g, '').replace(/\s/g, '');
         if (!plain) html = '';
         activeCard.dataset.comment = html;
+        var mhlEl = document.getElementById('mhl-comment-editor');
+        var mhlComment = mhlEl ? mhlEl.value.trim() : '';
+        activeCard.dataset.mhl_comment = mhlComment;
         var btn = activeCard.querySelector('.job-comment-btn');
-        if (btn) btn.classList.toggle('has-comment', html.length > 0 || loc.length > 0);
+        if (btn) btn.classList.toggle('has-comment', html.length > 0 || loc.length > 0 || mhlComment.length > 0);
         overlay.classList.add('hidden');
         activeCard = null;
     }

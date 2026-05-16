@@ -560,20 +560,16 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   gap:            6px;
 }
 .job-vsep {
-  width:           32px;
+  width:           20px;
   flex-shrink:     0;
   display:         flex;
   align-items:     center;
   justify-content: center;
-  color:           var(--neon);
-  font-size:       32px;
-  font-weight:     300;
-  line-height:     1;
-  padding:         0 2px;
-  text-shadow:     0 0 6px var(--neon-glow), 0 0 14px var(--neon-glow);
 }
-.job-vsep::after {
-  content: '›';
+.job-vsep-line {
+  width:      1px;
+  height:     100%;
+  background: var(--separator);
 }
 .job-dest-section {
   flex:           1;
@@ -602,7 +598,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   width:         0%;
   background:    var(--accent);
   border-radius: 3px;
-  transition:    width 0.25s ease;
+  transition:    width 0.45s linear;
 }
 .job-progress-fill.job-progress-done  { background: #4caf50; }
 .job-progress-fill.job-progress-error { background: var(--error); }
@@ -942,7 +938,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   overflow-y: visible;
 }
 .comment-location-input {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .comment-toolbar {
   display:        flex;
@@ -988,6 +984,17 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 #comment-editor::-webkit-scrollbar       { width: 5px; }
 #comment-editor::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+.mhl-comment-textarea {
+  min-height:  60px;
+  max-height:  120px;
+  resize:      vertical;
+  line-height: 1.5;
+}
+.mhl-comment-textarea:focus {
+  border-color: var(--input-focus);
+  box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
+}
 
 /* ── About (inside settings panel) ───────────────────────────────────────── */
 #about-content {

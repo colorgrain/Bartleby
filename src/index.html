@@ -50,6 +50,11 @@
     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
   </symbol>
 
+  <symbol id="ico-arrow-right-dash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 9a1 1 0 0 0 1-1V4.707a.707.707 0 0 1 1.207-.5l6.94 6.94a1.207 1.207 0 0 1 0 1.707l-6.94 6.94a.707.707 0 0 1-1.207-.5V16a1 1 0 0 0-1-1H9a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z"/>
+    <path d="M4 9v6"/>
+  </symbol>
+
 </svg>
 
 <!-- ══ TITLE BAR ════════════════════════════════════════════════════════════ -->
@@ -220,14 +225,19 @@
 <div id="comment-overlay" class="overlay hidden">
   <div class="modal comment-modal" role="dialog" aria-modal="true">
     <div class="modal-header">Job note</div>
-    <input id="comment-location" class="modal-input comment-location-input"
-           type="text" placeholder="Location (optional)" />
+    <div class="modal-section-label" style="margin-bottom:6px">Report note</div>
     <div class="comment-toolbar">
       <button class="comment-fmt-btn" data-cmd="bold"      title="Bold"><b>B</b></button>
       <button class="comment-fmt-btn" data-cmd="italic"    title="Italic"><i>I</i></button>
       <button class="comment-fmt-btn" data-cmd="underline" title="Underline"><u>U</u></button>
     </div>
     <div id="comment-editor" contenteditable="true" spellcheck="false"></div>
+    <div class="modal-section-label" style="margin-top:12px;margin-bottom:6px">Location</div>
+    <input id="comment-location" class="modal-input comment-location-input"
+           type="text" placeholder="For reports and MHL files" />
+    <div class="modal-section-label" style="margin-top:12px;margin-bottom:6px">MHL comment</div>
+    <textarea id="mhl-comment-editor" class="modal-input mhl-comment-textarea"
+              rows="3" placeholder="Short note for MHL file (plain text)…" spellcheck="false"></textarea>
     <div class="modal-btn-row">
       <button id="comment-cancel" class="action-btn">Cancel</button>
       <button id="comment-save"   class="action-btn suggested">Save</button>
