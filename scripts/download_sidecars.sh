@@ -43,8 +43,20 @@ download() {
   chmod +x "$dest"
 }
 
-download "bartleby-ffmpeg-${TRIPLE}"
-download "bartleby-mediainfo-${TRIPLE}"
+# On macOS, download both arch variants — tauri-action builds a universal binary
+# and validates resources for both triples even on an arm64 runner.
+case "$OS" in
+  Darwin)
+    download "bartleby-ffmpeg-x86_64-apple-darwin"
+    download "bartleby-ffmpeg-aarch64-apple-darwin"
+    download "bartleby-mediainfo-x86_64-apple-darwin"
+    download "bartleby-mediainfo-aarch64-apple-darwin"
+    ;;
+  *)
+    download "bartleby-ffmpeg-${TRIPLE}"
+    download "bartleby-mediainfo-${TRIPLE}"
+    ;;
+esac
 
 echo
 echo "Done. Next step: cd src-tauri && cargo build"
