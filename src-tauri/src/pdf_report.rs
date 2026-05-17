@@ -102,7 +102,7 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 }
 
 fn ffmpeg_cmd() -> Command {
-    crate::sidecar::sidecar_cmd("ffmpeg")
+    crate::sidecar::ffmpeg_cmd()
 }
 
 // `std::process::Command` : builds and spawns external child processes.

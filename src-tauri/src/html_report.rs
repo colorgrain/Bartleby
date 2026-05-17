@@ -56,7 +56,7 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 }
 
 fn ffmpeg_cmd() -> Command {
-    crate::sidecar::sidecar_cmd("ffmpeg")
+    crate::sidecar::ffmpeg_cmd()
 }
 
 fn he(s: &str) -> String {

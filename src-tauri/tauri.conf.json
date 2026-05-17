@@ -35,12 +35,8 @@
     ],
     "targets": "all",
     "externalBin": [
-      "binaries/ffmpeg"
-    ],
-    "linux": {
-      "deb": {
-        "depends": ["mediainfo"]
-      }
-    }
+      "binaries/bartleby-ffmpeg",
+      "binaries/bartleby-mediainfo"
+    ]
   }
 }

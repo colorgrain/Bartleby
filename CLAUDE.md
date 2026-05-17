@@ -9,6 +9,10 @@ Bartleby is a multiplatform desktop application (Tauri v2) for film/media produc
 ## Commands
 
 ```bash
+# Download sidecar binaries — required before first build (Linux/macOS)
+bash scripts/download_sidecars.sh
+# Windows: .\scripts\download_sidecars.ps1
+
 # Install JS dependencies (first time only)
 npm install
 

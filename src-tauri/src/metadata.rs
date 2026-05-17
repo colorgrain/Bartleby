@@ -285,7 +285,7 @@ pub fn extract(path: &Path) -> FileMeta {
 ///   .ok()?                    // Err (mediainfo not installed) → None, ? propagates
 /// ```
 fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
-    let mut cmd = crate::sidecar::sidecar_cmd("mediainfo");
+    let mut cmd = crate::sidecar::mediainfo_cmd();
     cmd.arg(format!("--Inform={}", inform)).arg(path);
     let out = no_window(&mut cmd).output().ok()?;
 
