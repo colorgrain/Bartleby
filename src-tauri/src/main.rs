@@ -1193,6 +1193,7 @@ fn set_webview_bg(app: tauri::AppHandle, r: u8, g: u8, b: u8) {
 /// Called by JS on every theme change so the OS window border follows the app, not the OS.
 #[tauri::command]
 fn set_window_theme(app: tauri::AppHandle, theme: String) {
+    let dark = theme == "dark";
     let t = match theme.as_str() {
         "dark"  => Some(Theme::Dark),
         "light" => Some(Theme::Light),
@@ -1201,6 +1202,17 @@ fn set_window_theme(app: tauri::AppHandle, theme: String) {
     for label in &["main", "verifier"] {
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.set_theme(t);
+        }
+    }
+    // On Linux the window manager reads gtk-application-prefer-dark-theme to
+    // decide the decoration (title bar / border) variant. set_theme() alone
+    // only updates the WebView colour-scheme hint and does not propagate to
+    // the GTK-level setting that Muffin/Mutter/KWin inspect.
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::GtkSettingsExt;
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_application_prefer_dark_theme(dark);
         }
     }
 }
