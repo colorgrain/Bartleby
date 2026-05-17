@@ -1,8 +1,0 @@
-{
-  "bundle": {
-    "externalBin": [
-      "binaries/ffmpeg",
-      "binaries/mediainfo"
-    ]
-  }
-}
