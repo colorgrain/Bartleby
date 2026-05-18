@@ -16,7 +16,7 @@
         "height": 700,
         "resizable": true,
         "center": true,
-        "backgroundColor": "#ebebed"
+        "decorations": true
       }
     ],
     "security": {

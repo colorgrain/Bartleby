@@ -306,9 +306,7 @@ impl Default for Settings {
             theme: "default".to_string(), // follow the OS light/dark setting
 
             // Default skin: Mint-Y Aqua — the native Linux Mint / Cinnamon look.
-            // On macOS and Windows, the user will likely change this via the
-            // hamburger menu ("Theme" section). A future enhancement could call
-            // `get_platform()` at startup and auto-select the appropriate skin.
+            // On macOS and Windows the user can change this via the hamburger menu.
             skin: "mint-y-aqua".to_string(),
         }
     }

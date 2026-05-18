@@ -113,7 +113,6 @@ use serde::{Serialize, Deserialize};
 // Both traits are derived (auto-implemented) via `#[derive(…)]` macros.
 
 use tauri::{State, Emitter, Manager, Theme};
-use tauri::webview::Color;
 //           │      └─ The `Emitter` trait adds the `.emit()` method to `WebviewWindow`.
 //           │         Without this `use`, the method would not be in scope.
 //           └─ `State<T>` is Tauri's dependency-injection wrapper.
@@ -315,7 +314,6 @@ fn main() {
             save_log,
             get_home_dir,
             get_volume_info,
-            set_webview_bg,
             set_window_theme,
             open_verifier_window,
             parse_verification_file,
@@ -1180,20 +1178,18 @@ fn is_system_dark_mode() -> bool {
     }
 }
 
-/// Sets the WebView compositor background colour — the colour shown for areas not yet
-/// painted by HTML during a window resize. Called by JS whenever the skin or theme changes.
-#[tauri::command]
-fn set_webview_bg(app: tauri::AppHandle, r: u8, g: u8, b: u8) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_background_color(Some(Color(r, g, b, 255)));
-    }
-}
-
-/// Sets the window decoration theme (light/dark) to match Bartleby's active theme.
-/// Called by JS on every theme change so the OS window border follows the app, not the OS.
+/// Sets the light/dark mode for all open windows.
+///
+/// Two things happen per window:
+/// 1. `win.set_theme()` tells the native OS decorations (title bar drawn by the WM)
+///    to use the dark or light variant of the system GTK/Win32/macOS theme.
+/// 2. The same call updates what `prefers-color-scheme` reports inside the WebView,
+///    so CSS `@media` queries receive the correct signal.
+///
+/// Called by `applyTheme()` in JS whenever the user changes the theme setting
+/// or the app detects the system preference at startup.
 #[tauri::command]
 fn set_window_theme(app: tauri::AppHandle, theme: String) {
-    let dark = theme == "dark";
     let t = match theme.as_str() {
         "dark"  => Some(Theme::Dark),
         "light" => Some(Theme::Light),
@@ -1202,17 +1198,6 @@ fn set_window_theme(app: tauri::AppHandle, theme: String) {
     for label in &["main", "verifier"] {
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.set_theme(t);
-        }
-    }
-    // On Linux the window manager reads gtk-application-prefer-dark-theme to
-    // decide the decoration (title bar / border) variant. set_theme() alone
-    // only updates the WebView colour-scheme hint and does not propagate to
-    // the GTK-level setting that Muffin/Mutter/KWin inspect.
-    #[cfg(target_os = "linux")]
-    {
-        use gtk::prelude::GtkSettingsExt;
-        if let Some(settings) = gtk::Settings::default() {
-            settings.set_gtk_application_prefer_dark_theme(dark);
         }
     }
 }
@@ -1503,7 +1488,7 @@ fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
         w.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
+    let builder = tauri::WebviewWindowBuilder::new(
         &app,
         "verifier",
         tauri::WebviewUrl::App("verifier.html".into()),
@@ -1512,10 +1497,9 @@ fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
     .inner_size(980.0, 700.0)
     .min_inner_size(700.0, 500.0)
     .resizable(true)
-    .center()
-    .build()
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    .center();
+
+    builder.build().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Parse a checksum or MHL file and return the file list without hashing.

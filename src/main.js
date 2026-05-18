@@ -62,6 +62,8 @@ function expandPath(p) {
 }
 
 // ── Volume info helpers ───────────────────────────────────────────────────────
+// Uses SI decimal prefixes and French unit names (Go = giga-octet, To = téra-octet)
+// — standard in French-speaking broadcast/film production environments.
 function formatBytes(b) {
     if (b <= 0) return '0 o';
     if (b < 1e12) return (b / 1e9).toFixed(1) + ' Go';
@@ -182,14 +184,12 @@ async function loadSettings() {
             try {
                 var isDark = await invoke('is_system_dark_mode');
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
-                syncWindowBackground();
                 invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
                 document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
                     btn.classList.toggle('appearance-btn-active', btn.dataset.theme === 'default');
                 });
             } catch(e) {
                 document.body.className = 'theme-default';
-                syncWindowBackground();
             }
         } else {
             applyTheme(saved, false);
@@ -213,25 +213,20 @@ async function persistSettings() {
 
 // ── Theme / Skin ──────────────────────────────────────────────────────────────
 
-/* Sync the Tauri WebView background colour with the current skin/theme --bg.
-   Called after every theme or skin change so that newly exposed areas during
-   window resize show the correct colour instead of the stale initial value. */
-async function syncWindowBackground() {
-    var bg = getComputedStyle(document.body).getPropertyValue('--bg').trim();
-    if (!bg || bg.charAt(0) !== '#' || bg.length < 7) return;
-    document.documentElement.style.backgroundColor = bg;
-    try {
-        var r = parseInt(bg.slice(1, 3), 16);
-        var g = parseInt(bg.slice(3, 5), 16);
-        var b = parseInt(bg.slice(5, 7), 16);
-        await invoke('set_webview_bg', { r: r, g: g, b: b });
-    } catch(e) {}
-}
-
 function applyTheme(theme, save) {
-    document.body.className = 'theme-' + theme;
-    syncWindowBackground();
-    invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
+    if (theme === 'default') {
+        // On Linux, CSS prefers-color-scheme is unreliable in WebKitGTK;
+        // query Rust (gsettings / GTK_THEME) for the actual system preference.
+        invoke('is_system_dark_mode').then(function(isDark) {
+            document.body.className = isDark ? 'theme-dark' : 'theme-light';
+            invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
+        }).catch(function() {
+            document.body.className = 'theme-default'; // CSS @media fallback
+        });
+    } else {
+        document.body.className = 'theme-' + theme;
+        invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
+    }
     if (currentSettings) currentSettings.theme = theme;
     document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
         btn.classList.toggle('appearance-btn-active', btn.dataset.theme === theme);
@@ -241,10 +236,7 @@ function applyTheme(theme, save) {
 
 function applySkin(skin, save) {
     var link = document.getElementById('theme-link');
-    if (link) {
-        link.href = 'themes/' + skin + '.css';
-        link.onload = syncWindowBackground;
-    }
+    if (link) link.href = 'themes/' + skin + '.css';
     if (currentSettings) currentSettings.skin = skin;
     document.querySelectorAll('.appearance-btn[data-skin]').forEach(function(btn) {
         btn.classList.toggle('appearance-btn-active', btn.dataset.skin === skin);
@@ -1246,6 +1238,7 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
 })();
 
 // ── Initialisation ────────────────────────────────────────────────────────────
+
 document.addEventListener('DOMContentLoaded', async function() {
     try { homeDir = await invoke('get_home_dir'); } catch(e) {}
     await loadSettings();

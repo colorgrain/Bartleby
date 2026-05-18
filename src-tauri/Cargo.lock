@@ -221,7 +221,6 @@ dependencies = [
  "bs58",
  "chrono",
  "dirs 5.0.1",
- "gtk",
  "image",
  "libc",
  "log",

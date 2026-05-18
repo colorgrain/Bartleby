@@ -193,6 +193,7 @@ body.theme-dark {
   --error:     #ff453a;  /* NSColor.systemRed   (dark) */
   --shadow:    rgba(0, 0, 0, 0.50);
   /* Deeper shadows in dark mode — needed for visual depth on dark backgrounds. */
+
 }
 
 
@@ -223,3 +224,5 @@ body.theme-dark {
     --shadow:          rgba(0, 0, 0, 0.50);
   }
 }
+
+

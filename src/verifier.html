@@ -8,15 +8,8 @@
   <link id="theme-link" rel="stylesheet" href="themes/mint-y-aqua.css" />
   <style>
     /* ── Verifier-specific styles ─────────────────────────────────────────── */
-    #verifier-root { display:flex; flex-direction:column; height:100vh; overflow:hidden; }
-    #verifier-header {
-      display:flex; align-items:center; justify-content:space-between;
-      padding:0 10px; height:46px; flex-shrink:0;
-      background:var(--titlebar-bg); color:var(--titlebar-txt);
-      border-bottom:1px solid var(--titlebar-border);
-      box-shadow:var(--titlebar-shadow);
-      -webkit-app-region:drag; }
-    #verifier-header * { -webkit-app-region:no-drag; }
+    /* #app-shell layout for verifier — height:100% because html+body are height:100% */
+    #app-shell { display:flex; flex-direction:column; height:100%; overflow:hidden; }
     #verifier-body { flex:1; overflow-y:auto; padding:16px 20px; }
 
     /* File input row */
@@ -120,10 +113,7 @@
   </symbol>
 </svg>
 
-<div id="verifier-root">
-
-  <!-- Header -->
-  <header id="verifier-header"></header>
+<div id="app-shell">
 
   <!-- Body -->
   <div id="verifier-body">
@@ -184,7 +174,7 @@
     </div>
 
   </div><!-- /#verifier-body -->
-</div><!-- /#verifier-root -->
+</div><!-- /#app-shell -->
 <script src="verifier.js"></script>
 </body>
 </html>
