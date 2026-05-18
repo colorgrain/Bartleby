@@ -8,8 +8,10 @@
   <link id="theme-link" rel="stylesheet" href="themes/mint-y-aqua.css" />
   <style>
     /* ── Verifier-specific styles ─────────────────────────────────────────── */
-    /* #app-shell layout for verifier — height:100% because html+body are height:100% */
-    #app-shell { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+    /* 100vh (not 100%) — WebKit2GTK on Linux doesn't reliably propagate the
+       html→body→#app-shell height chain; 100vh always equals the viewport height. */
+    #app-shell { display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+    body { background: var(--bg); }
     #verifier-body { flex:1; overflow-y:auto; padding:16px 20px; }
 
     /* File input row */
