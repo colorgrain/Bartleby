@@ -316,6 +316,7 @@ fn main() {
             get_volume_info,
             set_window_theme,
             open_verifier_window,
+            show_verifier_window,
             parse_verification_file,
             start_verification,
             pause_verification,
@@ -1482,6 +1483,11 @@ fn save_log(content: String) -> Result<String, String> {
 // ── Verifier window commands ──────────────────────────────────────────────────
 
 /// Open (or focus) the verification tool window.
+///
+/// The window is created hidden (`visible(false)`) to prevent a white flash on
+/// Linux (WebKit2GTK renders a blank frame before HTML loads) and a WebView2
+/// crash on Windows (initialization race condition when the window is shown too
+/// early). JS calls `show_verifier_window` once the theme has been applied.
 #[tauri::command]
 fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("verifier") {
@@ -1497,9 +1503,18 @@ fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
     .inner_size(980.0, 700.0)
     .min_inner_size(700.0, 500.0)
     .resizable(true)
+    .visible(false)
     .center();
 
     builder.build().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Show the verifier window — called from verifier.js after the theme is applied.
+#[tauri::command]
+fn show_verifier_window(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("verifier") {
+        let _ = w.show();
+    }
 }
 
 /// Parse a checksum or MHL file and return the file list without hashing.

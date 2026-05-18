@@ -12,6 +12,9 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
 // ── Theme / skin on startup ───────────────────────────────────────────────────
 
 (function applyStoredAppearance() {
+    function showWindow() {
+        invoke('show_verifier_window').catch(function() {});
+    }
     invoke('get_settings').then(function(s) {
         var skin = s.skin || 'mint-y-aqua';
         document.getElementById('theme-link').href = 'themes/' + skin + '.css';
@@ -21,14 +24,19 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
             invoke('is_system_dark_mode').then(function(isDark) {
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
                 invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
+                showWindow();
             }).catch(function() {
                 document.body.className = 'theme-light';
+                showWindow();
             });
         } else {
             document.body.className = 'theme-' + theme;
             invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
+            showWindow();
         }
-    }).catch(function() {});
+    }).catch(function() {
+        showWindow();
+    });
 })();
 
 // ── Drag-and-drop on the input row ───────────────────────────────────────────
