@@ -2,13 +2,9 @@
 <img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/82851c10-9c74-4bb5-ba11-b6f00c435657" />
 
 
-<img width="2200" height="1464" alt="Bartleby 010-3_1" src="https://github.com/user-attachments/assets/c19d7ea2-f891-424d-aad4-456abb4ab19d" />
-<img width="2200" height="1464" alt="Bartleby 010-3_2" src="https://github.com/user-attachments/assets/343877f5-6367-4f56-83f3-cc4c79d175f3" />
-<img width="2200" height="1464" alt="Bartleby 010-3_3" src="https://github.com/user-attachments/assets/81668e62-6dcc-4d54-b1d3-ccbacc18d4c6" />
-<img width="2200" height="1464" alt="Bartleby 010-3_4" src="https://github.com/user-attachments/assets/35c0ccec-39fe-4c26-89f9-70cd9209a372" />
-<img width="2200" height="1464" alt="Bartleby 010-3_5" src="https://github.com/user-attachments/assets/06dc2b6c-c1ec-44c8-81b1-c266c70deee5" />
-<img width="2200" height="1464" alt="Bartleby 010-3_6" src="https://github.com/user-attachments/assets/66b51ea7-7366-4061-9b89-18aa99b3e51a" />
-<img width="1768" height="1256" alt="Bartleby 010-3_7" src="https://github.com/user-attachments/assets/2f386321-781c-4aae-914e-d19b8e0872ec" />
+<img width="2200" height="1464" alt="B1" src="https://github.com/user-attachments/assets/0faa0e1e-5259-42b0-b046-8cedd50752f7" />
+<img width="2200" height="1464" alt="B2" src="https://github.com/user-attachments/assets/c0631d5e-32f2-49ad-9039-ab6ad203f121" />
+<img width="1960" height="1464" alt="B3" src="https://github.com/user-attachments/assets/61d521d8-b2e8-468a-878b-0edc2c888818" />
 
 
 
