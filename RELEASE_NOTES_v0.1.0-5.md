@@ -31,7 +31,7 @@ Pre-built installers now include **bartleby-mediainfo** and **bartleby-ffmpeg** 
 
 ### Live progress ticker during copy
 
-A ticker beside the progress bar now shows the **current transfer speed** (MB/s), an estimated time remaining, and the active filename. Previously the label only showed the filename.
+A ticker beside the progress bar now shows the **current transfer speed** (MB/s), and the active filename. Previously the label only showed the filename.
 
 ### Multi-job queue
 
