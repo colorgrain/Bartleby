@@ -1532,25 +1532,32 @@ fn save_log(content: String) -> Result<String, String> {
 /// Linux (WebKit2GTK renders a blank frame before HTML loads) and a WebView2
 /// crash on Windows (initialization race condition when the window is shown too
 /// early). JS calls `show_verifier_window` once the theme has been applied.
+///
+/// `build()` is dispatched to the main thread via `run_on_main_thread` to avoid
+/// a Windows deadlock: WebView2 initialization fires COM callbacks that require
+/// the Win32 message loop, which only runs on the main thread. Calling `build()`
+/// directly from a Tokio worker thread causes both threads to wait on each other.
 #[tauri::command]
 fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("verifier") {
         w.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    let builder = tauri::WebviewWindowBuilder::new(
-        &app,
-        "verifier",
-        tauri::WebviewUrl::App("verifier.html".into()),
-    )
-    .title("Bartleby — Verification")
-    .inner_size(980.0, 700.0)
-    .min_inner_size(700.0, 500.0)
-    .resizable(true)
-    .visible(false)
-    .center();
-
-    builder.build().map(|_| ()).map_err(|e| e.to_string())
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app2,
+            "verifier",
+            tauri::WebviewUrl::App("verifier.html".into()),
+        )
+        .title("Bartleby — Verification")
+        .inner_size(980.0, 700.0)
+        .min_inner_size(700.0, 500.0)
+        .resizable(true)
+        .visible(false)
+        .center()
+        .build();
+    }).map_err(|e| e.to_string())
 }
 
 /// Show the verifier window — called from verifier.js after the theme is applied.
