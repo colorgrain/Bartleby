@@ -15,25 +15,32 @@
 
 > **Beta software** — Bartleby is under active development. Expect rough edges, missing features, and breaking changes between releases. Use at your own risk in production workflows.
 
-Bartleby is a desktop application designed for people who regularly need to copy files to multiple desinations and check their intergrity. I particularly had in mind film and media production data management, and the **DITs (Digital Imaging Technicians)**. It handles multi-destination file offloading with MD5 and XXH3 integrity verification, and generates optional metadata reports (CSV, HTML, PDF with thumbnails). Reports can be customized in the settings.
+Bartleby is a desktop application for film and media production data management, designed primarily for **DITs (Digital Imaging Technicians)**. It handles multi-destination file offloading with end-to-end integrity verification (MD5, SHA-1, XXH3, and more), generates optional metadata reports (CSV, HTML, PDF with thumbnails), and produces ASC MHL v2.0 hash lists. A built-in verification tool lets you audit any checksum or MHL file independently.
 
-Built with [Tauri v2](https://tauri.app/) (Rust backend + plain HTML/CSS/JS frontend), Bartleby runs natively on Linux, macOS, and Windows from a single codebase. Is was designed to look as native as possible on all platforms. It was developed with the assistance of [Claude Code](https://claude.ai/code), Anthropic's AI coding tool.
+Built with [Tauri v2](https://tauri.app/) (Rust backend + plain HTML/CSS/JS frontend), Bartleby runs natively on Linux, macOS, and Windows from a single codebase, and is designed to look as native as possible on each platform. Developed with the assistance of [Claude Code](https://claude.ai/code).
 
 ---
 
 ## Features
 
-- Multi-destination copy with parallel writes
-- End-to-end integrity verification (MD5 · XXH3)
-- Optional metadata reports: CSV, HTML, PDF with thumbnails
-- Conflict detection and interactive resolution prompts
-- Light / dark mode, multiple UI skins
+- **Multi-destination copy** with parallel writes to all destinations simultaneously
+- **End-to-end integrity verification**: MD5 · SHA-1 · XXH64 · XXH3-64 · XXH128 · C4 ID
+- **ASC MHL v2.0** hash list generation and multi-generation chain management
+- **Standalone verification window**: verify any checksum or MHL file with live per-file results, pause/resume/cancel, HTML report export, and post-verification MHL generation
+- **Metadata reports**: CSV table, self-contained HTML report, PDF with thumbnails — all optional, configurable per job
+- **Multi-job queue**: run several independent copy jobs in sequence, each with its own source, destinations, and options
+- **Conflict detection**: interactive prompts for non-empty destinations and file conflicts, with size and date comparison
+- **Live progress**: per-job progress bar with transfer speed, ETA, and current filename
+- **Light / dark mode** and multiple UI skins (Mint-Y Aqua, Adwaita, macOS, Windows 11)
+- **Native window decorations** synced to the active theme on all platforms
 
 ---
 
 ## Installing a pre-built binary
 
 Download the installer for your platform from the [Releases](../../releases) page.
+
+mediainfo and ffmpeg are bundled in all installers — no separate installation is required.
 
 ### Linux
 
@@ -47,27 +54,13 @@ sudo dpkg -i bartleby_*.deb
 chmod +x Bartleby_*.AppImage && ./Bartleby_*.AppImage
 ```
 
-Runtime dependencies (copy and verification work without them, but metadata reports require both):
-
-```bash
-sudo apt install mediainfo ffmpeg
-```
-
 ### macOS
 
-Open the `.dmg`, drag **Bartleby** to `/Applications`, then:
-
-```bash
-brew install mediainfo ffmpeg
-```
+Open the `.dmg`, drag **Bartleby** to `/Applications`. On first launch, right-click the app → **Open** to bypass Gatekeeper (the app is not notarised yet).
 
 ### Windows
 
-Run the `.msi` installer.
-
-Download and add to `PATH`:
-- [MediaInfo CLI](https://mediaarea.net/en/MediaInfo/Download/Windows)
-- [FFmpeg](https://ffmpeg.org/download.html)
+Run the `.msi` installer and follow the prompts.
 
 ---
 
@@ -75,28 +68,37 @@ Download and add to `PATH`:
 
 ### Prerequisites — all platforms
 
-- [Rust](https://rustup.rs/) (stable toolchain)
+- [Rust](https://rustup.rs/) stable toolchain
 - [Node.js](https://nodejs.org/) 18 or later
 
 ### Linux (Ubuntu / Debian)
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev \
-  pkg-config build-essential mediainfo ffmpeg
+  libgtk-3-dev pkg-config build-essential
 ```
 
 ### macOS
 
 ```bash
 xcode-select --install
-brew install mediainfo ffmpeg
 ```
 
 ### Windows
 
-- WebView2 runtime (pre-installed on Windows 11; download from Microsoft for Windows 10)
-- [MediaInfo CLI](https://mediaarea.net/en/MediaInfo/Download/Windows) → added to `PATH`
-- [FFmpeg](https://ffmpeg.org/download.html) → added to `PATH`
+WebView2 runtime is pre-installed on Windows 11. For Windows 10, download it from Microsoft.
+
+### Download sidecar binaries
+
+Before the first build, download the bundled mediainfo and ffmpeg binaries:
+
+```bash
+# Linux / macOS
+bash scripts/download_sidecars.sh
+
+# Windows
+.\scripts\download_sidecars.ps1
+```
 
 ### Build commands
 
@@ -127,5 +129,3 @@ Contributions are welcome — bug reports, feature requests, pull requests, and 
 - **On-set feedback**: if you use Bartleby in a real production context, your experience is valuable — please share it in the issues
 
 The codebase is intentionally straightforward: the frontend is plain HTML/CSS/JS, the backend is Rust with Tauri v2. There is no framework to learn.
-
-# Correction déclencheur
