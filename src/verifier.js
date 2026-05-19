@@ -12,8 +12,11 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
 // ── Theme / skin on startup ───────────────────────────────────────────────────
 
 (function applyStoredAppearance() {
+    // Returns a promise that resolves once the window is visible.
+    // set_window_theme must only be called AFTER this resolves: calling
+    // win.set_theme() on a hidden WebView2 window crashes the app on Windows.
     function showWindow() {
-        invoke('show_verifier_window').catch(function() {});
+        return invoke('show_verifier_window').catch(function() {});
     }
     invoke('get_settings').then(function(s) {
         var skin = s.skin || 'mint-y-aqua';
@@ -23,16 +26,18 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
         if (theme === 'default') {
             invoke('is_system_dark_mode').then(function(isDark) {
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
-                invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
-                showWindow();
+                showWindow().then(function() {
+                    invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
+                });
             }).catch(function() {
                 document.body.className = 'theme-light';
                 showWindow();
             });
         } else {
             document.body.className = 'theme-' + theme;
-            invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
-            showWindow();
+            showWindow().then(function() {
+                invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
+            });
         }
     }).catch(function() {
         showWindow();

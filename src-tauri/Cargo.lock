@@ -215,12 +215,14 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "bartleby"
-version = "0.1.0-4"
+version = "0.1.0-5"
 dependencies = [
  "base64 0.22.1",
  "bs58",
  "chrono",
  "dirs 5.0.1",
+ "gdk",
+ "gtk",
  "image",
  "libc",
  "log",

@@ -48,9 +48,9 @@ name = "bartleby"
 # Semantic versioning: MAJOR.MINOR.PATCH[-PRE]
 # Keep in sync with:
 #   • tauri.conf.json → "version"
-#   • pub const VERSION: &str in src/main.rs
-#   • The version displayed in the About modal (index.html)
-version = "0.1.0-4"
+#   • The About modal reads this at runtime via the get_app_version command.
+#   • pub const VERSION uses env!("CARGO_PKG_VERSION") — no manual update needed.
+version = "0.1.0-5"
 
 # The Rust edition determines which language features and idioms are available.
 # "2021" is the current stable edition (previous: "2015", "2018").
@@ -411,6 +411,8 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = "0.10"
+gtk = "0.18"
+gdk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }

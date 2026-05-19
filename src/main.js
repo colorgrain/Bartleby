@@ -1241,6 +1241,10 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
 
 document.addEventListener('DOMContentLoaded', async function() {
     try { homeDir = await invoke('get_home_dir'); } catch(e) {}
+    invoke('get_app_version').then(function(v) {
+        var el = document.getElementById('about-version');
+        if (el) el.textContent = v;
+    }).catch(function() {});
     await loadSettings();
     addJob(); // first (empty) job card
 });
