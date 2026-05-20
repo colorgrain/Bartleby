@@ -33,13 +33,17 @@ function listen(event, handler) {
 
 async function pickFolder() {
     try {
+        if (!window.__TAURI__ || !window.__TAURI__.dialog) {
+            alert('Folder picker unavailable: the Tauri dialog API did not load.');
+            return null;
+        }
         var result = await window.__TAURI__.dialog.open({
             directory: true,
             multiple:  false
         });
         return result;
     } catch(e) {
-        console.error('pickFolder error:', e);
+        alert('Folder picker error: ' + e);
         return null;
     }
 }
@@ -184,7 +188,7 @@ async function loadSettings() {
             try {
                 var isDark = await invoke('is_system_dark_mode');
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
-                invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
+                invoke('set_window_theme', { theme: 'default' }).catch(function() {});
                 document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
                     btn.classList.toggle('appearance-btn-active', btn.dataset.theme === 'default');
                 });
@@ -219,7 +223,7 @@ function applyTheme(theme, save) {
         // query Rust (gsettings / GTK_THEME) for the actual system preference.
         invoke('is_system_dark_mode').then(function(isDark) {
             document.body.className = isDark ? 'theme-dark' : 'theme-light';
-            invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
+            invoke('set_window_theme', { theme: 'default' }).catch(function() {});
         }).catch(function() {
             document.body.className = 'theme-default'; // CSS @media fallback
         });

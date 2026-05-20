@@ -323,7 +323,6 @@ fn main() {
             get_volume_info,
             set_window_theme,
             open_verifier_window,
-            show_verifier_window,
             parse_verification_file,
             start_verification,
             pause_verification,
@@ -332,6 +331,61 @@ fn main() {
             save_verify_html,
             generate_post_verify_mhl,
         ])
+
+        // ── Application setup — runs once during initialisation ───────────────
+        // Creating a second WebView2 window from a command at runtime is
+        // unreliable on Windows (the event loop deadlocks while WebView2's COM
+        // callbacks wait for it). Creating it here, during init — the same phase
+        // in which the main window is created — is reliable on every platform.
+        .setup(|app| {
+            let handle = app.handle().clone();
+
+            // The verification window is created once, hidden. It is shown on
+            // demand by `open_verifier_window` and hidden again (not destroyed)
+            // when closed, so it is never re-created at runtime.
+            match tauri::WebviewWindowBuilder::new(
+                &handle,
+                "verifier",
+                tauri::WebviewUrl::App("verifier.html".into()),
+            )
+            .title("Bartleby — Verification")
+            .inner_size(980.0, 700.0)
+            .min_inner_size(700.0, 500.0)
+            .resizable(true)
+            .visible(false)
+            .center()
+            .build()
+            {
+                Ok(verifier) => {
+                    let h = handle.clone();
+                    verifier.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            // Hide instead of destroy — keeps re-opening instant
+                            // and avoids the fragile runtime re-creation path.
+                            api.prevent_close();
+                            if let Some(w) = h.get_webview_window("verifier") {
+                                let _ = w.hide();
+                            }
+                        }
+                    });
+                }
+                Err(e) => eprintln!("Bartleby: could not create verifier window: {e}"),
+            }
+
+            // Closing the main window quits the whole application. Without this,
+            // the still-existing (hidden) verifier window keeps the process
+            // alive after the main window is closed.
+            if let Some(main_win) = app.get_webview_window("main") {
+                let h = handle.clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                        h.exit(0);
+                    }
+                });
+            }
+
+            Ok(())
+        })
 
         // Start the Tauri event loop. This call blocks until the window is closed.
         // `generate_context!()` reads tauri.conf.json at compile time.
@@ -1186,57 +1240,99 @@ fn is_system_dark_mode() -> bool {
     }
 }
 
-/// Sets the light/dark mode for all open windows.
+/// Applies a light/dark variant to one window's native decorations
+/// (title bar and border).
 ///
-/// `win.set_theme()` updates `prefers-color-scheme` inside the WebView.
-/// On Linux, window managers (Muffin, Mutter, KWin) read the X11 property
-/// `_GTK_THEME_VARIANT` on each top-level window to decide the title bar /
-/// border variant. GTK's `set_gtk_application_prefer_dark_theme` is supposed
-/// to propagate this automatically, but WebKit2GTK windows do not connect to
-/// the signal — the property stays empty and the WM ignores it. We write it
-/// directly via `gdk::property_change()` on the GTK main thread.
+/// `mode` is `"dark"` / `"light"` to force a variant (overriding the OS), or
+/// any other value (`"default"`) to follow the OS.
 ///
-/// Called by `applyTheme()` in JS whenever the user changes the theme or the
-/// app resolves the system preference at startup.
-#[tauri::command]
-fn set_window_theme(app: tauri::AppHandle, theme: String) {
-    let t = match theme.as_str() {
+/// - `win.set_theme()` forces — or, with `None`, releases — the variant and
+///   the WebView colour scheme; on Windows alone this is unreliable for the
+///   native title bar.
+/// - Windows: `DWMWA_USE_IMMERSIVE_DARK_MODE` is applied directly so the
+///   title bar always obeys the chosen theme.
+/// - Linux: window managers (Muffin, Mutter, KWin) read the X11 property
+///   `_GTK_THEME_VARIANT` to pick the decoration variant; it is written
+///   directly via `gdk::property_change()` on the GTK main thread.
+fn apply_window_decoration_theme(win: &tauri::WebviewWindow, mode: &str) {
+    let _ = win.set_theme(match mode {
         "dark"  => Some(Theme::Dark),
         "light" => Some(Theme::Light),
-        _       => None,
-    };
-    for label in &["main", "verifier"] {
-        if let Some(win) = app.get_webview_window(label) {
-            let _ = win.set_theme(t);
-        }
+        _       => None, // follow the OS
+    });
+
+    #[cfg(target_os = "windows")]
+    {
+        let dark = match mode {
+            "dark"  => true,
+            "light" => false,
+            _       => is_system_dark_mode(),
+        };
+        set_titlebar_dark(win, dark);
     }
-    // On Linux: write _GTK_THEME_VARIANT on each GDK window directly so Muffin /
-    // Mutter picks up the decoration variant. Must run on the GTK main thread.
+
     #[cfg(target_os = "linux")]
     {
-        let dark = theme == "dark";
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
+        let dark = match mode {
+            "dark"  => true,
+            "light" => false,
+            _       => is_system_dark_mode(),
+        };
+        let win2 = win.clone();
+        let _ = win.app_handle().run_on_main_thread(move || {
             let theme_atom = gdk::Atom::intern("_GTK_THEME_VARIANT");
             let utf8_atom  = gdk::Atom::intern("UTF8_STRING");
             let variant: &[u8] = if dark { b"dark" } else { b"light" };
-            for label in &["main", "verifier"] {
-                if let Some(win) = app2.get_webview_window(label) {
-                    if let Ok(gtk_win) = win.gtk_window() {
-                        if let Some(gdk_win) = gtk::prelude::WidgetExt::window(&gtk_win) {
-                            gdk::property_change(
-                                &gdk_win,
-                                &theme_atom,
-                                &utf8_atom,
-                                8,
-                                gdk::PropMode::Replace,
-                                gdk::ChangeData::UChars(variant),
-                            );
-                        }
-                    }
+            if let Ok(gtk_win) = win2.gtk_window() {
+                if let Some(gdk_win) = gtk::prelude::WidgetExt::window(&gtk_win) {
+                    gdk::property_change(
+                        &gdk_win,
+                        &theme_atom,
+                        &utf8_atom,
+                        8,
+                        gdk::PropMode::Replace,
+                        gdk::ChangeData::UChars(variant),
+                    );
                 }
             }
         });
+    }
+}
+
+/// Windows: force the native title bar to the dark or light immersive variant.
+/// This bypasses the OS theme, which is what the user expects when an explicit
+/// "Dark"/"Light" theme is chosen.
+#[cfg(target_os = "windows")]
+fn set_titlebar_dark(win: &tauri::WebviewWindow, dark: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+    if let Ok(hwnd) = win.hwnd() {
+        let value: i32 = if dark { 1 } else { 0 };
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as _,
+                &value as *const i32 as *const _,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+}
+
+/// Sets the light/dark mode for every visible window.
+///
+/// `theme` is `"dark"` / `"light"` to override the OS, or `"default"` to
+/// follow it. Hidden windows are skipped — calling `set_theme()` on a hidden
+/// WebView2 window crashes the application on Windows.
+///
+/// Called by `applyTheme()` in JS whenever the user changes the theme.
+#[tauri::command]
+fn set_window_theme(app: tauri::AppHandle, theme: String) {
+    for label in &["main", "verifier"] {
+        if let Some(win) = app.get_webview_window(label) {
+            if win.is_visible().unwrap_or(false) {
+                apply_window_decoration_theme(&win, &theme);
+            }
+        }
     }
 }
 
@@ -1526,46 +1622,30 @@ fn save_log(content: String) -> Result<String, String> {
 
 // ── Verifier window commands ──────────────────────────────────────────────────
 
-/// Open (or focus) the verification tool window.
+/// Show (or focus) the verification tool window.
 ///
-/// The window is created hidden (`visible(false)`) to prevent a white flash on
-/// Linux (WebKit2GTK renders a blank frame before HTML loads) and a WebView2
-/// crash on Windows (initialization race condition when the window is shown too
-/// early). JS calls `show_verifier_window` once the theme has been applied.
+/// The window itself is created once, hidden, during `setup()` — see the
+/// builder chain in `main()`. Here we only reveal it, which is reliable on
+/// every platform (runtime WebView2 window creation deadlocks on Windows).
 ///
-/// `build()` is dispatched to the main thread via `run_on_main_thread` to avoid
-/// a Windows deadlock: WebView2 initialization fires COM callbacks that require
-/// the Win32 message loop, which only runs on the main thread. Calling `build()`
-/// directly from a Tokio worker thread causes both threads to wait on each other.
+/// The native window theme is applied *after* `show()`: calling `set_theme()`
+/// on a hidden WebView2 window crashes the application on Windows.
 #[tauri::command]
-fn open_verifier_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("verifier") {
-        w.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let app2 = app.clone();
-    app.run_on_main_thread(move || {
-        let _ = tauri::WebviewWindowBuilder::new(
-            &app2,
-            "verifier",
-            tauri::WebviewUrl::App("verifier.html".into()),
-        )
-        .title("Bartleby — Verification")
-        .inner_size(980.0, 700.0)
-        .min_inner_size(700.0, 500.0)
-        .resizable(true)
-        .visible(false)
-        .center()
-        .build();
-    }).map_err(|e| e.to_string())
-}
+fn open_verifier_window(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    let win = app
+        .get_webview_window("verifier")
+        .ok_or_else(|| "Verification window is not available".to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    let _ = win.unminimize();
+    win.set_focus().map_err(|e| e.to_string())?;
 
-/// Show the verifier window — called from verifier.js after the theme is applied.
-#[tauri::command]
-fn show_verifier_window(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("verifier") {
-        let _ = w.show();
-    }
+    let mode = state.settings.lock().unwrap().theme.clone();
+    apply_window_decoration_theme(&win, &mode);
+
+    // Ask verifier.js to refresh its skin / colour scheme — the theme may have
+    // changed in the main window while this window was hidden.
+    let _ = win.emit("verifier-shown", ());
+    Ok(())
 }
 
 /// Parse a checksum or MHL file and return the file list without hashing.

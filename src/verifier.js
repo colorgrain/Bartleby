@@ -9,15 +9,12 @@ var currentFile   = null;   // absolute path to the loaded checksum / MHL file
 var lastResult    = null;   // VerifyResult from the last completed verification
 var currentIsMhl  = false;  // whether the loaded file is an MHL
 
-// ── Theme / skin on startup ───────────────────────────────────────────────────
+// ── Theme / skin ──────────────────────────────────────────────────────────────
+// This window is created hidden at app startup and revealed by the Rust
+// `open_verifier_window` command, which also applies the native window theme.
+// Here we only style the webview *content* (skin + light/dark body class).
 
-(function applyStoredAppearance() {
-    // Returns a promise that resolves once the window is visible.
-    // set_window_theme must only be called AFTER this resolves: calling
-    // win.set_theme() on a hidden WebView2 window crashes the app on Windows.
-    function showWindow() {
-        return invoke('show_verifier_window').catch(function() {});
-    }
+function applyStoredAppearance() {
     invoke('get_settings').then(function(s) {
         var skin = s.skin || 'mint-y-aqua';
         document.getElementById('theme-link').href = 'themes/' + skin + '.css';
@@ -26,23 +23,20 @@ var currentIsMhl  = false;  // whether the loaded file is an MHL
         if (theme === 'default') {
             invoke('is_system_dark_mode').then(function(isDark) {
                 document.body.className = isDark ? 'theme-dark' : 'theme-light';
-                showWindow().then(function() {
-                    invoke('set_window_theme', { theme: isDark ? 'dark' : 'light' }).catch(function() {});
-                });
             }).catch(function() {
                 document.body.className = 'theme-light';
-                showWindow();
             });
         } else {
             document.body.className = 'theme-' + theme;
-            showWindow().then(function() {
-                invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
-            });
         }
-    }).catch(function() {
-        showWindow();
-    });
-})();
+    }).catch(function() {});
+}
+
+applyStoredAppearance();
+
+// Re-apply each time the window is shown — the theme may have changed in the
+// main window while this window was hidden.
+listen('verifier-shown', function() { applyStoredAppearance(); }).catch(function() {});
 
 // ── Drag-and-drop on the input row ───────────────────────────────────────────
 
