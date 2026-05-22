@@ -49,6 +49,21 @@
 //! in `main.rs`, which ensures only one thread modifies it at a time.
 
 
+// ── Folder-structure preset ───────────────────────────────────────────────────
+
+/// A named, reusable folder-structure template.
+///
+/// Referenced from a per-job template by `#name`. The `template` body may itself
+/// contain variable tokens (`%date`, `%camera`, …) and other `#preset` references;
+/// they are all resolved on the JavaScript side before a copy starts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FolderPreset {
+    /// Identifier used in `#name` references (matched case-insensitively).
+    pub name: String,
+    /// The template body, e.g. `IMAGE/%date/%camera`.
+    pub template: String,
+}
+
 // ── Main struct ───────────────────────────────────────────────────────────────
 
 /// All user-configurable preferences, serialisable to/from JSON.
@@ -249,6 +264,33 @@ pub struct Settings {
     /// on the struct: missing fields are filled with Default::default() values
     /// ("mint-y-aqua") rather than causing a parse error. Fully transparent upgrade.
     pub skin: String,
+
+    // ── Folder-structure templates ────────────────────────────────────────────
+    //
+    // These fields drive the folder-template system: destinations can be built
+    // from a template such as `%date/%camera` resolved at copy time. Variables
+    // are resolved entirely in JavaScript before `start_copy` is called, so the
+    // copy engine itself never sees a token.
+
+    /// strftime format used to resolve the `%date` token. Default: `"%Y-%m-%d"`.
+    pub folder_var_date_format: String,
+
+    /// The current shooting (production) day, set manually by the DIT.
+    /// Resolves the `%day` token. Empty until the DIT sets it.
+    pub folder_shoot_day: String,
+
+    /// Camera values offered in the per-job structure popup (resolves `%camera`).
+    pub folder_cameras: Vec<String>,
+
+    /// Type values offered in the per-job structure popup (resolves `%type`).
+    pub folder_types: Vec<String>,
+
+    /// Recorder values offered in the per-job structure popup (resolves
+    /// `%recorder`) — typically sound-recorder identifiers.
+    pub folder_recorders: Vec<String>,
+
+    /// Named folder-structure presets, callable from a template via `#presetName`.
+    pub folder_presets: Vec<FolderPreset>,
 }
 
 // ── Default values ────────────────────────────────────────────────────────────
@@ -308,6 +350,14 @@ impl Default for Settings {
             // Default skin: Mint-Y Aqua — the native Linux Mint / Cinnamon look.
             // On macOS and Windows the user can change this via the hamburger menu.
             skin: "mint-y-aqua".to_string(),
+
+            // Folder-structure templates — empty/neutral defaults; opt-in feature.
+            folder_var_date_format: "%Y-%m-%d".to_string(),
+            folder_shoot_day:       String::new(),
+            folder_cameras:         Vec::new(),
+            folder_types:           Vec::new(),
+            folder_recorders:       Vec::new(),
+            folder_presets:         Vec::new(),
         }
     }
 }

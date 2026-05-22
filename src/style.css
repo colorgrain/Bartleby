@@ -176,7 +176,7 @@ html { overflow: hidden; }
   gap:            var(--gap);
   padding:        var(--spacing);
   flex:           1;
-  min-width:      672px;   /* card min-width (640) + panel padding (2×16) */
+  min-width:      0;       /* allow the panel to shrink so job cards never overflow */
   overflow-y:     auto;
   overflow-x:     hidden;
 }
@@ -544,7 +544,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-label.job-done { color: var(--success); font-weight: 700; }
 
 /* Horizontal source / destinations layout inside each job card */
-.job-group .card { padding: 0; overflow: hidden; min-width: 640px; }
+.job-group .card { padding: 0; overflow: hidden; min-width: 0; }
+/* Inputs inside a job card must be free to shrink so the card never overflows */
+.job-body input[type="text"] { min-width: 0; }
 .job-body {
   display:     flex;
   align-items: stretch;
@@ -687,7 +689,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   border-top:  1px solid var(--separator);
   flex-wrap:   wrap;
 }
-.job-hash-select {
+.job-hash-select,
+.job-template-select {
   font-size:     13px;
   font-family:   inherit;
   color:         var(--text);
@@ -698,7 +701,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   cursor:        pointer;
   outline:       none;
 }
-.job-hash-select:focus { border-color: var(--input-focus); }
+.job-hash-select:focus,
+.job-template-select:focus { border-color: var(--input-focus); }
+/* Folder-structure template picker — starts the right-aligned trailing group */
+.job-template-select { margin-left: auto; max-width: 160px; }
 
 /* ── Buttons row ─────────────────────────────────────────────────────────────
    Bottom bar: MD5/XXH3/CSV/PDF checkboxes + Open destinations + Copy button.
@@ -900,7 +906,6 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── Comment button (per-job "T" note button) ───────────────────────────── */
 .job-comment-btn {
-  margin-left:     auto;
   display:         inline-flex;
   align-items:     center;
   justify-content: center;
@@ -1009,3 +1014,342 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #about-version { color: var(--text-dim); font-size: 11px; }
 #about-desc    { font-size: 13px; line-height: 1.6; }
 #about-licence { color: var(--text-dim); font-size: 11px; }
+
+/* ══ LEFT SIDE PANEL ════════════════════════════════════════════════════════
+   Retractable panel with two tabs: file Explorer + structure Preview.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* Header toggle button (far left of the title bar) */
+#side-toggle-btn {
+  width: 38px; height: 38px;
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  border-radius:   var(--radius-sm);
+}
+#side-toggle-btn:hover { background: rgba(128,128,128,0.15); }
+/* Mirror of the right-panel icon — horizontally flipped for left/right symmetry */
+#side-toggle-btn svg   { width: 20px; height: 20px; stroke: var(--titlebar-txt); fill: none; transform: scaleX(-1); }
+#side-toggle-btn.active svg { stroke: var(--accent); }
+
+/* The panel itself — collapsed by default (width baked by JS) */
+#side-panel {
+  display:        flex;
+  flex-direction: column;
+  flex:           0 0 0px;
+  width:          0;
+  min-width:      0;
+  overflow:       hidden;
+  background:     var(--card-bg);
+}
+
+/* Resizer between the side panel and the jobs panel */
+#left-resizer {
+  width:       6px;
+  flex-shrink: 0;
+  cursor:      col-resize;
+  position:    relative;
+}
+#left-resizer::after {
+  content:    '';
+  position:   absolute;
+  top:        0;
+  left:       0;
+  width:      1px;
+  height:     100%;
+  background: var(--separator);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+#left-resizer:hover::after,
+#left-resizer.active::after {
+  background: var(--accent);
+  box-shadow: 0 0 7px 1px rgba(31, 158, 222, 0.45);
+}
+
+/* Tab bar */
+#side-tabs {
+  display:       flex;
+  flex-shrink:   0;
+  border-bottom: 1px solid var(--separator);
+}
+.side-tab-btn {
+  flex:          1;
+  padding:       8px 6px;
+  border-radius: 0;
+  font-size:     12px;
+  color:         var(--text-dim);
+  background:    transparent;
+  border-bottom: 2px solid transparent;
+}
+.side-tab-btn:hover  { background: rgba(128,128,128,0.10); color: var(--text); }
+.side-tab-btn.active {
+  color:         var(--accent-text);
+  border-bottom: 2px solid var(--accent);
+  font-weight:   600;
+}
+
+/* Tab bodies */
+.side-tab-body {
+  flex:       1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.side-tab-body.hidden { display: none; }
+.side-tab-body::-webkit-scrollbar       { width: 6px; }
+.side-tab-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+/* ── Explorer tree ───────────────────────────────────────────────────────── */
+#explorer-tree { padding: 6px 4px; }
+
+.tree-children { display: none; padding-left: 14px; }
+.tree-node.expanded > .tree-children { display: block; }
+
+.tree-row {
+  display:       flex;
+  align-items:   center;
+  gap:           4px;
+  padding:       3px 4px;
+  border-radius: var(--radius-sm);
+  cursor:        default;
+  white-space:   nowrap;
+  user-select:   none;
+}
+.tree-row:hover { background: rgba(128,128,128,0.12); }
+
+.tree-chevron {
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  width:           16px;
+  height:          16px;
+  flex-shrink:     0;
+  cursor:          pointer;
+  transition:      transform 0.12s ease;
+}
+.tree-node.expanded > .tree-row > .tree-chevron { transform: rotate(90deg); }
+.tree-chevron svg      { width: 13px; height: 13px; stroke: var(--text-dim); fill: none; }
+.tree-chevron.empty    { visibility: hidden; }
+.tree-chevron.loading  { animation: tree-spin 0.7s linear infinite; }
+@keyframes tree-spin { to { transform: rotate(360deg); } }
+
+.tree-icon { width: 15px; height: 15px; flex-shrink: 0; stroke: var(--text-dim); fill: none; }
+.tree-row.is-volume .tree-icon { stroke: var(--accent); }
+.tree-label {
+  font-size:     12.5px;
+  color:         var(--text);
+  overflow:      hidden;
+  text-overflow: ellipsis;
+}
+.tree-row.is-volume .tree-label { font-weight: 600; }
+.tree-row.is-file  .tree-label { color: var(--text-dim); }
+
+.tree-empty-msg,
+.tree-loading-msg {
+  font-size: 11.5px;
+  color:     var(--text-dim);
+  padding:   4px 8px;
+}
+
+/* Inline "new folder" input */
+.tree-newfolder-row {
+  display:     flex;
+  align-items: center;
+  gap:         4px;
+  padding:     2px 4px 2px 18px;
+}
+.tree-newfolder-row input {
+  flex:      1;
+  font-size: 12px;
+  padding:   3px 6px;
+}
+
+/* ── Explorer context menu ───────────────────────────────────────────────── */
+.ctx-menu {
+  position:      fixed;
+  z-index:       900;
+  min-width:     220px;
+  background:    var(--surface);
+  border:        1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  box-shadow:    0 6px 22px var(--shadow);
+  padding:       4px;
+  display:       flex;
+  flex-direction: column;
+  gap:           1px;
+}
+.ctx-menu.hidden { display: none; }
+.ctx-item {
+  display:       flex;
+  align-items:   center;
+  gap:           8px;
+  width:         100%;
+  text-align:    left;
+  padding:       6px 10px;
+  border-radius: var(--radius-sm);
+  font-size:     12.5px;
+  color:         var(--text);
+  background:    transparent;
+}
+.ctx-item:hover     { background: var(--accent); color: var(--accent-fg); }
+.ctx-item svg       { stroke: currentColor; fill: none; flex-shrink: 0; }
+.ctx-item:disabled  { opacity: 0.4; }
+.ctx-item:disabled:hover { background: transparent; color: var(--text); }
+
+/* ── Structure preview tab ───────────────────────────────────────────────── */
+#preview-toolbar {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  gap:             8px;
+  padding:         6px 10px;
+  border-bottom:   1px solid var(--separator);
+}
+#preview-hint    { font-size: 10.5px; color: var(--text-dim); }
+#preview-content { padding: 6px 8px; }
+
+.preview-job {
+  margin-bottom: 10px;
+}
+.preview-job-title {
+  font-size:      10px;
+  font-weight:    700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color:          var(--text-dim);
+  padding:        2px 4px;
+  margin-bottom:  3px;
+}
+.preview-dest {
+  display:        flex;
+  flex-direction: column;
+  gap:            2px;
+  padding:        4px 6px;
+  border-radius:  var(--radius-sm);
+}
+.preview-dest:hover { background: rgba(128,128,128,0.08); }
+.preview-path {
+  font-family: "Noto Mono", "Ubuntu Mono", "Fira Mono", monospace;
+  font-size:   11px;
+  color:       var(--text);
+  word-break:  break-all;
+}
+.preview-status {
+  font-size:   10.5px;
+  font-weight: 600;
+}
+.preview-status.st-create     { color: var(--accent-text); }
+.preview-status.st-empty      { color: var(--success); }
+.preview-status.st-nonempty   { color: #d98a00; }
+.preview-status.st-notmounted { color: var(--error); }
+.preview-empty-msg {
+  font-size: 11.5px;
+  color:     var(--text-dim);
+  padding:   8px;
+}
+
+/* ── Job selection highlight ─────────────────────────────────────────────── */
+.job-group.job-selected .card {
+  border-color: var(--accent);
+  box-shadow:   0 0 0 1px var(--accent), 0 1px 2px var(--shadow);
+}
+
+/* ── Editable job name ───────────────────────────────────────────────────── */
+.job-label.job-name-input {
+  flex:           0 1 auto;
+  width:          auto;
+  min-width:      70px;
+  max-width:      62%;
+  background:     transparent;
+  border:         1px solid transparent;
+  border-radius:  var(--radius-sm);
+  font-size:      11px;
+  font-weight:    700;
+  color:          var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding:        3px 5px;
+}
+.job-label.job-name-input:hover { border-color: var(--input-border); }
+.job-label.job-name-input:focus {
+  border-color: var(--input-focus);
+  background:   var(--input-bg);
+  color:        var(--text);
+  box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
+}
+.job-label.job-name-input::placeholder { color: var(--text-dim); }
+.job-label.job-name-input.job-done { color: var(--success); }
+
+/* ── Per-job structure button (next to the "T" note button) ──────────────── */
+.job-structure-btn {
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  width:           26px;
+  height:          24px;
+  border:          none;
+  border-radius:   var(--radius-sm);
+  background:      transparent;
+  color:           var(--text-dim);
+  padding:         0;
+  flex-shrink:     0;
+}
+.job-structure-btn svg        { width: 16px; height: 16px; stroke: currentColor; fill: none; }
+.job-structure-btn:hover      { background: rgba(128,128,128,0.12); color: var(--text); }
+.job-structure-btn.has-structure {
+  color:       var(--neon);
+  filter:      drop-shadow(0 0 5px var(--neon-glow));
+}
+
+/* ── Structure settings tab ──────────────────────────────────────────────── */
+.struct-field {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+}
+.struct-field-label {
+  font-size:   12px;
+  color:       var(--text-dim);
+  flex-shrink: 0;
+  min-width:   120px;
+}
+.struct-hint {
+  font-size:  11px;
+  color:      var(--text-dim);
+  font-style: italic;
+}
+.struct-value-list,
+.struct-preset-list {
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+}
+.struct-value-row,
+.struct-preset-row {
+  display:     flex;
+  align-items: center;
+  gap:         6px;
+}
+.struct-preset-row .struct-preset-name { flex: 0 0 130px; }
+
+/* ── Structure popup ─────────────────────────────────────────────────────── */
+.structure-modal { width: 480px; }
+.struct-dropdowns {
+  display:        flex;
+  flex-direction: column;
+  gap:            8px;
+  margin-top:     8px;
+}
+.struct-dropdowns .struct-field-label { min-width: 72px; }
+.struct-dropdowns .struct-field select { flex: 1; min-width: 0; }
+.struct-dropdowns .struct-field.hidden { display: none; }
+.struct-preview {
+  font-family:   "Noto Mono", "Ubuntu Mono", "Fira Mono", monospace;
+  font-size:     12px;
+  color:         var(--text);
+  background:    rgba(128,128,128,0.07);
+  border-radius: var(--radius-sm);
+  padding:       8px 10px;
+  word-break:    break-all;
+}
+.struct-preview .tok-bad { color: var(--error); font-weight: 700; }

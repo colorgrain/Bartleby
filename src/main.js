@@ -252,7 +252,7 @@ function applySkin(skin, save) {
 
 // Hamburger → open settings (Appearance tab active by default).
 menuBtn.addEventListener('click', function() {
-    if (currentSettings) populateReportFields();
+    if (currentSettings) { populateReportFields(); populateStructureFields(); }
     settingsOverlay.classList.remove('hidden');
 });
 
@@ -443,17 +443,27 @@ function addJob() {
     var headerRow = document.createElement('div');
     headerRow.className = 'job-header-row';
 
-    var label = document.createElement('label');
-    label.className = 'group-label job-label';
+    var label = document.createElement('input');
+    label.type = 'text';
+    label.className = 'job-label job-name-input';
+    label.placeholder = 'Job';
+    label.title = 'Job name (optional)';
+    label.spellcheck = false;
 
     var removeJobBtn = document.createElement('button');
     removeJobBtn.className = 'icon-btn icon-btn-danger job-remove-btn';
     removeJobBtn.title = 'Remove this job';
     removeJobBtn.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
     removeJobBtn.style.display = 'none';
-    removeJobBtn.addEventListener('click', function() {
+    removeJobBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var wasSelected = jobCard.classList.contains('job-selected');
         jobCard.remove();
         renumberJobs();
+        if (wasSelected) {
+            setSelectedJob(jobsContainer.querySelector('.job-group') || null);
+        }
+        refreshPreviewSoon();
     });
 
     headerRow.appendChild(label);
@@ -601,6 +611,32 @@ function addJob() {
     commentBtn.title = 'Add a note (shown in reports)';
     commentBtn.textContent = 'T';
     commentBtn.addEventListener('click', function() { openCommentModal(jobCard); });
+
+    var templateSel = document.createElement('select');
+    templateSel.className = 'job-template-select';
+    templateSel.title = 'Folder structure template';
+    populateJobTemplateSelect(templateSel, '');
+    templateSel.addEventListener('change', function() {
+        var v = templateSel.value;
+        if (v === '__custom') {
+            openStructurePopup(jobCard);
+        } else {
+            jobCard.dataset.template = v;
+            var sb = jobCard.querySelector('.job-structure-btn');
+            if (sb) sb.classList.toggle('has-structure', v.length > 0);
+            refreshPreviewSoon();
+        }
+    });
+
+    var structureBtn = document.createElement('button');
+    structureBtn.className = 'job-structure-btn';
+    structureBtn.title = 'Folder structure for this job';
+    structureBtn.innerHTML = '<svg><use href="#ico-folder-tree"/></svg>';
+    structureBtn.addEventListener('click', function() { openStructurePopup(jobCard); });
+
+    // Trailing group after the MHL toggle: template / structure / note.
+    jobOptsRow.appendChild(templateSel);
+    jobOptsRow.appendChild(structureBtn);
     jobOptsRow.appendChild(commentBtn);
 
     card.appendChild(jobOptsRow);
@@ -624,6 +660,12 @@ function addJob() {
     jobsContainer.appendChild(jobCard);
     addDestRowToJob(destListEl);
     renumberJobs();
+
+    jobCard.addEventListener('click', function() {
+        if (jobCard.isConnected) setSelectedJob(jobCard);
+    });
+    setSelectedJob(jobCard);
+    refreshPreviewSoon();
 }
 
 function renumberJobs() {
@@ -631,7 +673,7 @@ function renumberJobs() {
     var count = cards.length;
     cards.forEach(function(card, idx) {
         var lbl = card.querySelector('.job-label');
-        if (lbl) lbl.textContent = count > 1 ? 'Job ' + (idx + 1) : 'Job';
+        if (lbl) lbl.placeholder = count > 1 ? 'Job ' + (idx + 1) : 'Job';
         var btn = card.querySelector('.job-remove-btn');
         if (btn) btn.style.display = count > 1 ? '' : 'none';
     });
@@ -642,6 +684,7 @@ function getJobs() {
     var result = [];
     jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
         var srcEl       = card.querySelector('.job-src-input');
+        var nameEl      = card.querySelector('.job-label');
         var subfolderEl = card.querySelector('.job-subfolder-chk');
         var hashSelEl   = card.querySelector('.job-hash-select');
         var csvEl       = card.querySelector('.job-chk-csv');
@@ -655,6 +698,7 @@ function getJobs() {
         result.push({
             src:             src,
             dsts:            dsts,
+            name:            nameEl ? nameEl.value.trim() : '',
             copyAsSubfolder: subfolderEl ? subfolderEl.checked : false,
             hashAlgo:        hashSelEl   ? hashSelEl.value     : 'none',
             genCsv:          csvEl       ? csvEl.checked       : false,
@@ -664,6 +708,10 @@ function getJobs() {
             comment:         card.dataset.comment     || '',
             mhl_comment:     card.dataset.mhl_comment || '',
             location:        card.dataset.location    || '',
+            template:        card.dataset.template    || '',
+            camera:          card.dataset.camera      || '',
+            type:            card.dataset.type        || '',
+            recorder:        card.dataset.recorder    || '',
         });
     });
     return result;
@@ -761,6 +809,22 @@ async function launchCopy() {
         if (!jobs[i].dsts.length) {
             alert(prefix + 'lease add at least one destination.');
             return;
+        }
+    }
+
+    // Resolve per-job folder templates: rewrite each destination to
+    // root + '/' + <resolved template>. The copy engine then builds the full
+    // hierarchy via create_dir_all — no backend change needed.
+    for (var i = 0; i < jobs.length; i++) {
+        var res = resolveTemplate(jobs[i]);
+        if (res.bad && res.bad.length) {
+            var jp = multi ? 'Job ' + (i + 1) + ': ' : '';
+            alert(jp + 'the folder template has unresolved tokens: ' + res.bad.join(', ') +
+                  '\n\nFix it in the job structure popup or in Settings → Structure.');
+            return;
+        }
+        if (res.path) {
+            jobs[i].dsts = jobs[i].dsts.map(function(d) { return joinPath(d, res.path); });
         }
     }
 
@@ -1082,7 +1146,7 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
     document.addEventListener('mousemove', function(e) {
         if (!resizing) return;
         var rect = panels.getBoundingClientRect();
-        var maxW = panels.offsetWidth - 6 - 672;   /* leave ≥672px for left panel (card min-width + padding) */
+        var maxW = panels.offsetWidth - 6 - 320;   /* keep a usable minimum width for the jobs panel */
         var newW = Math.max(150, Math.min(Math.max(150, maxW), rect.right - e.clientX));
         rightPanel.style.flex  = 'none';
         rightPanel.style.width = newW + 'px';
@@ -1239,6 +1303,811 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
             doSave();
         }
     });
+})();
+
+// ══ FOLDER STRUCTURE — left side panel, templates, preview ═══════════════════
+
+// ── Path / template helpers ───────────────────────────────────────────────────
+function joinPath(a, b) {
+    if (!a) return b || '';
+    if (!b) return a;
+    return a.replace(/[\/\\]+$/, '') + '/' + b.replace(/^[\/\\]+/, '');
+}
+
+function baseName(p) {
+    var s = String(p || '').replace(/[\/\\]+$/, '');
+    var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return i >= 0 ? s.slice(i + 1) : s;
+}
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+// Minimal strftime — supports the tokens a DIT folder name realistically uses.
+function formatStrftime(fmt) {
+    var d = new Date();
+    var doy = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+    var map = {
+        Y: '' + d.getFullYear(),
+        y: ('' + d.getFullYear()).slice(-2),
+        m: pad2(d.getMonth() + 1),
+        d: pad2(d.getDate()),
+        H: pad2(d.getHours()),
+        M: pad2(d.getMinutes()),
+        S: pad2(d.getSeconds()),
+        j: ('00' + doy).slice(-3)
+    };
+    return String(fmt || '').replace(/%([A-Za-z%])/g, function(m, c) {
+        if (c === '%') return '%';
+        return (c in map) ? map[c] : m;
+    });
+}
+
+// Expand #presetName references recursively (bounded depth). Unknown presets
+// are recorded in `bad` and left literal.
+function expandPresets(tmpl, presets, depth, bad) {
+    if (depth > 8) return tmpl;
+    return String(tmpl || '').replace(/#([A-Za-z0-9_-]+)/g, function(m, name) {
+        var p = presets.find(function(pr) {
+            return pr.name && pr.name.toLowerCase() === name.toLowerCase();
+        });
+        if (!p) { bad.push(m); return m; }
+        return expandPresets(p.template, presets, depth + 1, bad);
+    });
+}
+
+// Resolve a job's folder template into a relative path.
+// Returns { path: "relative/path", bad: ["%foo", "#bar"] }.
+function resolveTemplate(job) {
+    var raw = (job && job.template ? job.template : '').trim();
+    var bad = [];
+    if (!raw) return { path: '', bad: bad };
+
+    var presets = (currentSettings && currentSettings.folder_presets) || [];
+    var tmpl = expandPresets(raw, presets, 0, bad);
+
+    var vars = {
+        date:     formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
+        day:      (currentSettings && currentSettings.folder_shoot_day) || '',
+        project:  (currentSettings && currentSettings.project_title) || '',
+        camera:   (job && job.camera) || '',
+        type:     (job && job.type) || '',
+        recorder: (job && job.recorder) || ''
+    };
+
+    var out = tmpl.replace(/%([A-Za-z]+)/g, function(m, name) {
+        var key = name.toLowerCase();
+        if (key in vars) {
+            if (!vars[key]) { bad.push('%' + name); return '%' + name; }
+            return vars[key];
+        }
+        bad.push('%' + name);
+        return '%' + name;
+    });
+
+    out = out.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
+    bad = bad.filter(function(v, i) { return bad.indexOf(v) === i; });
+    return { path: out, bad: bad };
+}
+
+function highlightBad(text, bad) {
+    var html = escHtml(text);
+    (bad || []).forEach(function(tok) {
+        html = html.split(escHtml(tok)).join('<span class="tok-bad">' + escHtml(tok) + '</span>');
+    });
+    return html;
+}
+
+// ── Job selection ─────────────────────────────────────────────────────────────
+var selectedJobCard = null;
+
+function setSelectedJob(card) {
+    selectedJobCard = card;
+    jobsContainer.querySelectorAll('.job-group').forEach(function(c) {
+        c.classList.toggle('job-selected', c === card);
+    });
+}
+
+// ── Per-job template dropdown ─────────────────────────────────────────────────
+// Builds the in-card structure picker: "No structure", each #preset, "Custom…".
+function populateJobTemplateSelect(sel, template) {
+    var presets = (currentSettings && currentSettings.folder_presets) || [];
+    sel.innerHTML = '';
+    function opt(v, t) {
+        var o = document.createElement('option');
+        o.value = v; o.textContent = t;
+        sel.appendChild(o);
+    }
+    opt('', 'No structure');
+    presets.forEach(function(p) { opt('#' + p.name, '#' + p.name); });
+    opt('__custom', 'Custom / edit…');
+    var tmpl = template || '';
+    if (!tmpl) sel.value = '';
+    else if (presets.some(function(p) { return '#' + p.name === tmpl; })) sel.value = tmpl;
+    else sel.value = '__custom';
+}
+
+// Re-derive a job card's template select from its dataset (after a popup edit).
+function syncJobTemplateSelect(card) {
+    if (!card) return;
+    var sel = card.querySelector('.job-template-select');
+    if (sel) populateJobTemplateSelect(sel, card.dataset.template || '');
+}
+
+// Refresh the preview tab when jobs/destinations change.
+jobsContainer.addEventListener('input', function() { refreshPreviewSoon(); });
+
+// ── Side panel toggle ─────────────────────────────────────────────────────────
+(function() {
+    var sidePanel   = document.getElementById('side-panel');
+    var leftResizer = document.getElementById('left-resizer');
+    var toggleBtn   = document.getElementById('side-toggle-btn');
+    var DURATION    = 280;
+    var EASE        = 'cubic-bezier(0.4,0,0.2,1)';
+    var isOpen      = false;
+    var savedW      = 270;
+    var animTimer   = null;
+
+    try {
+        var sw = parseInt(localStorage.getItem('bartleby_side_width'), 10);
+        if (sw && sw > 140) savedW = sw;
+    } catch(e) {}
+
+    function setOpen(open, instant) {
+        if (open === isOpen) return;
+        isOpen = open;
+        if (animTimer) { clearTimeout(animTimer); animTimer = null; }
+        toggleBtn.classList.toggle('active', open);
+        toggleBtn.title = open ? 'Hide explorer panel' : 'Show explorer panel';
+        var T = DURATION + 'ms ' + EASE;
+
+        if (open) {
+            leftResizer.classList.remove('hidden');
+            sidePanel.style.transition = '';
+            sidePanel.style.flex = 'none';
+            sidePanel.style.minWidth = '0';
+            sidePanel.style.width = '0px';
+            void sidePanel.offsetWidth;
+            if (!instant) sidePanel.style.transition = 'width ' + T;
+            sidePanel.style.width = savedW + 'px';
+            var done = function() {
+                sidePanel.style.flex = '0 0 ' + savedW + 'px';
+                sidePanel.style.width = '';
+                sidePanel.style.minWidth = '';
+                sidePanel.style.transition = '';
+                animTimer = null;
+            };
+            if (instant) done(); else animTimer = setTimeout(done, DURATION + 16);
+            loadVolumes();
+        } else {
+            savedW = sidePanel.offsetWidth || savedW;
+            try { localStorage.setItem('bartleby_side_width', String(savedW)); } catch(e) {}
+            leftResizer.classList.add('hidden');
+            sidePanel.style.transition = '';
+            sidePanel.style.flex = 'none';
+            sidePanel.style.minWidth = '0';
+            sidePanel.style.width = savedW + 'px';
+            void sidePanel.offsetWidth;
+            if (!instant) sidePanel.style.transition = 'width ' + T;
+            sidePanel.style.width = '0px';
+        }
+        try { localStorage.setItem('bartleby_side_open', open ? '1' : '0'); } catch(e) {}
+    }
+
+    toggleBtn.addEventListener('click', function() { setOpen(!isOpen); });
+
+    leftResizer.classList.add('hidden');
+    try {
+        if (localStorage.getItem('bartleby_side_open') === '1') setOpen(true, true);
+    } catch(e) {}
+})();
+
+// ── Left resizer ──────────────────────────────────────────────────────────────
+(function() {
+    var resizer   = document.getElementById('left-resizer');
+    var sidePanel = document.getElementById('side-panel');
+    var panels    = document.getElementById('main-panels');
+    var resizing  = false;
+
+    resizer.addEventListener('mousedown', function(e) {
+        resizing = true;
+        resizer.classList.add('active');
+        document.body.style.cursor     = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+        if (!resizing) return;
+        var rect = panels.getBoundingClientRect();
+        var newW = Math.max(160, Math.min(480, e.clientX - rect.left));
+        sidePanel.style.flex  = 'none';
+        sidePanel.style.width = newW + 'px';
+    });
+    document.addEventListener('mouseup', function() {
+        if (!resizing) return;
+        resizing = false;
+        resizer.classList.remove('active');
+        document.body.style.cursor     = '';
+        document.body.style.userSelect = '';
+        var w = sidePanel.offsetWidth;
+        sidePanel.style.flex  = '0 0 ' + w + 'px';
+        sidePanel.style.width = '';
+        try { localStorage.setItem('bartleby_side_width', String(w)); } catch(e) {}
+    });
+})();
+
+// ── Side panel tabs ───────────────────────────────────────────────────────────
+function switchSideTab(tab) {
+    document.querySelectorAll('.side-tab-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.stab === tab);
+    });
+    document.querySelectorAll('.side-tab-body').forEach(function(p) {
+        p.classList.add('hidden');
+    });
+    var body = document.getElementById('sbody-' + tab);
+    if (body) body.classList.remove('hidden');
+    if (tab === 'preview') refreshPreview();
+}
+document.querySelectorAll('.side-tab-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { switchSideTab(btn.dataset.stab); });
+});
+
+// ── Explorer tree (lazy loading) ──────────────────────────────────────────────
+async function loadVolumes() {
+    var tree = document.getElementById('explorer-tree');
+    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
+    var vols;
+    try { vols = await invoke('list_volumes'); }
+    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
+    tree.innerHTML = '';
+    if (!vols || !vols.length) {
+        tree.innerHTML = '<div class="tree-empty-msg">No volumes found.</div>';
+        return;
+    }
+    vols.forEach(function(v) {
+        tree.appendChild(buildTreeNode(v.path, v.name, true, v.media_type, true));
+    });
+}
+
+// Maps a volume's media type to its explorer icon.
+function volumeIcon(mediaType) {
+    switch ((mediaType || '').toLowerCase()) {
+        case 'hdd':   return 'ico-hard-drive';
+        case 'ssd':   return 'ico-disk-ssd';
+        case 'nvme':  return 'ico-disk-nvme';
+        case 'sd':    return 'ico-card-sd';
+        case 'flash': return 'ico-usb';
+        default:      return 'ico-hard-drive';
+    }
+}
+
+function buildTreeNode(path, name, isVolume, mediaType, isDir) {
+    var node = document.createElement('div');
+    node.className = 'tree-node';
+
+    var row = document.createElement('div');
+    row.className = 'tree-row' + (isVolume ? ' is-volume' : '') + (isDir ? '' : ' is-file');
+    row.dataset.path = path;
+
+    var chevron = document.createElement('span');
+    chevron.className = 'tree-chevron' + (isDir ? '' : ' empty');
+    chevron.innerHTML = '<svg><use href="#ico-chevron-right"/></svg>';
+
+    var labelEl = document.createElement('span');
+    labelEl.className = 'tree-label';
+    labelEl.textContent = (isVolume && mediaType) ? (name + ' · ' + mediaType) : name;
+    labelEl.title = path;
+
+    var iconId = isVolume ? volumeIcon(mediaType) : (isDir ? 'ico-folder' : 'ico-file');
+    row.appendChild(chevron);
+    row.insertAdjacentHTML('beforeend',
+        '<svg class="tree-icon"><use href="#' + iconId + '"/></svg>');
+    row.appendChild(labelEl);
+
+    var children = document.createElement('div');
+    children.className = 'tree-children';
+
+    node.appendChild(row);
+    node.appendChild(children);
+
+    // Files are leaf nodes: not expandable, no folder-action context menu.
+    if (isDir) {
+        var loaded = false;
+        var toggle = function() {
+            if (node.classList.contains('expanded')) {
+                node.classList.remove('expanded');
+                return;
+            }
+            node.classList.add('expanded');
+            if (!loaded) {
+                loaded = true;
+                loadChildren(path, children, chevron);
+            }
+        };
+        chevron.addEventListener('click', function(e) { e.stopPropagation(); toggle(); });
+        row.addEventListener('click', function() { toggle(); });
+        row.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            showExplorerCtxMenu(e.clientX, e.clientY, {
+                path: path, node: node, childrenEl: children, chevron: chevron
+            });
+        });
+    }
+
+    return node;
+}
+
+async function loadChildren(path, childrenEl, chevron) {
+    chevron.classList.add('loading');
+    childrenEl.innerHTML = '';
+    var subs;
+    try { subs = await invoke('list_dir', { path: path }); }
+    catch(e) {
+        chevron.classList.remove('loading');
+        childrenEl.innerHTML = '<div class="tree-empty-msg">Cannot read folder.</div>';
+        return;
+    }
+    chevron.classList.remove('loading');
+    if (!subs || !subs.length) {
+        childrenEl.innerHTML = '<div class="tree-empty-msg">empty</div>';
+        return;
+    }
+    subs.forEach(function(s) {
+        childrenEl.appendChild(buildTreeNode(s.path, s.name, false, '', s.is_dir));
+    });
+}
+
+// ── Explorer context menu ─────────────────────────────────────────────────────
+var explorerCtxTarget = null;
+
+function showExplorerCtxMenu(x, y, target) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    explorerCtxTarget = target;
+    var hasJob = !!selectedJobCard;
+    menu.querySelector('[data-act="set-source"]').disabled = !hasJob;
+    menu.querySelector('[data-act="add-dest"]').disabled   = !hasJob;
+    menu.classList.remove('hidden');
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    var r = menu.getBoundingClientRect();
+    if (r.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+    if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+}
+
+function hideExplorerCtxMenu() {
+    document.getElementById('explorer-ctx-menu').classList.add('hidden');
+}
+
+document.addEventListener('click', function(e) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target)) hideExplorerCtxMenu();
+});
+document.addEventListener('contextmenu', function(e) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target) &&
+        !e.target.closest('#explorer-tree')) {
+        hideExplorerCtxMenu();
+    }
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hideExplorerCtxMenu();
+});
+
+function ctxSetSource(path) {
+    if (!selectedJobCard) return;
+    var srcEl = selectedJobCard.querySelector('.job-src-input');
+    if (!srcEl) return;
+    srcEl.value = shortenPath(path);
+    var vi = selectedJobCard.querySelector('.job-src-section .vol-info');
+    if (vi) updateVolInfo(vi, srcEl.value);
+    refreshPreviewSoon();
+}
+
+function ctxAddDest(path) {
+    if (!selectedJobCard) return;
+    var destListEl = selectedJobCard.querySelector('.job-dest-list');
+    if (!destListEl) return;
+    var inputs = Array.from(destListEl.querySelectorAll('input[type="text"]'));
+    var empty = inputs.find(function(i) { return i.value.trim() === ''; });
+    if (empty) {
+        empty.value = shortenPath(path);
+        var di = empty.closest('.dest-item');
+        if (di) updateVolInfo(di.querySelector('.vol-info'), empty.value);
+    } else {
+        addDestRowToJob(destListEl, shortenPath(path));
+    }
+    refreshPreviewSoon();
+}
+
+function ctxNewFolder(target) {
+    target.node.classList.add('expanded');
+    var childrenEl = target.childrenEl;
+    var existing = childrenEl.querySelector('.tree-newfolder-row');
+    if (existing) existing.remove();
+
+    var row = document.createElement('div');
+    row.className = 'tree-newfolder-row';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'New folder name…';
+    input.spellcheck = false;
+    row.appendChild(input);
+    childrenEl.insertBefore(row, childrenEl.firstChild);
+    input.focus();
+
+    var done = false;
+    function commit() {
+        if (done) return;
+        var name = input.value.trim();
+        if (!name) { row.remove(); return; }
+        done = true;
+        invoke('create_folder', { path: joinPath(target.path, name) }).then(function() {
+            loadChildren(target.path, childrenEl, target.chevron);
+        }).catch(function(err) {
+            done = false;
+            alert('Could not create folder: ' + err);
+            input.focus();
+        });
+    }
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter')      { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { done = true; row.remove(); }
+    });
+    input.addEventListener('blur', function() { setTimeout(commit, 0); });
+}
+
+document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item) {
+    item.addEventListener('click', function() {
+        if (item.disabled || !explorerCtxTarget) { hideExplorerCtxMenu(); return; }
+        var t = explorerCtxTarget;
+        var act = item.dataset.act;
+        if      (act === 'set-source') ctxSetSource(t.path);
+        else if (act === 'add-dest')   ctxAddDest(t.path);
+        else if (act === 'new-folder') ctxNewFolder(t);
+        hideExplorerCtxMenu();
+    });
+});
+
+// ── Per-job structure popup ───────────────────────────────────────────────────
+(function() {
+    var overlay   = document.getElementById('structure-overlay');
+    var presetSel = document.getElementById('structure-preset');
+    var tmplInput = document.getElementById('structure-template');
+    var camField  = document.getElementById('structure-camera-field');
+    var typeField = document.getElementById('structure-type-field');
+    var recField  = document.getElementById('structure-recorder-field');
+    var camSel    = document.getElementById('structure-camera');
+    var typeSel   = document.getElementById('structure-type');
+    var recSel    = document.getElementById('structure-recorder');
+    var previewEl = document.getElementById('structure-preview');
+    var okBtn     = document.getElementById('structure-popup-ok');
+    var cancelBtn = document.getElementById('structure-popup-cancel');
+    var clearBtn  = document.getElementById('structure-clear');
+    var activeCard = null;
+
+    function fillSelect(sel, values, current, placeholder) {
+        sel.innerHTML = '';
+        var ph = document.createElement('option');
+        ph.value = ''; ph.textContent = placeholder;
+        sel.appendChild(ph);
+        (values || []).forEach(function(v) {
+            var o = document.createElement('option');
+            o.value = v; o.textContent = v;
+            sel.appendChild(o);
+        });
+        sel.value = current || '';
+    }
+
+    function refresh() {
+        var presets = (currentSettings && currentSettings.folder_presets) || [];
+        var scanned = expandPresets(tmplInput.value, presets, 0, []);
+        camField.classList.toggle('hidden',  !/%camera\b/i.test(scanned));
+        typeField.classList.toggle('hidden', !/%type\b/i.test(scanned));
+        recField.classList.toggle('hidden',  !/%recorder\b/i.test(scanned));
+        var res = resolveTemplate({
+            template: tmplInput.value, camera: camSel.value,
+            type: typeSel.value, recorder: recSel.value
+        });
+        if (!res.path && !res.bad.length) {
+            previewEl.textContent = '(no template — destination used as-is)';
+        } else {
+            previewEl.innerHTML = highlightBad('…/' + res.path + '/', res.bad);
+        }
+    }
+
+    window.openStructurePopup = function(jobCard) {
+        activeCard = jobCard;
+        var presets = (currentSettings && currentSettings.folder_presets) || [];
+        presetSel.innerHTML = '';
+        var none = document.createElement('option');
+        none.value = ''; none.textContent = '— Custom template —';
+        presetSel.appendChild(none);
+        presets.forEach(function(p) {
+            var o = document.createElement('option');
+            o.value = '#' + p.name; o.textContent = '#' + p.name;
+            presetSel.appendChild(o);
+        });
+        tmplInput.value = jobCard.dataset.template || '';
+        presetSel.value = presets.some(function(p) { return '#' + p.name === tmplInput.value; })
+            ? tmplInput.value : '';
+        fillSelect(camSel,  (currentSettings && currentSettings.folder_cameras) || [],
+                   jobCard.dataset.camera || '', '— Select camera —');
+        fillSelect(typeSel, (currentSettings && currentSettings.folder_types) || [],
+                   jobCard.dataset.type || '', '— Select type —');
+        fillSelect(recSel,  (currentSettings && currentSettings.folder_recorders) || [],
+                   jobCard.dataset.recorder || '', '— Select recorder —');
+        refresh();
+        overlay.classList.remove('hidden');
+    };
+
+    presetSel.addEventListener('change', function() {
+        if (presetSel.value) tmplInput.value = presetSel.value;
+        refresh();
+    });
+    tmplInput.addEventListener('input', function() {
+        if (presetSel.value && tmplInput.value !== presetSel.value) presetSel.value = '';
+        refresh();
+    });
+    camSel.addEventListener('change', refresh);
+    typeSel.addEventListener('change', refresh);
+    recSel.addEventListener('change', refresh);
+
+    okBtn.addEventListener('click', function() {
+        if (!activeCard) return;
+        var tmpl = tmplInput.value.trim();
+        activeCard.dataset.template = tmpl;
+        activeCard.dataset.camera   = camSel.value;
+        activeCard.dataset.type     = typeSel.value;
+        activeCard.dataset.recorder = recSel.value;
+        var btn = activeCard.querySelector('.job-structure-btn');
+        if (btn) btn.classList.toggle('has-structure', tmpl.length > 0);
+        syncJobTemplateSelect(activeCard);
+        overlay.classList.add('hidden');
+        activeCard = null;
+        refreshPreviewSoon();
+    });
+    clearBtn.addEventListener('click', function() {
+        tmplInput.value = ''; presetSel.value = '';
+        camSel.value = ''; typeSel.value = ''; recSel.value = '';
+        refresh();
+    });
+    cancelBtn.addEventListener('click', function() {
+        syncJobTemplateSelect(activeCard);
+        overlay.classList.add('hidden');
+        activeCard = null;
+    });
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) {
+            syncJobTemplateSelect(activeCard);
+            overlay.classList.add('hidden');
+            activeCard = null;
+        }
+    });
+})();
+
+// ── Structure settings tab ────────────────────────────────────────────────────
+function updateDateSample() {
+    var fmt = document.getElementById('s-date-format').value || '%Y-%m-%d';
+    document.getElementById('s-date-sample').textContent = 'Sample: ' + formatStrftime(fmt);
+}
+
+function addStructValueRow(container, val) {
+    var row = document.createElement('div');
+    row.className = 'struct-value-row';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'struct-value-input';
+    input.value = val || '';
+    var rm = document.createElement('button');
+    rm.className = 'icon-btn icon-btn-danger';
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rm.addEventListener('click', function() { row.remove(); });
+    row.appendChild(input);
+    row.appendChild(rm);
+    container.appendChild(row);
+    return input;
+}
+
+function addStructPresetRow(container, preset) {
+    var row = document.createElement('div');
+    row.className = 'struct-preset-row';
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'struct-preset-name';
+    nameInput.placeholder = 'name';
+    nameInput.value = (preset && preset.name) || '';
+    var tmplInput = document.createElement('input');
+    tmplInput.type = 'text';
+    tmplInput.className = 'struct-preset-tmpl';
+    tmplInput.placeholder = 'template, e.g. IMAGE/%date/%camera';
+    tmplInput.spellcheck = false;
+    tmplInput.value = (preset && preset.template) || '';
+    var rm = document.createElement('button');
+    rm.className = 'icon-btn icon-btn-danger';
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rm.addEventListener('click', function() { row.remove(); });
+    row.appendChild(nameInput);
+    row.appendChild(tmplInput);
+    row.appendChild(rm);
+    container.appendChild(row);
+}
+
+function populateStructureFields() {
+    if (!currentSettings) return;
+    document.getElementById('s-date-format').value = currentSettings.folder_var_date_format || '%Y-%m-%d';
+    document.getElementById('s-shoot-day').value   = currentSettings.folder_shoot_day || '';
+    updateDateSample();
+    var camList = document.getElementById('s-camera-list');
+    camList.innerHTML = '';
+    (currentSettings.folder_cameras || []).forEach(function(v) { addStructValueRow(camList, v); });
+    var typeList = document.getElementById('s-type-list');
+    typeList.innerHTML = '';
+    (currentSettings.folder_types || []).forEach(function(v) { addStructValueRow(typeList, v); });
+    var recList = document.getElementById('s-recorder-list');
+    recList.innerHTML = '';
+    (currentSettings.folder_recorders || []).forEach(function(v) { addStructValueRow(recList, v); });
+    var presetList = document.getElementById('s-preset-list');
+    presetList.innerHTML = '';
+    (currentSettings.folder_presets || []).forEach(function(p) { addStructPresetRow(presetList, p); });
+}
+
+function collectStructValues(containerId) {
+    var vals = [];
+    document.querySelectorAll('#' + containerId + ' .struct-value-input').forEach(function(i) {
+        var v = i.value.trim();
+        if (v) vals.push(v);
+    });
+    return vals;
+}
+
+function collectStructPresets() {
+    var presets = [];
+    document.querySelectorAll('#s-preset-list .struct-preset-row').forEach(function(row) {
+        var name = row.querySelector('.struct-preset-name').value.trim();
+        var tmpl = row.querySelector('.struct-preset-tmpl').value.trim();
+        if (name) presets.push({ name: name, template: tmpl });
+    });
+    return presets;
+}
+
+(function() {
+    var dateFmt = document.getElementById('s-date-format');
+    if (dateFmt) dateFmt.addEventListener('input', updateDateSample);
+
+    var camAdd = document.getElementById('s-camera-add');
+    if (camAdd) camAdd.addEventListener('click', function() {
+        addStructValueRow(document.getElementById('s-camera-list'), '').focus();
+    });
+    var typeAdd = document.getElementById('s-type-add');
+    if (typeAdd) typeAdd.addEventListener('click', function() {
+        addStructValueRow(document.getElementById('s-type-list'), '').focus();
+    });
+    var recAdd = document.getElementById('s-recorder-add');
+    if (recAdd) recAdd.addEventListener('click', function() {
+        addStructValueRow(document.getElementById('s-recorder-list'), '').focus();
+    });
+    var presetAdd = document.getElementById('s-preset-add');
+    if (presetAdd) presetAdd.addEventListener('click', function() {
+        addStructPresetRow(document.getElementById('s-preset-list'), null);
+    });
+
+    var cancelBtn = document.getElementById('structure-cancel');
+    if (cancelBtn) cancelBtn.addEventListener('click', function() {
+        settingsOverlay.classList.add('hidden');
+    });
+    var saveBtn = document.getElementById('structure-save');
+    if (saveBtn) saveBtn.addEventListener('click', async function() {
+        if (!currentSettings) return;
+        currentSettings.folder_var_date_format =
+            document.getElementById('s-date-format').value.trim() || '%Y-%m-%d';
+        currentSettings.folder_shoot_day = document.getElementById('s-shoot-day').value.trim();
+        currentSettings.folder_cameras   = collectStructValues('s-camera-list');
+        currentSettings.folder_types     = collectStructValues('s-type-list');
+        currentSettings.folder_recorders = collectStructValues('s-recorder-list');
+        currentSettings.folder_presets   = collectStructPresets();
+        // Preset list may have changed — rebuild every job's template dropdown.
+        jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
+            syncJobTemplateSelect(card);
+        });
+        await persistSettings();
+        settingsOverlay.classList.add('hidden');
+        refreshPreviewSoon();
+    });
+})();
+
+// ── Live structure preview tab ────────────────────────────────────────────────
+var PREVIEW_STATUS = {
+    will_create: { cls: 'st-create',     text: 'will be created' },
+    empty:       { cls: 'st-empty',      text: 'exists — empty' },
+    non_empty:   { cls: 'st-nonempty',   text: 'exists — NOT empty' },
+    not_mounted: { cls: 'st-notmounted', text: 'volume not mounted' }
+};
+
+var previewTimer = null;
+function refreshPreviewSoon() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(function() {
+        var body = document.getElementById('sbody-preview');
+        if (body && !body.classList.contains('hidden')) refreshPreview();
+    }, 350);
+}
+
+async function refreshPreview() {
+    var container = document.getElementById('preview-content');
+    if (!container) return;
+    var jobs = getJobs();
+    if (!jobs.length) {
+        container.innerHTML = '<div class="preview-empty-msg">No jobs.</div>';
+        return;
+    }
+
+    var rows = [];
+    jobs.forEach(function(job, ji) {
+        var res = resolveTemplate(job);
+        job.dsts.forEach(function(root) {
+            var full = res.path ? joinPath(root, res.path) : root;
+            if (job.copyAsSubfolder && job.src) full = joinPath(full, baseName(job.src));
+            rows.push({ jobIdx: ji, root: root, full: full, res: res });
+        });
+    });
+    if (!rows.length) {
+        container.innerHTML = '<div class="preview-empty-msg">No destinations set.</div>';
+        return;
+    }
+
+    var statuses;
+    try {
+        statuses = await invoke('dest_path_status', {
+            items: rows.map(function(r) { return { root: r.root, full: r.full }; })
+        });
+    } catch(e) {
+        statuses = rows.map(function() { return 'will_create'; });
+    }
+    rows.forEach(function(r, i) { r.status = statuses[i] || 'will_create'; });
+
+    var multi = jobs.length > 1;
+    container.innerHTML = '';
+    jobs.forEach(function(job, ji) {
+        var section = document.createElement('div');
+        section.className = 'preview-job';
+        var title = document.createElement('div');
+        title.className = 'preview-job-title';
+        title.textContent = job.name || (multi ? 'Job ' + (ji + 1) : 'Job');
+        section.appendChild(title);
+
+        var jobRows = rows.filter(function(r) { return r.jobIdx === ji; });
+        if (!jobRows.length) {
+            var none = document.createElement('div');
+            none.className = 'preview-empty-msg';
+            none.textContent = 'No destinations.';
+            section.appendChild(none);
+        }
+        jobRows.forEach(function(r) {
+            var row = document.createElement('div');
+            row.className = 'preview-dest';
+            var pathEl = document.createElement('div');
+            pathEl.className = 'preview-path';
+            var shown = shortenPath(r.full);
+            if (r.res.bad && r.res.bad.length) pathEl.innerHTML = highlightBad(shown, r.res.bad);
+            else pathEl.textContent = shown;
+            var st = PREVIEW_STATUS[r.status] || PREVIEW_STATUS.will_create;
+            var statusEl = document.createElement('div');
+            statusEl.className = 'preview-status ' + st.cls;
+            statusEl.textContent = st.text;
+            row.appendChild(pathEl);
+            row.appendChild(statusEl);
+            section.appendChild(row);
+        });
+        container.appendChild(section);
+    });
+}
+
+(function() {
+    var refreshBtn = document.getElementById('preview-refresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', refreshPreview);
 })();
 
 // ── Initialisation ────────────────────────────────────────────────────────────

@@ -321,6 +321,10 @@ fn main() {
             get_home_dir,
             get_app_version,
             get_volume_info,
+            list_volumes,
+            list_dir,
+            create_folder,
+            dest_path_status,
             set_window_theme,
             open_verifier_window,
             parse_verification_file,
@@ -1415,19 +1419,24 @@ fn lsblk_val(line: &str, field: &str) -> String {
 #[cfg(target_os = "linux")]
 fn vol_label_type(path: &str) -> (String, String) {
     let Ok(out) = std::process::Command::new("lsblk")
-        .args(["-P", "-o", "NAME,MOUNTPOINT,LABEL,ROTA,RM,TRAN,PKNAME"])
+        .args(["-P", "-o", "NAME,MOUNTPOINT,LABEL,ROTA,RM,TRAN,MODEL,PKNAME"])
         .output()
     else { return (String::new(), "Unknown".to_string()); };
 
     let text  = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();
 
-    // Build NAME → TRAN map so partition rows can inherit the parent device's transport.
-    let mut tran_map = std::collections::HashMap::<String, String>::new();
+    // NAME → TRAN and NAME → MODEL maps so partition rows can inherit both
+    // values from their parent device row (lsblk leaves them blank on partitions).
+    let mut tran_map  = std::collections::HashMap::<String, String>::new();
+    let mut model_map = std::collections::HashMap::<String, String>::new();
     for line in &lines {
         let name = lsblk_val(line, "NAME");
-        let tran = lsblk_val(line, "TRAN");
-        if !name.is_empty() && !tran.is_empty() { tran_map.insert(name, tran); }
+        if name.is_empty() { continue; }
+        let tran  = lsblk_val(line, "TRAN");
+        let model = lsblk_val(line, "MODEL");
+        if !tran.is_empty()  { tran_map.insert(name.clone(), tran); }
+        if !model.is_empty() { model_map.insert(name, model); }
     }
 
     let path_p = std::path::Path::new(path);
@@ -1442,22 +1451,41 @@ fn vol_label_type(path: &str) -> (String, String) {
         if mp.len() <= best { continue; }
         best  = mp.len();
         label = lsblk_val(line, "LABEL");
-        let rota  = lsblk_val(line, "ROTA");
-        let rm    = lsblk_val(line, "RM");
-        let name  = lsblk_val(line, "NAME");
+
+        let rota = lsblk_val(line, "ROTA");
+        let rm   = lsblk_val(line, "RM");
+        let name = lsblk_val(line, "NAME");
+        let pk   = lsblk_val(line, "PKNAME");
+
         let mut tran = lsblk_val(line, "TRAN").to_lowercase();
-        if tran.is_empty() {
-            let pk = lsblk_val(line, "PKNAME");
-            if !pk.is_empty() {
-                tran = tran_map.get(&pk).cloned().unwrap_or_default().to_lowercase();
-            }
+        if tran.is_empty() && !pk.is_empty() {
+            tran = tran_map.get(&pk).cloned().unwrap_or_default().to_lowercase();
         }
-        mtype = if rota == "1" {
-            "HDD".to_string()
+        let mut model = lsblk_val(line, "MODEL").to_lowercase();
+        if model.is_empty() && !pk.is_empty() {
+            model = model_map.get(&pk).cloned().unwrap_or_default().to_lowercase();
+        }
+
+        // The kernel ROTA (rotational) flag is unreliable over USB bridges and
+        // card readers — they routinely report ROTA=1 even for SSDs and flash
+        // media. Transport, device name and the device MODEL string are trusted
+        // first; ROTA is only consulted last, for internal drives.
+        mtype = if tran == "nvme" || name.starts_with("nvme") || model.contains("nvme") {
+            "NVMe".to_string()
         } else if tran == "mmc" || name.starts_with("mmcblk") {
             "SD".to_string()
+        } else if model.contains("ssd") {
+            "SSD".to_string()
+        } else if model.contains("card reader") || model.contains("cardreader")
+               || model.contains("sd/mmc")     || model.contains("multi-card")
+               || model.contains("multicard")  || model.contains("sd reader") {
+            "SD".to_string()
+        } else if model.contains("hdd") {
+            "HDD".to_string()
         } else if tran == "usb" || rm == "1" {
             "Flash".to_string()
+        } else if rota == "1" {
+            "HDD".to_string()
         } else {
             "SSD".to_string()
         };
@@ -1593,6 +1621,183 @@ fn get_volume_info(path: String) -> VolumeInfo {
     let (total, free) = match vol_space(&probe) { Some(v) => v, None => return none };
     let (label, media_type) = vol_label_type(&probe);
     VolumeInfo { ok: true, label, media_type, total_bytes: total, free_bytes: free }
+}
+
+// ── File explorer (left side panel) ───────────────────────────────────────────
+
+/// One mounted volume / drive shown at the root of the explorer tree.
+#[derive(Clone, Serialize)]
+struct VolumeEntry {
+    /// Human-readable name (volume label, falling back to the directory name).
+    name:       String,
+    /// Absolute path to the volume's mount point.
+    path:       String,
+    /// Media type from `vol_label_type` — "SSD" / "HDD" / "Flash" / "SD" / etc.
+    media_type: String,
+}
+
+/// One entry (folder or file) returned by `list_dir`.
+#[derive(Clone, Serialize)]
+struct DirItem {
+    /// Entry name (last path component).
+    name: String,
+    /// Absolute path to the entry.
+    path: String,
+    /// `true` for a directory, `false` for a regular file.
+    is_dir: bool,
+}
+
+/// One destination-status query for `dest_path_status`.
+#[derive(Deserialize)]
+struct StatusQuery {
+    /// The user-typed destination root (must already exist / be mounted).
+    root: String,
+    /// The fully resolved path (root + resolved template) to check.
+    full: String,
+}
+
+/// Enumerates the mounted volumes / drives for the explorer tree.
+///
+/// - **Linux**: the filesystem root `/` plus directory entries under the usual
+///   removable-media mount roots (`/media/$USER`, `/run/media/$USER`, `/mnt`).
+/// - **macOS**: entries under `/Volumes`.
+/// - **Windows**: every drive letter reported by `GetLogicalDrives`.
+#[tauri::command]
+fn list_volumes() -> Vec<VolumeEntry> {
+    let mut vols: Vec<VolumeEntry> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        {
+            let (label, mtype) = vol_label_type("/");
+            vols.push(VolumeEntry {
+                name: if label.is_empty() { "Filesystem root".to_string() } else { label },
+                path: "/".to_string(),
+                media_type: mtype,
+            });
+        }
+        let user = std::env::var("USER").unwrap_or_default();
+        let mut roots: Vec<String> = Vec::new();
+        if !user.is_empty() {
+            roots.push(format!("/media/{}", user));
+            roots.push(format!("/run/media/{}", user));
+        }
+        roots.push("/mnt".to_string());
+        for root in roots {
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    if !entry.path().is_dir() { continue; }
+                    let p = entry.path().to_string_lossy().into_owned();
+                    if vols.iter().any(|v| v.path == p) { continue; }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') { continue; }
+                    let (label, mtype) = vol_label_type(&p);
+                    vols.push(VolumeEntry {
+                        name: if label.is_empty() { name } else { label },
+                        path: p,
+                        media_type: mtype,
+                    });
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            for entry in entries.flatten() {
+                if !entry.path().is_dir() { continue; }
+                let p = entry.path().to_string_lossy().into_owned();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') { continue; }
+                let (label, mtype) = vol_label_type(&p);
+                vols.push(VolumeEntry {
+                    name: if label.is_empty() { name } else { label },
+                    path: p,
+                    media_type: mtype,
+                });
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+        let mask = unsafe { GetLogicalDrives() };
+        for i in 0..26u32 {
+            if mask & (1 << i) == 0 { continue; }
+            let letter = (b'A' + i as u8) as char;
+            let p = format!("{}:\\", letter);
+            let (label, mtype) = vol_label_type(&p);
+            let name = if label.is_empty() {
+                format!("{}:", letter)
+            } else {
+                format!("{} ({}:)", label, letter)
+            };
+            vols.push(VolumeEntry { name, path: p, media_type: mtype });
+        }
+    }
+
+    vols
+}
+
+/// Lists the immediate entries (folders and files) of `path` for lazy tree
+/// expansion.
+///
+/// Dot-entries are excluded. Folders are returned first, then files, each group
+/// sorted case-insensitively by name. Symlinks are classified by their target.
+#[tauri::command]
+fn list_dir(path: String) -> Result<Vec<DirItem>, String> {
+    let mut dirs:  Vec<DirItem> = Vec::new();
+    let mut files: Vec<DirItem> = Vec::new();
+    let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() { Ok(t) => t, Err(_) => continue };
+        let is_dir = if ft.is_symlink() { entry.path().is_dir() } else { ft.is_dir() };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { continue; }
+        let item = DirItem { name, path: entry.path().to_string_lossy().into_owned(), is_dir };
+        if is_dir { dirs.push(item); } else { files.push(item); }
+    }
+    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.extend(files);
+    Ok(dirs)
+}
+
+/// Creates a single new directory at `path`.
+///
+/// The parent must already exist (`create_dir`, not `create_dir_all`) so that an
+/// accidental deep path does not silently create a chain of folders. Errors if
+/// the folder already exists.
+#[tauri::command]
+fn create_folder(path: String) -> Result<(), String> {
+    std::fs::create_dir(&path).map_err(|e| e.to_string())
+}
+
+/// Resolves the status of each resolved destination path for the preview tab.
+///
+/// For every `{ root, full }` pair returns one of:
+/// - `"not_mounted"` — the destination root does not exist (drive unplugged).
+/// - `"will_create"` — the root exists but the resolved folder does not yet.
+/// - `"empty"`       — the resolved folder exists and contains no entries.
+/// - `"non_empty"`   — the resolved folder exists and already contains files.
+#[tauri::command]
+fn dest_path_status(items: Vec<StatusQuery>) -> Vec<String> {
+    items.into_iter().map(|q| {
+        if q.root.trim().is_empty() || !std::path::Path::new(&q.root).exists() {
+            return "not_mounted".to_string();
+        }
+        let full = std::path::Path::new(&q.full);
+        if !full.exists() {
+            return "will_create".to_string();
+        }
+        match std::fs::read_dir(full) {
+            Ok(mut rd) => if rd.next().is_some() { "non_empty".to_string() }
+                          else { "empty".to_string() },
+            Err(_) => "non_empty".to_string(),
+        }
+    }).collect()
 }
 
 /// Saves the in-app copy log to a timestamped `.txt` file in the logs directory.
