@@ -843,7 +843,7 @@ pub fn run(
     if !verify {
         let no_hashes: Vec<(FileHashes, bool)> =
             copied.iter().map(|_| (FileHashes::default(), true)).collect();
-        generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
+        generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                          &meta_entries, &no_hashes,
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
                          &comment, &mhl_comment, &location, &settings, &reply_rx);
@@ -1032,7 +1032,7 @@ pub fn run(
     log(&tx, &format!("\n── Phase 2 complete {} ─────────────────────\n", ts(&start)));
 
     // ── Phase 3: reports ──────────────────────────────────────────────────────
-    generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
+    generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                      &meta_entries, &results,
                      hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
                      &comment, &mhl_comment, &location, &settings, &reply_rx);
@@ -1773,6 +1773,7 @@ fn generate_reports(
     tx:           &Sender<Msg>,
     destinations: &[PathBuf],
     src_name:     &str,
+    copy_as_subfolder: bool,
     src:          &Path,
     total_bytes:  u64,
     meta_entries: &[(String, metadata::FileMeta)],
@@ -1792,6 +1793,17 @@ fn generate_reports(
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
     let col_label = hash_algo.col_label();
 
+    // When "copy folder itself into destination" is on, the copied files live
+    // under `{dst}/{src_name}/…` while the checksum and MHL files sit at `{dst}`.
+    // Their recorded relative paths must therefore carry the `{src_name}/`
+    // prefix, otherwise a verifier resolves them against `{dst}` and reports
+    // every file as missing.
+    let path_prefix = if copy_as_subfolder {
+        format!("{}/", src_name)
+    } else {
+        String::new()
+    };
+
     // ── MHL: scan source for generational chain (once, before the dst loop) ──
     let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
         let src_ascmhl = src.join("ascmhl");
@@ -1809,7 +1821,7 @@ fn generate_reports(
         // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
         if let Some(ext) = hash_algo.checksum_ext() {
             let p = dst.join(format!("{}_checksum.{}", src_name, ext));
-            match write_checksum(&p, meta_entries, hashes) {
+            match write_checksum(&p, meta_entries, hashes, &path_prefix) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
             }
@@ -1866,7 +1878,8 @@ fn generate_reports(
                 let mhl_entries: Vec<(String, String)> =
                     meta_entries.iter().zip(hashes.iter())
                         .map(|((rel, _), (fh, _))| {
-                            (rel.clone(), fh.hash.clone().unwrap_or_default())
+                            (format!("{}{}", path_prefix, rel),
+                             fh.hash.clone().unwrap_or_default())
                         })
                         .collect();
 
@@ -1928,12 +1941,13 @@ fn write_checksum(
     path:    &Path,
     entries: &[(String, metadata::FileMeta)],
     hashes:  &[(FileHashes, bool)],
+    prefix:  &str,
 ) -> io::Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, _)) in entries.iter().zip(hashes.iter()) {
         if let Some(ref hash) = fh.hash {
-            writeln!(f, "{}  {}", hash, rel)?;
+            writeln!(f, "{}  {}{}", hash, prefix, rel)?;
         }
     }
     Ok(())
