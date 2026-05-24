@@ -1483,7 +1483,7 @@ fn vol_label_type(path: &str) -> (String, String) {
         } else if model.contains("hdd") {
             "HDD".to_string()
         } else if tran == "usb" || rm == "1" {
-            "Flash".to_string()
+            if rota == "1" { "HDD".to_string() } else { "Flash".to_string() }
         } else if rota == "1" {
             "HDD".to_string()
         } else {

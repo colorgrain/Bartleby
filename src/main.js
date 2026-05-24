@@ -586,9 +586,28 @@ function addJob() {
     hashSel.value = defaultHashAlgo;
     jobOptsRow.appendChild(hashSel);
 
-    jobOptsRow.appendChild(makeJobToggle('job-chk-csv',  '.CSV',  defaultGenCsv));
-    jobOptsRow.appendChild(makeJobToggle('job-chk-pdf',  '.PDF',  defaultGenPdf));
-    jobOptsRow.appendChild(makeJobToggle('job-chk-html', '.HTML', defaultGenHtml));
+    var csvLbl  = makeJobToggle('job-chk-csv',  '.CSV',  defaultGenCsv);
+    var pdfLbl  = makeJobToggle('job-chk-pdf',  '.PDF',  defaultGenPdf);
+    var htmlLbl = makeJobToggle('job-chk-html', '.HTML', defaultGenHtml);
+    jobOptsRow.appendChild(csvLbl);
+    jobOptsRow.appendChild(pdfLbl);
+    jobOptsRow.appendChild(htmlLbl);
+
+    csvLbl.querySelector('.job-chk-csv').addEventListener('change', function() {
+        defaultGenCsv = this.checked;
+        currentSettings.gen_csv = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
+    pdfLbl.querySelector('.job-chk-pdf').addEventListener('change', function() {
+        defaultGenPdf = this.checked;
+        currentSettings.gen_pdf = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
+    htmlLbl.querySelector('.job-chk-html').addEventListener('change', function() {
+        defaultGenHtml = this.checked;
+        currentSettings.gen_html = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
 
     var mhlLbl = makeJobToggle('job-chk-mhl', '.MHL', defaultGenMhl);
     var mhlChkInit = mhlLbl.querySelector('.job-chk-mhl');
@@ -597,6 +616,12 @@ function addJob() {
         mhlLbl.classList.add('toggle-disabled');
     }
     jobOptsRow.appendChild(mhlLbl);
+
+    mhlChkInit.addEventListener('change', function() {
+        defaultGenMhl = this.checked;
+        currentSettings.gen_mhl = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
 
     hashSel.addEventListener('change', function() {
         var mhlChkEl = jobOptsRow.querySelector('.job-chk-mhl');
@@ -612,21 +637,13 @@ function addJob() {
     commentBtn.textContent = 'T';
     commentBtn.addEventListener('click', function() { openCommentModal(jobCard); });
 
-    var templateSel = document.createElement('select');
-    templateSel.className = 'job-template-select';
-    templateSel.title = 'Folder structure template';
-    populateJobTemplateSelect(templateSel, '');
-    templateSel.addEventListener('change', function() {
-        var v = templateSel.value;
-        if (v === '__custom') {
-            openStructurePopup(jobCard);
-        } else {
-            jobCard.dataset.template = v;
-            var sb = jobCard.querySelector('.job-structure-btn');
-            if (sb) sb.classList.toggle('has-structure', v.length > 0);
-            refreshPreviewSoon();
-        }
-    });
+    var templateInput = document.createElement('input');
+    templateInput.type = 'text';
+    templateInput.className = 'job-template-input';
+    templateInput.placeholder = '#preset or %var';
+    templateInput.title = 'Folder structure: type # for presets, % for variables';
+    templateInput.spellcheck = false;
+    attachTemplateAutocomplete(templateInput, jobCard);
 
     var structureBtn = document.createElement('button');
     structureBtn.className = 'job-structure-btn';
@@ -635,7 +652,7 @@ function addJob() {
     structureBtn.addEventListener('click', function() { openStructurePopup(jobCard); });
 
     // Trailing group after the MHL toggle: template / structure / note.
-    jobOptsRow.appendChild(templateSel);
+    jobOptsRow.appendChild(templateInput);
     jobOptsRow.appendChild(structureBtn);
     jobOptsRow.appendChild(commentBtn);
 
@@ -709,9 +726,7 @@ function getJobs() {
             mhl_comment:     card.dataset.mhl_comment || '',
             location:        card.dataset.location    || '',
             template:        card.dataset.template    || '',
-            camera:          card.dataset.camera      || '',
-            type:            card.dataset.type        || '',
-            recorder:        card.dataset.recorder    || '',
+            jobvars:         (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
         });
     });
     return result;
@@ -1365,14 +1380,15 @@ function resolveTemplate(job) {
     var presets = (currentSettings && currentSettings.folder_presets) || [];
     var tmpl = expandPresets(raw, presets, 0, bad);
 
+    var jobvars = (job && job.jobvars) || {};
     var vars = {
-        date:     formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
-        day:      (currentSettings && currentSettings.folder_shoot_day) || '',
-        project:  (currentSettings && currentSettings.project_title) || '',
-        camera:   (job && job.camera) || '',
-        type:     (job && job.type) || '',
-        recorder: (job && job.recorder) || ''
+        date:    formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
+        day:     (currentSettings && currentSettings.folder_shoot_day) || '',
+        project: (currentSettings && currentSettings.project_title) || '',
     };
+    ((currentSettings && currentSettings.folder_variables) || []).forEach(function(fv) {
+        vars[fv.name.toLowerCase()] = jobvars[fv.name.toLowerCase()] || '';
+    });
 
     var out = tmpl.replace(/%([A-Za-z]+)/g, function(m, name) {
         var key = name.toLowerCase();
@@ -1407,34 +1423,165 @@ function setSelectedJob(card) {
     });
 }
 
-// ── Per-job template dropdown ─────────────────────────────────────────────────
-// Builds the in-card structure picker: "No structure", each #preset, "Custom…".
-function populateJobTemplateSelect(sel, template) {
-    var presets = (currentSettings && currentSettings.folder_presets) || [];
-    sel.innerHTML = '';
-    function opt(v, t) {
-        var o = document.createElement('option');
-        o.value = v; o.textContent = t;
-        sel.appendChild(o);
-    }
-    opt('', 'No structure');
-    presets.forEach(function(p) { opt('#' + p.name, '#' + p.name); });
-    opt('__custom', 'Custom / edit…');
-    var tmpl = template || '';
-    if (!tmpl) sel.value = '';
-    else if (presets.some(function(p) { return '#' + p.name === tmpl; })) sel.value = tmpl;
-    else sel.value = '__custom';
-}
-
-// Re-derive a job card's template select from its dataset (after a popup edit).
-function syncJobTemplateSelect(card) {
+// Sync the per-job template text field from card.dataset.template (e.g. after popup OK/cancel).
+function syncJobTemplateInput(card) {
     if (!card) return;
-    var sel = card.querySelector('.job-template-select');
-    if (sel) populateJobTemplateSelect(sel, card.dataset.template || '');
+    var inp = card.querySelector('.job-template-input');
+    if (inp) inp.value = card.dataset.template || '';
 }
 
 // Refresh the preview tab when jobs/destinations change.
 jobsContainer.addEventListener('input', function() { refreshPreviewSoon(); });
+
+// ── Template field autocomplete ───────────────────────────────────────────────
+(function() {
+    var acEl        = document.getElementById('tmpl-ac');
+    var acBlurTimer = null;
+    var acPending   = false; // true while showing value sub-list for a variable
+
+    function hide() {
+        acEl.classList.add('hidden');
+        acEl.innerHTML = '';
+        acPending = false;
+    }
+
+    function position(input) {
+        var r = input.getBoundingClientRect();
+        acEl.style.left     = r.left + 'px';
+        acEl.style.top      = (r.bottom + 2) + 'px';
+        acEl.style.minWidth = r.width + 'px';
+    }
+
+    function show(input, items, onSelect) {
+        acEl.innerHTML = '';
+        if (!items.length) { hide(); return; }
+        items.forEach(function(item) {
+            var btn = document.createElement('button');
+            btn.className   = 'tmpl-ac-item';
+            btn.textContent = item;
+            btn.addEventListener('mousedown', function(e) {
+                e.preventDefault(); // block blur so click registers
+                onSelect(item);
+            });
+            acEl.appendChild(btn);
+        });
+        position(input);
+        acEl.classList.remove('hidden');
+    }
+
+    // Return { trigger, word, start, end } for a '#' or '%' token at the cursor,
+    // or null if the cursor isn't inside such a token.
+    function tokenAtCursor(input) {
+        var val = input.value;
+        var pos = input.selectionStart;
+        var i = pos - 1;
+        while (i >= 0 && /[A-Za-z0-9_-]/.test(val[i])) i--;
+        if (i < 0 || (val[i] !== '#' && val[i] !== '%')) return null;
+        return { trigger: val[i], word: val.slice(i + 1, pos), start: i, end: pos };
+    }
+
+    // Replace the token at [start,end) with text; return the new [start,end).
+    function replaceToken(input, text, start, end) {
+        var v = input.value;
+        input.value = v.slice(0, start) + text + v.slice(end);
+        var newEnd = start + text.length;
+        input.setSelectionRange(newEnd, newEnd);
+        return { start: start, end: newEnd };
+    }
+
+    function getAllVars() {
+        var builtins = ['%date', '%day', '%project'];
+        var custom = ((currentSettings && currentSettings.folder_variables) || [])
+            .map(function(fv) { return '%' + fv.name; });
+        return builtins.concat(custom);
+    }
+
+    function updateCard(input, jobCard) {
+        jobCard.dataset.template = input.value;
+        var sb = jobCard.querySelector('.job-structure-btn');
+        if (sb) sb.classList.toggle('has-structure', !!input.value.trim());
+        refreshPreviewSoon();
+    }
+
+    function handleInput(input, jobCard) {
+        if (acPending) return;
+        var token = tokenAtCursor(input);
+        if (!token) { hide(); return; }
+        var presets = (currentSettings && currentSettings.folder_presets) || [];
+        var q = token.word.toLowerCase();
+
+        if (token.trigger === '#') {
+            var names = presets
+                .filter(function(p) { return p.name && p.name.toLowerCase().indexOf(q) === 0; })
+                .map(function(p) { return '#' + p.name; });
+            show(input, names, function(item) {
+                replaceToken(input, item, token.start, token.end);
+                hide();
+                updateCard(input, jobCard);
+            });
+        } else {
+            var allVars = getAllVars().filter(function(v) {
+                return v.toLowerCase().indexOf('%' + q) === 0;
+            });
+            show(input, allVars, function(item) {
+                var pos = replaceToken(input, item, token.start, token.end);
+                var varName = item.slice(1).toLowerCase();
+                var fv = ((currentSettings && currentSettings.folder_variables) || [])
+                    .find(function(v) { return v.name.toLowerCase() === varName; });
+                var values = fv ? (fv.values || []) : [];
+                if (values.length) {
+                    acPending = true;
+                    show(input, values, function(val) {
+                        var v = input.value;
+                        input.value = v.slice(0, pos.start) + val + v.slice(pos.end);
+                        var newPos = pos.start + val.length;
+                        input.setSelectionRange(newPos, newPos);
+                        hide();
+                        updateCard(input, jobCard);
+                    });
+                } else {
+                    hide();
+                    updateCard(input, jobCard);
+                }
+            });
+        }
+    }
+
+    window.attachTemplateAutocomplete = function(input, jobCard) {
+        input.addEventListener('input', function() {
+            updateCard(input, jobCard);
+            handleInput(input, jobCard);
+        });
+
+        input.addEventListener('blur', function() {
+            acBlurTimer = setTimeout(hide, 160);
+        });
+        input.addEventListener('focus', function() {
+            if (acBlurTimer) { clearTimeout(acBlurTimer); acBlurTimer = null; }
+        });
+        input.addEventListener('keydown', function(e) {
+            if (acEl.classList.contains('hidden')) return;
+            var items  = acEl.querySelectorAll('.tmpl-ac-item');
+            var active = acEl.querySelector('.tmpl-ac-item.ac-active');
+            var idx = -1;
+            items.forEach(function(it, i) { if (it === active) idx = i; });
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (active) active.classList.remove('ac-active');
+                (items[idx + 1] || items[0]).classList.add('ac-active');
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (active) active.classList.remove('ac-active');
+                (items[idx - 1] || items[items.length - 1]).classList.add('ac-active');
+            } else if (e.key === 'Enter' && active) {
+                e.preventDefault();
+                active.dispatchEvent(new MouseEvent('mousedown'));
+            } else if (e.key === 'Escape') {
+                hide();
+            }
+        });
+    };
+})();
 
 // ── Side panel toggle ─────────────────────────────────────────────────────────
 (function() {
@@ -1769,44 +1916,26 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
 
 // ── Per-job structure popup ───────────────────────────────────────────────────
 (function() {
-    var overlay   = document.getElementById('structure-overlay');
-    var presetSel = document.getElementById('structure-preset');
-    var tmplInput = document.getElementById('structure-template');
-    var camField  = document.getElementById('structure-camera-field');
-    var typeField = document.getElementById('structure-type-field');
-    var recField  = document.getElementById('structure-recorder-field');
-    var camSel    = document.getElementById('structure-camera');
-    var typeSel   = document.getElementById('structure-type');
-    var recSel    = document.getElementById('structure-recorder');
-    var previewEl = document.getElementById('structure-preview');
-    var okBtn     = document.getElementById('structure-popup-ok');
-    var cancelBtn = document.getElementById('structure-popup-cancel');
-    var clearBtn  = document.getElementById('structure-clear');
-    var activeCard = null;
+    var overlay     = document.getElementById('structure-overlay');
+    var presetSel   = document.getElementById('structure-preset');
+    var tmplInput   = document.getElementById('structure-template');
+    var varDrops    = document.getElementById('structure-var-dropdowns');
+    var previewEl   = document.getElementById('structure-preview');
+    var okBtn       = document.getElementById('structure-popup-ok');
+    var cancelBtn   = document.getElementById('structure-popup-cancel');
+    var clearBtn    = document.getElementById('structure-clear');
+    var activeCard  = null;
 
-    function fillSelect(sel, values, current, placeholder) {
-        sel.innerHTML = '';
-        var ph = document.createElement('option');
-        ph.value = ''; ph.textContent = placeholder;
-        sel.appendChild(ph);
-        (values || []).forEach(function(v) {
-            var o = document.createElement('option');
-            o.value = v; o.textContent = v;
-            sel.appendChild(o);
+    function getJobvars() {
+        var jv = {};
+        varDrops.querySelectorAll('select').forEach(function(sel) {
+            if (sel.value) jv[sel.dataset.varname] = sel.value;
         });
-        sel.value = current || '';
+        return jv;
     }
 
     function refresh() {
-        var presets = (currentSettings && currentSettings.folder_presets) || [];
-        var scanned = expandPresets(tmplInput.value, presets, 0, []);
-        camField.classList.toggle('hidden',  !/%camera\b/i.test(scanned));
-        typeField.classList.toggle('hidden', !/%type\b/i.test(scanned));
-        recField.classList.toggle('hidden',  !/%recorder\b/i.test(scanned));
-        var res = resolveTemplate({
-            template: tmplInput.value, camera: camSel.value,
-            type: typeSel.value, recorder: recSel.value
-        });
+        var res = resolveTemplate({ template: tmplInput.value, jobvars: getJobvars() });
         if (!res.path && !res.bad.length) {
             previewEl.textContent = '(no template — destination used as-is)';
         } else {
@@ -1829,12 +1958,36 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
         tmplInput.value = jobCard.dataset.template || '';
         presetSel.value = presets.some(function(p) { return '#' + p.name === tmplInput.value; })
             ? tmplInput.value : '';
-        fillSelect(camSel,  (currentSettings && currentSettings.folder_cameras) || [],
-                   jobCard.dataset.camera || '', '— Select camera —');
-        fillSelect(typeSel, (currentSettings && currentSettings.folder_types) || [],
-                   jobCard.dataset.type || '', '— Select type —');
-        fillSelect(recSel,  (currentSettings && currentSettings.folder_recorders) || [],
-                   jobCard.dataset.recorder || '', '— Select recorder —');
+
+        // Build per-variable dropdowns from settings
+        var savedJv = {};
+        try { savedJv = JSON.parse(jobCard.dataset.jobvars || '{}'); } catch(e) {}
+        varDrops.innerHTML = '';
+        ((currentSettings && currentSettings.folder_variables) || []).forEach(function(fv) {
+            if (!fv.values || !fv.values.length) return;
+            var label = document.createElement('label');
+            label.className = 'struct-field';
+            var span = document.createElement('span');
+            span.className = 'struct-field-label';
+            span.textContent = '%' + fv.name;
+            var sel = document.createElement('select');
+            sel.className = 'modal-input';
+            sel.dataset.varname = fv.name.toLowerCase();
+            var ph = document.createElement('option');
+            ph.value = ''; ph.textContent = '— ' + fv.name + ' —';
+            sel.appendChild(ph);
+            fv.values.forEach(function(val) {
+                var o = document.createElement('option');
+                o.value = val; o.textContent = val;
+                sel.appendChild(o);
+            });
+            sel.value = savedJv[fv.name.toLowerCase()] || '';
+            sel.addEventListener('change', refresh);
+            label.appendChild(span);
+            label.appendChild(sel);
+            varDrops.appendChild(label);
+        });
+
         refresh();
         overlay.classList.remove('hidden');
     };
@@ -1847,37 +2000,32 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
         if (presetSel.value && tmplInput.value !== presetSel.value) presetSel.value = '';
         refresh();
     });
-    camSel.addEventListener('change', refresh);
-    typeSel.addEventListener('change', refresh);
-    recSel.addEventListener('change', refresh);
 
     okBtn.addEventListener('click', function() {
         if (!activeCard) return;
         var tmpl = tmplInput.value.trim();
         activeCard.dataset.template = tmpl;
-        activeCard.dataset.camera   = camSel.value;
-        activeCard.dataset.type     = typeSel.value;
-        activeCard.dataset.recorder = recSel.value;
+        activeCard.dataset.jobvars  = JSON.stringify(getJobvars());
         var btn = activeCard.querySelector('.job-structure-btn');
         if (btn) btn.classList.toggle('has-structure', tmpl.length > 0);
-        syncJobTemplateSelect(activeCard);
+        syncJobTemplateInput(activeCard);
         overlay.classList.add('hidden');
         activeCard = null;
         refreshPreviewSoon();
     });
     clearBtn.addEventListener('click', function() {
         tmplInput.value = ''; presetSel.value = '';
-        camSel.value = ''; typeSel.value = ''; recSel.value = '';
+        varDrops.querySelectorAll('select').forEach(function(s) { s.value = ''; });
         refresh();
     });
     cancelBtn.addEventListener('click', function() {
-        syncJobTemplateSelect(activeCard);
+        syncJobTemplateInput(activeCard);
         overlay.classList.add('hidden');
         activeCard = null;
     });
     overlay.addEventListener('click', function(e) {
         if (e.target === overlay) {
-            syncJobTemplateSelect(activeCard);
+            syncJobTemplateInput(activeCard);
             overlay.classList.add('hidden');
             activeCard = null;
         }
@@ -1940,27 +2088,73 @@ function populateStructureFields() {
     document.getElementById('s-date-format').value = currentSettings.folder_var_date_format || '%Y-%m-%d';
     document.getElementById('s-shoot-day').value   = currentSettings.folder_shoot_day || '';
     updateDateSample();
-    var camList = document.getElementById('s-camera-list');
-    camList.innerHTML = '';
-    (currentSettings.folder_cameras || []).forEach(function(v) { addStructValueRow(camList, v); });
-    var typeList = document.getElementById('s-type-list');
-    typeList.innerHTML = '';
-    (currentSettings.folder_types || []).forEach(function(v) { addStructValueRow(typeList, v); });
-    var recList = document.getElementById('s-recorder-list');
-    recList.innerHTML = '';
-    (currentSettings.folder_recorders || []).forEach(function(v) { addStructValueRow(recList, v); });
+    var fvarList = document.getElementById('s-fvar-list');
+    fvarList.innerHTML = '';
+    (currentSettings.folder_variables || []).forEach(function(fv) { addFolderVarCard(fvarList, fv); });
     var presetList = document.getElementById('s-preset-list');
     presetList.innerHTML = '';
     (currentSettings.folder_presets || []).forEach(function(p) { addStructPresetRow(presetList, p); });
 }
 
-function collectStructValues(containerId) {
-    var vals = [];
-    document.querySelectorAll('#' + containerId + ' .struct-value-input').forEach(function(i) {
-        var v = i.value.trim();
-        if (v) vals.push(v);
+function addFolderVarCard(container, fvar) {
+    var card = document.createElement('div');
+    card.className = 'card modal-card folder-var-card';
+
+    var header = document.createElement('div');
+    header.className = 'folder-var-card-header';
+
+    var prefix = document.createElement('span');
+    prefix.className = 'folder-var-prefix';
+    prefix.textContent = '%';
+
+    var nameInp = document.createElement('input');
+    nameInp.type = 'text';
+    nameInp.className = 'modal-input fvar-name';
+    nameInp.placeholder = 'variable name (e.g. cam, type, reel)';
+    nameInp.spellcheck = false;
+    nameInp.value = (fvar && fvar.name) || '';
+
+    var rmCard = document.createElement('button');
+    rmCard.className = 'icon-btn icon-btn-danger';
+    rmCard.type = 'button';
+    rmCard.title = 'Remove variable';
+    rmCard.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rmCard.addEventListener('click', function() { card.remove(); });
+
+    header.appendChild(prefix);
+    header.appendChild(nameInp);
+    header.appendChild(rmCard);
+    card.appendChild(header);
+
+    var valList = document.createElement('div');
+    valList.className = 'struct-value-list folder-var-values';
+    ((fvar && fvar.values) || []).forEach(function(v) { addStructValueRow(valList, v); });
+    card.appendChild(valList);
+
+    var addValBtn = document.createElement('button');
+    addValBtn.className = 'flat-btn';
+    addValBtn.type = 'button';
+    addValBtn.textContent = '+ Add value';
+    addValBtn.addEventListener('click', function() { addStructValueRow(valList, '').focus(); });
+    card.appendChild(addValBtn);
+
+    container.appendChild(card);
+    return nameInp;
+}
+
+function collectFolderVars() {
+    var vars = [];
+    document.querySelectorAll('#s-fvar-list .folder-var-card').forEach(function(card) {
+        var name = card.querySelector('.fvar-name').value.trim();
+        if (!name) return;
+        var values = [];
+        card.querySelectorAll('.struct-value-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            if (v) values.push(v);
+        });
+        vars.push({ name: name, values: values });
     });
-    return vals;
+    return vars;
 }
 
 function collectStructPresets() {
@@ -1977,18 +2171,11 @@ function collectStructPresets() {
     var dateFmt = document.getElementById('s-date-format');
     if (dateFmt) dateFmt.addEventListener('input', updateDateSample);
 
-    var camAdd = document.getElementById('s-camera-add');
-    if (camAdd) camAdd.addEventListener('click', function() {
-        addStructValueRow(document.getElementById('s-camera-list'), '').focus();
+    var fvarAdd = document.getElementById('s-fvar-add');
+    if (fvarAdd) fvarAdd.addEventListener('click', function() {
+        addFolderVarCard(document.getElementById('s-fvar-list'), null).focus();
     });
-    var typeAdd = document.getElementById('s-type-add');
-    if (typeAdd) typeAdd.addEventListener('click', function() {
-        addStructValueRow(document.getElementById('s-type-list'), '').focus();
-    });
-    var recAdd = document.getElementById('s-recorder-add');
-    if (recAdd) recAdd.addEventListener('click', function() {
-        addStructValueRow(document.getElementById('s-recorder-list'), '').focus();
-    });
+
     var presetAdd = document.getElementById('s-preset-add');
     if (presetAdd) presetAdd.addEventListener('click', function() {
         addStructPresetRow(document.getElementById('s-preset-list'), null);
@@ -2003,14 +2190,11 @@ function collectStructPresets() {
         if (!currentSettings) return;
         currentSettings.folder_var_date_format =
             document.getElementById('s-date-format').value.trim() || '%Y-%m-%d';
-        currentSettings.folder_shoot_day = document.getElementById('s-shoot-day').value.trim();
-        currentSettings.folder_cameras   = collectStructValues('s-camera-list');
-        currentSettings.folder_types     = collectStructValues('s-type-list');
-        currentSettings.folder_recorders = collectStructValues('s-recorder-list');
-        currentSettings.folder_presets   = collectStructPresets();
-        // Preset list may have changed — rebuild every job's template dropdown.
+        currentSettings.folder_shoot_day  = document.getElementById('s-shoot-day').value.trim();
+        currentSettings.folder_variables  = collectFolderVars();
+        currentSettings.folder_presets    = collectStructPresets();
         jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
-            syncJobTemplateSelect(card);
+            syncJobTemplateInput(card);
         });
         await persistSettings();
         settingsOverlay.classList.add('hidden');

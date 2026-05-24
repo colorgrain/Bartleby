@@ -203,7 +203,7 @@
     <div class="settings-sidebar">
       <button class="settings-tab-btn active" data-tab="appearance">Appearance</button>
       <button class="settings-tab-btn" data-tab="report">Report tweaks</button>
-      <button class="settings-tab-btn" data-tab="structure">Structure</button>
+      <button class="settings-tab-btn" data-tab="structure">Variables</button>
       <button class="settings-tab-btn" data-tab="about">About</button>
     </div>
 
@@ -291,11 +291,11 @@
         </div>
       </div>
 
-      <!-- ── Structure tab ───────────────────────────────────────────────── -->
+      <!-- ── Variables tab ────────────────────────────────────────────────── -->
       <div class="settings-panel hidden" id="stab-structure">
         <div class="tab-scroll-card">
 
-          <div class="modal-section-label">Variables</div>
+          <div class="modal-section-label">Built-in variables</div>
           <div class="card modal-card">
             <label class="struct-field">
               <span class="struct-field-label">%date format</span>
@@ -304,34 +304,20 @@
             <div class="struct-hint" id="s-date-sample"></div>
             <label class="struct-field">
               <span class="struct-field-label">%day — shooting day</span>
-              <input class="modal-input" id="s-shoot-day" type="text" placeholder="e.g. J01, Day 1 — set each day" />
+              <input class="modal-input" id="s-shoot-day" type="text" placeholder="e.g. J01, Day 1" />
             </label>
             <div class="struct-hint">%project resolves to the Report project / film title.</div>
           </div>
 
-          <div class="modal-section-label">%type values</div>
-          <div class="card modal-card">
-            <div id="s-type-list" class="struct-value-list"></div>
-            <button class="flat-btn" id="s-type-add" type="button">+ Add type</button>
-          </div>
+          <div class="modal-section-label">Custom variables</div>
+          <div id="s-fvar-list"></div>
+          <button class="flat-btn" id="s-fvar-add" type="button">+ Add variable</button>
 
-          <div class="modal-section-label">%camera values</div>
-          <div class="card modal-card">
-            <div id="s-camera-list" class="struct-value-list"></div>
-            <button class="flat-btn" id="s-camera-add" type="button">+ Add camera</button>
-          </div>
-
-          <div class="modal-section-label">%recorder values</div>
-          <div class="card modal-card">
-            <div id="s-recorder-list" class="struct-value-list"></div>
-            <button class="flat-btn" id="s-recorder-add" type="button">+ Add recorder</button>
-          </div>
-
-          <div class="modal-section-label">Presets</div>
+          <div class="modal-section-label" style="margin-top:10px">Presets</div>
           <div class="card modal-card">
             <div id="s-preset-list" class="struct-preset-list"></div>
             <button class="flat-btn" id="s-preset-add" type="button">+ Add preset</button>
-            <div class="struct-hint">Tokens: %date %day %project %camera %type %recorder — and #presetName to embed another preset.</div>
+            <div class="struct-hint">Use %date, %day, %project or any custom %variable — and #presetName to embed another preset.</div>
           </div>
 
         </div>
@@ -417,20 +403,7 @@
     <div class="modal-section-label" style="margin-top:6px">Template</div>
     <input id="structure-template" class="modal-input" type="text"
            placeholder="e.g. %date/%camera  or  #IMAGE" spellcheck="false" />
-    <div class="struct-dropdowns">
-      <label class="struct-field" id="structure-type-field">
-        <span class="struct-field-label">%type</span>
-        <select id="structure-type" class="modal-input"></select>
-      </label>
-      <label class="struct-field" id="structure-camera-field">
-        <span class="struct-field-label">%camera</span>
-        <select id="structure-camera" class="modal-input"></select>
-      </label>
-      <label class="struct-field" id="structure-recorder-field">
-        <span class="struct-field-label">%recorder</span>
-        <select id="structure-recorder" class="modal-input"></select>
-      </label>
-    </div>
+    <div class="struct-dropdowns" id="structure-var-dropdowns"></div>
     <div class="modal-section-label" style="margin-top:6px">Resolved path</div>
     <div class="struct-preview" id="structure-preview"></div>
     <div class="modal-btn-row">
@@ -440,6 +413,9 @@
     </div>
   </div>
 </div>
+
+<!-- Template-field autocomplete popup (singleton, positioned by JS) -->
+<div id="tmpl-ac" class="tmpl-ac hidden"></div>
 
 <script src="main.js"></script>
 </div><!-- /#app-shell -->

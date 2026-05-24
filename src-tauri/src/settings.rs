@@ -60,8 +60,16 @@
 pub struct FolderPreset {
     /// Identifier used in `#name` references (matched case-insensitively).
     pub name: String,
-    /// The template body, e.g. `IMAGE/%date/%camera`.
+    /// The template body, e.g. `IMAGE/%date/%cam`.
     pub template: String,
+}
+
+/// A user-defined template variable: a name (used as `%name` in templates) and
+/// a list of possible values the DIT chooses from per job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct FolderVar {
+    pub name:   String,
+    pub values: Vec<String>,
 }
 
 // ── Main struct ───────────────────────────────────────────────────────────────
@@ -279,18 +287,19 @@ pub struct Settings {
     /// Resolves the `%day` token. Empty until the DIT sets it.
     pub folder_shoot_day: String,
 
-    /// Camera values offered in the per-job structure popup (resolves `%camera`).
-    pub folder_cameras: Vec<String>,
-
-    /// Type values offered in the per-job structure popup (resolves `%type`).
-    pub folder_types: Vec<String>,
-
-    /// Recorder values offered in the per-job structure popup (resolves
-    /// `%recorder`) — typically sound-recorder identifiers.
-    pub folder_recorders: Vec<String>,
+    /// User-defined template variables, each with a name and a list of values.
+    /// Replaces the old fixed `folder_cameras/types/recorders` fields.
+    #[serde(default)]
+    pub folder_variables: Vec<FolderVar>,
 
     /// Named folder-structure presets, callable from a template via `#presetName`.
     pub folder_presets: Vec<FolderPreset>,
+
+    // Legacy fields — kept for forward-compat deserialization of old settings files.
+    // No longer written or used by the application.
+    #[serde(default)] pub folder_cameras:   Vec<String>,
+    #[serde(default)] pub folder_types:     Vec<String>,
+    #[serde(default)] pub folder_recorders: Vec<String>,
 }
 
 // ── Default values ────────────────────────────────────────────────────────────
@@ -306,8 +315,7 @@ pub struct Settings {
 /// ### Design choices
 /// - All report columns are `true`: the user sees everything from the start and
 ///   can disable what they do not need.
-/// - Only `.MD5` is enabled by default. `.CSV` and `.PDF` are opt-in because
-///   they add processing time and produce extra output files not every workflow needs.
+/// - All report outputs (`.CSV`, `.PDF`, `.HTML`, `.MHL`) are enabled by default.
 /// - `open_dest = false`: avoids opening unexpected file manager windows on copy completion.
 /// - Default theme: `"default"` (follow the OS light/dark setting).
 /// - Default skin: `"mint-y-aqua"` (Linux Mint native; neutral on other platforms).
@@ -339,10 +347,10 @@ impl Default for Settings {
             col_md5:         true,
 
             hash_algo: "md5".to_string(), // MD5 by default — universal and fast enough
-            gen_csv:   false,  // opt-in — adds processing time and an extra output file
-            gen_pdf:   false,  // opt-in — adds processing time and an extra output file
-            gen_html:  false,  // opt-in — produces a self-contained HTML report
-            gen_mhl:   false,  // opt-in — ASC MHL hash list for professional workflows
+            gen_csv:   true,
+            gen_pdf:   true,
+            gen_html:  true,
+            gen_mhl:   true,
             open_dest: false,  // opt-in — avoids unexpected file manager windows
 
             theme: "default".to_string(), // follow the OS light/dark setting
@@ -354,10 +362,11 @@ impl Default for Settings {
             // Folder-structure templates — empty/neutral defaults; opt-in feature.
             folder_var_date_format: "%Y-%m-%d".to_string(),
             folder_shoot_day:       String::new(),
+            folder_variables:       Vec::new(),
+            folder_presets:         Vec::new(),
             folder_cameras:         Vec::new(),
             folder_types:           Vec::new(),
             folder_recorders:       Vec::new(),
-            folder_presets:         Vec::new(),
         }
     }
 }

@@ -1793,16 +1793,9 @@ fn generate_reports(
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
     let col_label = hash_algo.col_label();
 
-    // When "copy folder itself into destination" is on, the copied files live
-    // under `{dst}/{src_name}/…` while the checksum and MHL files sit at `{dst}`.
-    // Their recorded relative paths must therefore carry the `{src_name}/`
-    // prefix, otherwise a verifier resolves them against `{dst}` and reports
-    // every file as missing.
-    let path_prefix = if copy_as_subfolder {
-        format!("{}/", src_name)
-    } else {
-        String::new()
-    };
+    // Timestamp shared across all report files generated in this operation (UTC).
+    let now_utc   = chrono::Utc::now();
+    let timestamp = format!("{}_{}", now_utc.format("%Y-%m-%d"), now_utc.format("%H%M%SZ"));
 
     // ── MHL: scan source for generational chain (once, before the dst loop) ──
     let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
@@ -1818,9 +1811,35 @@ fn generate_reports(
     };
 
     for dst in destinations {
+        // report_name = the destination folder name (last component of dst).
+        // When copy_as_subfolder: dst is the parent, subfolder name = src_name.
+        // When not:               dst is the folder itself, possibly renamed via template.
+        let report_name: String = if copy_as_subfolder {
+            src_name.to_string()
+        } else {
+            dst.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| src_name.to_string())
+        };
+
+        // report_dir = where checksum / CSV / PDF / HTML / ascmhl files are written.
+        // Always sits NEXT TO the destination folder, not inside it:
+        //   copy_as_subfolder=true  → dst already is the parent  → use dst
+        //   copy_as_subfolder=false → dst is the folder itself   → use dst.parent()
+        let report_dir: &Path = if copy_as_subfolder {
+            dst
+        } else {
+            dst.parent().unwrap_or(dst)
+        };
+
+        // Relative path prefix recorded inside checksum and MHL files.
+        // Reports sit in report_dir; files sit in report_dir/{report_name}/…
+        // so every entry needs the "{report_name}/" prefix to resolve correctly.
+        let path_prefix = format!("{}/", report_name);
+
         // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
         if let Some(ext) = hash_algo.checksum_ext() {
-            let p = dst.join(format!("{}_checksum.{}", src_name, ext));
+            let p = report_dir.join(format!("{}_{}.{}", report_name, timestamp, ext));
             match write_checksum(&p, meta_entries, hashes, &path_prefix) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
@@ -1834,10 +1853,10 @@ fn generate_reports(
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(dst, src_name, src, total_bytes, destinations,
+            match metadata::write_csv(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                       &csv_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
-                    dst.join(format!("{}_report.csv", src_name)).display())),
+                    report_dir.join(format!("{}_{}.csv", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
@@ -1850,10 +1869,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(dst, src_name, src, total_bytes, destinations,
+            match pdf_report::write_pdf(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                         &pdf_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    dst.join(format!("{}_report.pdf", src_name)).display())),
+                    report_dir.join(format!("{}_{}.pdf", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
             }
         }
@@ -1866,10 +1885,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(dst, src_name, src, total_bytes, destinations,
+            match html_report::write_html(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                           &html_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    dst.join(format!("{}_report.html", src_name)).display())),
+                    report_dir.join(format!("{}_{}.html", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
             }
         }
@@ -1885,13 +1904,13 @@ fn generate_reports(
 
                 // Determine generation number; prompt if a previous MHL exists.
                 let (generation, should_write) =
-                    match mhl_report::find_dst_mhl_for_src(dst, src_name) {
+                    match mhl_report::find_dst_mhl_for_src(report_dir, &report_name) {
                         Some((existing_path, existing_gen)) => {
                             let existing_name = existing_path
                                 .file_name().unwrap_or_default()
                                 .to_string_lossy().to_string();
                             let _ = tx.send(Msg::MhlConflict {
-                                dst:          dst.display().to_string(),
+                                dst:          report_dir.display().to_string(),
                                 existing_mhl: existing_name,
                             });
                             match reply_rx.recv().unwrap_or(Reply::Cancel) {
@@ -1923,9 +1942,9 @@ fn generate_reports(
                     };
 
                 if should_write {
-                    match mhl_report::write_mhl(dst, src_name, src, &mhl_entries, mhl_elem,
+                    match mhl_report::write_mhl(report_dir, &report_name, src, &mhl_entries, mhl_elem,
                                                 mhl_comment, location, settings,
-                                                generation, src_mhl_ref.as_ref()) {
+                                                generation, now_utc, src_mhl_ref.as_ref()) {
                         Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
                         Err(e) => log(tx, &format!("✖  MHL error: {}\n", e)),
                     }

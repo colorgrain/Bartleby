@@ -4,8 +4,9 @@
 //! media workflows. One MHL file is written per destination.
 //!
 //! ## File location
-//! `{dst}/ascmhl/{NNNN}_{src_name}_{date}_{time}Z.mhl`
-//! where NNNN is the generation number (auto-incremented).
+//! `{dst}/ascmhl/{NNNN}_{report_name}_{date}_{time}Z.mhl`
+//! where NNNN is the generation number (auto-incremented) and report_name
+//! is the destination folder name (not the source device name).
 //!
 //! ## Generational chain
 //! If the source directory already has an MHL, the new MHL references it
@@ -78,8 +79,8 @@ pub fn scan_ascmhl_dir(dir: &Path) -> Option<(PathBuf, u32)> {
 /// Find the highest-generation MHL in `{dst}/ascmhl/` whose filename contains
 /// `_{src_name}_` — i.e., a previous copy of the same source to this destination.
 /// Returns `(path, generation)` or `None`.
-pub fn find_dst_mhl_for_src(dst: &Path, src_name: &str) -> Option<(PathBuf, u32)> {
-    let needle = format!("_{}_", src_name);
+pub fn find_dst_mhl_for_src(dst: &Path, report_name: &str) -> Option<(PathBuf, u32)> {
+    let needle = format!("_{}_", report_name);
     let mut best: Option<(PathBuf, u32)> = None;
     for entry in std::fs::read_dir(dst.join("ascmhl")).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -110,27 +111,28 @@ pub fn hostname() -> String {
 ///
 /// ## Parameters
 /// - `dst`         : destination root directory
-/// - `src_name`    : source folder name (used in filename)
+/// - `report_name` : destination folder name (used in filename and metadata)
 /// - `entries`     : `(relative_path, hash_hex)` for each file
 /// - `hash_elem`   : XML element name for the hash (`"md5"`, `"xxh128"`, etc.)
 /// - `comment`     : per-job comment (HTML) — stripped to plain text for XML
 /// - `location`    : shooting location string
 /// - `settings`    : user preferences (name, company, email, phone)
 /// - `generation`  : file sequence number (written as the `NNNN` filename prefix)
+/// - `now_utc`     : timestamp shared across all report files for this copy operation
 /// - `src_ref`     : optional parent MHL reference for the generational chain
 pub fn write_mhl(
-    dst:        &Path,
-    src_name:   &str,
-    _src_path:  &Path,
-    entries:    &[(String, String)],
-    hash_elem:  &str,
-    comment:    &str,
-    location:   &str,
-    settings:   &Settings,
-    generation: u32,
-    src_ref:    Option<&MhlRef>,
+    dst:         &Path,
+    report_name: &str,
+    _src_path:   &Path,
+    entries:     &[(String, String)],
+    hash_elem:   &str,
+    comment:     &str,
+    location:    &str,
+    settings:    &Settings,
+    generation:  u32,
+    now_utc:     DateTime<Utc>,
+    src_ref:     Option<&MhlRef>,
 ) -> io::Result<PathBuf> {
-    let now_utc:   DateTime<Utc>   = Utc::now();
     let date_str   = now_utc.format("%Y-%m-%d").to_string();
     let time_str   = now_utc.format("%H%M%SZ").to_string();
     let finish_iso = now_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -138,7 +140,7 @@ pub fn write_mhl(
     let dir = dst.join("ascmhl");
     std::fs::create_dir_all(&dir)?;
 
-    let filename = format!("{:04}_{}_{}_{}.mhl", generation, src_name, date_str, time_str);
+    let filename = format!("{:04}_{}_{}_{}.mhl", generation, report_name, date_str, time_str);
     let path     = dir.join(&filename);
     let mut f    = std::fs::File::create(&path)?;
 

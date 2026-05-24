@@ -690,7 +690,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   flex-wrap:   wrap;
 }
 .job-hash-select,
-.job-template-select {
+.job-template-input {
   font-size:     13px;
   font-family:   inherit;
   color:         var(--text);
@@ -698,13 +698,41 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   border:        1px solid var(--input-border);
   border-radius: var(--radius-sm);
   padding:       2px 6px;
-  cursor:        pointer;
   outline:       none;
 }
+.job-hash-select { cursor: pointer; }
 .job-hash-select:focus,
-.job-template-select:focus { border-color: var(--input-focus); }
-/* Folder-structure template picker — starts the right-aligned trailing group */
-.job-template-select { margin-left: auto; max-width: 160px; }
+.job-template-input:focus { border-color: var(--input-focus); }
+/* Template text field — starts the right-aligned trailing group */
+.job-template-input { margin-left: auto; width: 120px; max-width: 180px; }
+
+/* ── Template autocomplete popup ─────────────────────────────────────────── */
+.tmpl-ac {
+  position:      fixed;
+  z-index:       9000;
+  background:    var(--card-bg);
+  border:        1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow:    0 4px 14px rgba(0,0,0,0.22);
+  max-height:    200px;
+  overflow-y:    auto;
+  min-width:     140px;
+}
+.tmpl-ac-item {
+  display:     block;
+  width:       100%;
+  text-align:  left;
+  padding:     5px 10px;
+  font-size:   12px;
+  font-family: inherit;
+  color:       var(--text);
+  background:  transparent;
+  border:      none;
+  cursor:      pointer;
+  white-space: nowrap;
+}
+.tmpl-ac-item:hover,
+.tmpl-ac-item.ac-active { background: var(--accent); color: var(--accent-fg); }
 
 /* ── Buttons row ─────────────────────────────────────────────────────────────
    Bottom bar: MD5/XXH3/CSV/PDF checkboxes + Open destinations + Copy button.
@@ -1331,6 +1359,28 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   gap:         6px;
 }
 .struct-preset-row .struct-preset-name { flex: 0 0 130px; }
+
+/* ── Custom variable cards (settings Variables tab) ──────────────────────── */
+.folder-var-card {
+  margin-bottom: 6px;
+}
+.folder-var-card-header {
+  display:       flex;
+  align-items:   center;
+  gap:           4px;
+  margin-bottom: 6px;
+}
+.folder-var-prefix {
+  font-size:   13px;
+  font-weight: 600;
+  color:       var(--accent);
+  flex-shrink: 0;
+}
+.fvar-name {
+  flex:      1;
+  min-width: 0;
+}
+.folder-var-values { margin-top: 4px; }
 
 /* ── Structure popup ─────────────────────────────────────────────────────── */
 .structure-modal { width: 480px; }
