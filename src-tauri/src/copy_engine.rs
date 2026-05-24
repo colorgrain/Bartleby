@@ -680,6 +680,25 @@ pub fn run(
 
     log(&tx, &format!("── Phase 1 — Copy {} ──────────────────────\n", ts(&start)));
 
+    // Create all source subdirectories on every destination, including empty ones.
+    // The per-file create_dir_all below only covers parents of copied files,
+    // so empty directories would otherwise be silently skipped.
+    if let Ok(src_dirs) = collect_dirs(&src) {
+        for src_dir in &src_dirs {
+            let rel = src_dir.strip_prefix(&src).unwrap_or(src_dir);
+            for dst in &destinations {
+                let dst_dir = if copy_as_subfolder {
+                    dst.join(&src_name).join(rel)
+                } else {
+                    dst.join(rel)
+                };
+                if let Err(e) = fs::create_dir_all(&dst_dir) {
+                    log(&tx, &format!("  △  mkdir {}: {}\n", dst_dir.display(), e));
+                }
+            }
+        }
+    }
+
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
     let mut copy_errors = 0usize;
 
@@ -2006,6 +2025,24 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
         else             { out.push(path); }                  // add files to accumulator
     }
     Ok(()) // explicit Ok(()) : this function produces no meaningful value on success
+}
+
+/// Collects all subdirectories under `dir` recursively (not including `dir` itself).
+fn collect_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_dirs_recursive(dir, &mut out)?;
+    Ok(out)
+}
+
+fn collect_dirs_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            out.push(path.clone());
+            collect_dirs_recursive(&path, out)?;
+        }
+    }
+    Ok(())
 }
 
 // ── Log and ETA ──────────────────────────────────────────────────────────────
