@@ -470,7 +470,10 @@ pub fn run(
     let non_empty: Vec<String> = destinations.iter()
         .filter(|d| {
             let check = if copy_as_subfolder { d.join(&src_name) } else { d.to_path_buf() };
-            fs::read_dir(&check).map(|mut r| r.next().is_some()).unwrap_or(false)
+            fs::read_dir(&check)
+                .map(|entries| entries.filter_map(|e| e.ok())
+                    .any(|e| !is_os_system_entry(&e.file_name().to_string_lossy())))
+                .unwrap_or(false)
         })
         .map(|d| d.to_string_lossy().to_string())
         .collect();
@@ -766,17 +769,14 @@ pub fn run(
         }
         if any_error { copy_errors += 1; continue; }
 
-        // On non-Linux: fsync each destination file immediately after copy.
-        // Per-file fsync gives crash-safety granularity: if the process is
-        // killed mid-transfer, every file copied so far is safely on disk.
-        //
-        // On Linux: per-file fsync is intentionally omitted here. A single
-        // syncfs() call after *all* files are copied (see below) replaces
-        // N×M fsync calls. This is far more efficient on FUSE filesystems
-        // where every fsync triggers a round-trip through the FUSE daemon.
-        // syncfs(2) provides the same durability guarantee: all dirty pages
-        // on the filesystem are flushed to physical storage in one pass.
-        #[cfg(not(target_os = "linux"))]
+        // macOS: fsync each destination file immediately after copy.
+        // Per-file fsync gives crash-safety granularity on macOS (APFS/HFS+
+        // where fsync is cheap). Linux uses a single syncfs() after all files
+        // (see below). Windows uses a batch flush after all files (see below)
+        // — per-file FlushFileBuffers on FAT/exFAT is catastrophically slow
+        // because each call forces a FAT-chain + directory-entry metadata write,
+        // serialising copy→flush→copy→flush and dropping throughput ~13×.
+        #[cfg(target_os = "macos")]
         {
             let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
                 .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
@@ -835,6 +835,37 @@ pub fn run(
             }
             // dev == 0 or already synced: skip without logging (normal case).
         }
+    }
+
+    // ── Windows: single batch flush after all files are copied ───────────────
+    //
+    // Per-file FlushFileBuffers (sync_all) is skipped in the copy loop above.
+    // All file data now sits in the Windows write-back cache. We issue one
+    // parallel flush of every written file here, before Phase 2 hashing, so
+    // that FILE_FLAG_NO_BUFFERING reads in Phase 2 see on-disk data.
+    //
+    // Flushing after all copies lets the Windows cache manager write all dirty
+    // pages in a single large sequential pass — far more efficient than the
+    // per-file pattern which forces one FAT-chain + directory-entry metadata
+    // update per file, each blocking the next copy.
+    #[cfg(target_os = "windows")]
+    {
+        log(&tx, "△  Windows: flushing write cache to storage…\n");
+        let flush_paths: Vec<PathBuf> = copied.iter().flat_map(|(_, rel_str)| {
+            let rel_native = rel_str.replace('/', "\\");
+            destinations.iter().map(|dst| {
+                if copy_as_subfolder {
+                    dst.join(&src_name).join(&rel_native)
+                } else {
+                    dst.join(&rel_native)
+                }
+            }).collect::<Vec<_>>()
+        }).collect();
+        flush_paths.par_iter().for_each(|path| {
+            if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+                let _ = f.sync_all();
+            }
+        });
     }
 
     log(&tx, &format!("\n── Phase 1 complete {} ─────────────────────\n", ts(&start)));
@@ -1992,6 +2023,27 @@ fn write_checksum(
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────
+
+/// Returns `true` for OS-managed system entries that appear on drive roots
+/// regardless of user content: Windows system folders (`System Volume Information`,
+/// `$RECYCLE.BIN`, …) and macOS volume metadata (`.Spotlight-V100`, …).
+///
+/// Used to ignore these entries when deciding whether a destination is "occupied"
+/// and whether to prompt the user — Windows creates them automatically the moment
+/// a writable volume is mounted, even on a freshly formatted drive.
+fn is_os_system_entry(name: &str) -> bool {
+    const SYSTEM_NAMES: &[&str] = &[
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "$Recycle.Bin",
+        "RECYCLER",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".Trashes",
+        ".TemporaryItems",
+    ];
+    SYSTEM_NAMES.iter().any(|s| name.eq_ignore_ascii_case(s))
+}
 
 /// Recursively collects all **files** (not directories) under `dir`.
 ///
