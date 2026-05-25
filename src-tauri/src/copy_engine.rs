@@ -2072,11 +2072,13 @@ fn collect_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
 /// `entry?.path()` : `entry` is `io::Result<DirEntry>`, `?` unwraps or returns.
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() { collect_recursive(&path, out)?; } // recurse into subdirs
-        else             { out.push(path); }                  // add files to accumulator
+        let entry = entry?;
+        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        let path = entry.path();
+        if path.is_dir() { collect_recursive(&path, out)?; }
+        else             { out.push(path); }
     }
-    Ok(()) // explicit Ok(()) : this function produces no meaningful value on success
+    Ok(())
 }
 
 /// Collects all subdirectories under `dir` recursively (not including `dir` itself).
@@ -2088,7 +2090,9 @@ fn collect_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn collect_dirs_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = entry?;
+        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        let path = entry.path();
         if path.is_dir() {
             out.push(path.clone());
             collect_dirs_recursive(&path, out)?;
