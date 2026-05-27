@@ -276,7 +276,8 @@ fn sanitize_comment(html: &str) -> String {
 
 pub fn write_html(
     dst_dir:         &Path,
-    src_name:        &str,
+    report_name:     &str,
+    timestamp:       &str,
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
@@ -286,7 +287,7 @@ pub fn write_html(
     comment:         &str,
     location:        &str,
 ) -> io::Result<()> {
-    let out_path = dst_dir.join(format!("{}_report.html", src_name));
+    let out_path = dst_dir.join(format!("{}_{}.html", report_name, timestamp));
     let mut out  = std::fs::File::create(&out_path)?;
 
     let now = Local::now().format("%Y-%m-%d at %I:%M %p").to_string();
@@ -340,7 +341,7 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     write!(out, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")?;
     write!(out, "<meta charset=\"UTF-8\">\n")?;
     write!(out, "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n")?;
-    write!(out, "<title>{} — Bartleby report</title>\n", he(src_name))?;
+    write!(out, "<title>{} — Bartleby report</title>\n", he(report_name))?;
     write!(out, "<style>{}</style>\n</head>\n<body>\n", css)?;
 
     // ── Header ────────────────────────────────────────────────────────────────
@@ -373,7 +374,7 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     let project_display = if !settings.project_title.is_empty() {
         settings.project_title.to_uppercase()
     } else {
-        src_name.to_uppercase()
+        report_name.to_uppercase()
     };
     write!(out, "<h1>{}</h1>\n", he(&project_display))?;
     write!(out, "<p class=\"report-line\">Backup Report &ndash; {}</p>\n", he(&now))?;

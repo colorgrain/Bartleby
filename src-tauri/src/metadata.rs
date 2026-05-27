@@ -531,7 +531,8 @@ fn html_to_plain(html: &str) -> String {
 
 pub fn write_csv(
     dst_dir:         &Path,
-    src_name:        &str,
+    report_name:     &str,
+    timestamp:       &str,
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
@@ -543,7 +544,7 @@ pub fn write_csv(
 ) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = dst_dir.join(format!("{}_report.csv", src_name));
+    let path = dst_dir.join(format!("{}_{}.csv", report_name, timestamp));
     let mut f = std::fs::File::create(path)?;
 
     write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment, location)?;

@@ -252,7 +252,7 @@ function applySkin(skin, save) {
 
 // Hamburger → open settings (Appearance tab active by default).
 menuBtn.addEventListener('click', function() {
-    if (currentSettings) populateReportFields();
+    if (currentSettings) { populateReportFields(); populateStructureFields(); }
     settingsOverlay.classList.remove('hidden');
 });
 
@@ -443,17 +443,27 @@ function addJob() {
     var headerRow = document.createElement('div');
     headerRow.className = 'job-header-row';
 
-    var label = document.createElement('label');
-    label.className = 'group-label job-label';
+    var label = document.createElement('input');
+    label.type = 'text';
+    label.className = 'job-label job-name-input';
+    label.placeholder = 'Job';
+    label.title = 'Job name (optional)';
+    label.spellcheck = false;
 
     var removeJobBtn = document.createElement('button');
     removeJobBtn.className = 'icon-btn icon-btn-danger job-remove-btn';
     removeJobBtn.title = 'Remove this job';
     removeJobBtn.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
     removeJobBtn.style.display = 'none';
-    removeJobBtn.addEventListener('click', function() {
+    removeJobBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var wasSelected = jobCard.classList.contains('job-selected');
         jobCard.remove();
         renumberJobs();
+        if (wasSelected) {
+            setSelectedJob(jobsContainer.querySelector('.job-group') || null);
+        }
+        refreshPreviewSoon();
     });
 
     headerRow.appendChild(label);
@@ -576,9 +586,28 @@ function addJob() {
     hashSel.value = defaultHashAlgo;
     jobOptsRow.appendChild(hashSel);
 
-    jobOptsRow.appendChild(makeJobToggle('job-chk-csv',  '.CSV',  defaultGenCsv));
-    jobOptsRow.appendChild(makeJobToggle('job-chk-pdf',  '.PDF',  defaultGenPdf));
-    jobOptsRow.appendChild(makeJobToggle('job-chk-html', '.HTML', defaultGenHtml));
+    var csvLbl  = makeJobToggle('job-chk-csv',  '.CSV',  defaultGenCsv);
+    var pdfLbl  = makeJobToggle('job-chk-pdf',  '.PDF',  defaultGenPdf);
+    var htmlLbl = makeJobToggle('job-chk-html', '.HTML', defaultGenHtml);
+    jobOptsRow.appendChild(csvLbl);
+    jobOptsRow.appendChild(pdfLbl);
+    jobOptsRow.appendChild(htmlLbl);
+
+    csvLbl.querySelector('.job-chk-csv').addEventListener('change', function() {
+        defaultGenCsv = this.checked;
+        currentSettings.gen_csv = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
+    pdfLbl.querySelector('.job-chk-pdf').addEventListener('change', function() {
+        defaultGenPdf = this.checked;
+        currentSettings.gen_pdf = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
+    htmlLbl.querySelector('.job-chk-html').addEventListener('change', function() {
+        defaultGenHtml = this.checked;
+        currentSettings.gen_html = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
 
     var mhlLbl = makeJobToggle('job-chk-mhl', '.MHL', defaultGenMhl);
     var mhlChkInit = mhlLbl.querySelector('.job-chk-mhl');
@@ -587,6 +616,12 @@ function addJob() {
         mhlLbl.classList.add('toggle-disabled');
     }
     jobOptsRow.appendChild(mhlLbl);
+
+    mhlChkInit.addEventListener('change', function() {
+        defaultGenMhl = this.checked;
+        currentSettings.gen_mhl = this.checked;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
+    });
 
     hashSel.addEventListener('change', function() {
         var mhlChkEl = jobOptsRow.querySelector('.job-chk-mhl');
@@ -601,6 +636,24 @@ function addJob() {
     commentBtn.title = 'Add a note (shown in reports)';
     commentBtn.textContent = 'T';
     commentBtn.addEventListener('click', function() { openCommentModal(jobCard); });
+
+    var templateInput = document.createElement('input');
+    templateInput.type = 'text';
+    templateInput.className = 'job-template-input';
+    templateInput.placeholder = '#preset or %var';
+    templateInput.title = 'Folder structure: type # for presets, % for variables';
+    templateInput.spellcheck = false;
+    attachTemplateAutocomplete(templateInput, jobCard);
+
+    var structureBtn = document.createElement('button');
+    structureBtn.className = 'job-structure-btn';
+    structureBtn.title = 'Folder structure for this job';
+    structureBtn.innerHTML = '<svg><use href="#ico-folder-tree"/></svg>';
+    structureBtn.addEventListener('click', function() { openStructurePopup(jobCard); });
+
+    // Trailing group after the MHL toggle: template / structure / note.
+    jobOptsRow.appendChild(templateInput);
+    jobOptsRow.appendChild(structureBtn);
     jobOptsRow.appendChild(commentBtn);
 
     card.appendChild(jobOptsRow);
@@ -624,6 +677,12 @@ function addJob() {
     jobsContainer.appendChild(jobCard);
     addDestRowToJob(destListEl);
     renumberJobs();
+
+    jobCard.addEventListener('click', function() {
+        if (jobCard.isConnected) setSelectedJob(jobCard);
+    });
+    setSelectedJob(jobCard);
+    refreshPreviewSoon();
 }
 
 function renumberJobs() {
@@ -631,7 +690,7 @@ function renumberJobs() {
     var count = cards.length;
     cards.forEach(function(card, idx) {
         var lbl = card.querySelector('.job-label');
-        if (lbl) lbl.textContent = count > 1 ? 'Job ' + (idx + 1) : 'Job';
+        if (lbl) lbl.placeholder = count > 1 ? 'Job ' + (idx + 1) : 'Job';
         var btn = card.querySelector('.job-remove-btn');
         if (btn) btn.style.display = count > 1 ? '' : 'none';
     });
@@ -642,6 +701,7 @@ function getJobs() {
     var result = [];
     jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
         var srcEl       = card.querySelector('.job-src-input');
+        var nameEl      = card.querySelector('.job-label');
         var subfolderEl = card.querySelector('.job-subfolder-chk');
         var hashSelEl   = card.querySelector('.job-hash-select');
         var csvEl       = card.querySelector('.job-chk-csv');
@@ -655,6 +715,7 @@ function getJobs() {
         result.push({
             src:             src,
             dsts:            dsts,
+            name:            nameEl ? nameEl.value.trim() : '',
             copyAsSubfolder: subfolderEl ? subfolderEl.checked : false,
             hashAlgo:        hashSelEl   ? hashSelEl.value     : 'none',
             genCsv:          csvEl       ? csvEl.checked       : false,
@@ -664,6 +725,8 @@ function getJobs() {
             comment:         card.dataset.comment     || '',
             mhl_comment:     card.dataset.mhl_comment || '',
             location:        card.dataset.location    || '',
+            template:        card.dataset.template    || '',
+            jobvars:         (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
         });
     });
     return result;
@@ -761,6 +824,22 @@ async function launchCopy() {
         if (!jobs[i].dsts.length) {
             alert(prefix + 'lease add at least one destination.');
             return;
+        }
+    }
+
+    // Resolve per-job folder templates: rewrite each destination to
+    // root + '/' + <resolved template>. The copy engine then builds the full
+    // hierarchy via create_dir_all — no backend change needed.
+    for (var i = 0; i < jobs.length; i++) {
+        var res = resolveTemplate(jobs[i]);
+        if (res.bad && res.bad.length) {
+            var jp = multi ? 'Job ' + (i + 1) + ': ' : '';
+            alert(jp + 'the folder template has unresolved tokens: ' + res.bad.join(', ') +
+                  '\n\nFix it in the job structure popup or in Settings → Structure.');
+            return;
+        }
+        if (res.path) {
+            jobs[i].dsts = jobs[i].dsts.map(function(d) { return joinPath(d, res.path); });
         }
     }
 
@@ -1082,7 +1161,7 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
     document.addEventListener('mousemove', function(e) {
         if (!resizing) return;
         var rect = panels.getBoundingClientRect();
-        var maxW = panels.offsetWidth - 6 - 672;   /* leave ≥672px for left panel (card min-width + padding) */
+        var maxW = panels.offsetWidth - 6 - 320;   /* keep a usable minimum width for the jobs panel */
         var newW = Math.max(150, Math.min(Math.max(150, maxW), rect.right - e.clientX));
         rightPanel.style.flex  = 'none';
         rightPanel.style.width = newW + 'px';
@@ -1239,6 +1318,980 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
             doSave();
         }
     });
+})();
+
+// ══ FOLDER STRUCTURE — left side panel, templates, preview ═══════════════════
+
+// ── Path / template helpers ───────────────────────────────────────────────────
+function joinPath(a, b) {
+    if (!a) return b || '';
+    if (!b) return a;
+    return a.replace(/[\/\\]+$/, '') + '/' + b.replace(/^[\/\\]+/, '');
+}
+
+function baseName(p) {
+    var s = String(p || '').replace(/[\/\\]+$/, '');
+    var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return i >= 0 ? s.slice(i + 1) : s;
+}
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+// Minimal strftime — supports the tokens a DIT folder name realistically uses.
+function formatStrftime(fmt) {
+    var d = new Date();
+    var doy = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+    var map = {
+        Y: '' + d.getFullYear(),
+        y: ('' + d.getFullYear()).slice(-2),
+        m: pad2(d.getMonth() + 1),
+        d: pad2(d.getDate()),
+        H: pad2(d.getHours()),
+        M: pad2(d.getMinutes()),
+        S: pad2(d.getSeconds()),
+        j: ('00' + doy).slice(-3)
+    };
+    return String(fmt || '').replace(/%([A-Za-z%])/g, function(m, c) {
+        if (c === '%') return '%';
+        return (c in map) ? map[c] : m;
+    });
+}
+
+// Expand #presetName references recursively (bounded depth). Unknown presets
+// are recorded in `bad` and left literal.
+function expandPresets(tmpl, presets, depth, bad) {
+    if (depth > 8) return tmpl;
+    return String(tmpl || '').replace(/#([A-Za-z0-9_-]+)/g, function(m, name) {
+        var p = presets.find(function(pr) {
+            return pr.name && pr.name.toLowerCase() === name.toLowerCase();
+        });
+        if (!p) { bad.push(m); return m; }
+        return expandPresets(p.template, presets, depth + 1, bad);
+    });
+}
+
+// Resolve a job's folder template into a relative path.
+// Returns { path: "relative/path", bad: ["%foo", "#bar"] }.
+function resolveTemplate(job) {
+    var raw = (job && job.template ? job.template : '').trim();
+    var bad = [];
+    if (!raw) return { path: '', bad: bad };
+
+    var presets = (currentSettings && currentSettings.folder_presets) || [];
+    var tmpl = expandPresets(raw, presets, 0, bad);
+
+    var jobvars = (job && job.jobvars) || {};
+    var vars = {
+        date:    formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
+        day:     (currentSettings && currentSettings.folder_shoot_day) || '',
+        project: (currentSettings && currentSettings.project_title) || '',
+    };
+    ((currentSettings && currentSettings.folder_variables) || []).forEach(function(fv) {
+        vars[fv.name.toLowerCase()] = jobvars[fv.name.toLowerCase()] || '';
+    });
+
+    var out = tmpl.replace(/%([A-Za-z]+)/g, function(m, name) {
+        var key = name.toLowerCase();
+        if (key in vars) {
+            if (!vars[key]) { bad.push('%' + name); return '%' + name; }
+            return vars[key];
+        }
+        bad.push('%' + name);
+        return '%' + name;
+    });
+
+    out = out.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
+    bad = bad.filter(function(v, i) { return bad.indexOf(v) === i; });
+    return { path: out, bad: bad };
+}
+
+function highlightBad(text, bad) {
+    var html = escHtml(text);
+    (bad || []).forEach(function(tok) {
+        html = html.split(escHtml(tok)).join('<span class="tok-bad">' + escHtml(tok) + '</span>');
+    });
+    return html;
+}
+
+// ── Job selection ─────────────────────────────────────────────────────────────
+var selectedJobCard = null;
+
+function setSelectedJob(card) {
+    selectedJobCard = card;
+    jobsContainer.querySelectorAll('.job-group').forEach(function(c) {
+        c.classList.toggle('job-selected', c === card);
+    });
+}
+
+// Sync the per-job template text field from card.dataset.template (e.g. after popup OK/cancel).
+function syncJobTemplateInput(card) {
+    if (!card) return;
+    var inp = card.querySelector('.job-template-input');
+    if (inp) inp.value = card.dataset.template || '';
+}
+
+// Refresh the preview tab when jobs/destinations change.
+jobsContainer.addEventListener('input', function() { refreshPreviewSoon(); });
+
+// ── Template field autocomplete ───────────────────────────────────────────────
+(function() {
+    var acEl        = document.getElementById('tmpl-ac');
+    var acBlurTimer = null;
+    var acPending   = false; // true while showing value sub-list for a variable
+
+    function hide() {
+        acEl.classList.add('hidden');
+        acEl.innerHTML = '';
+        acPending = false;
+    }
+
+    function position(input) {
+        var r = input.getBoundingClientRect();
+        acEl.style.left     = r.left + 'px';
+        acEl.style.top      = (r.bottom + 2) + 'px';
+        acEl.style.minWidth = r.width + 'px';
+    }
+
+    function show(input, items, onSelect) {
+        acEl.innerHTML = '';
+        if (!items.length) { hide(); return; }
+        items.forEach(function(item) {
+            var btn = document.createElement('button');
+            btn.className   = 'tmpl-ac-item';
+            btn.textContent = item;
+            btn.addEventListener('mousedown', function(e) {
+                e.preventDefault(); // block blur so click registers
+                onSelect(item);
+            });
+            acEl.appendChild(btn);
+        });
+        position(input);
+        acEl.classList.remove('hidden');
+    }
+
+    // Return { trigger, word, start, end } for a '#' or '%' token at the cursor,
+    // or null if the cursor isn't inside such a token.
+    function tokenAtCursor(input) {
+        var val = input.value;
+        var pos = input.selectionStart;
+        var i = pos - 1;
+        while (i >= 0 && /[A-Za-z0-9_-]/.test(val[i])) i--;
+        if (i < 0 || (val[i] !== '#' && val[i] !== '%')) return null;
+        return { trigger: val[i], word: val.slice(i + 1, pos), start: i, end: pos };
+    }
+
+    // Replace the token at [start,end) with text; return the new [start,end).
+    function replaceToken(input, text, start, end) {
+        var v = input.value;
+        input.value = v.slice(0, start) + text + v.slice(end);
+        var newEnd = start + text.length;
+        input.setSelectionRange(newEnd, newEnd);
+        return { start: start, end: newEnd };
+    }
+
+    function getAllVars() {
+        var builtins = ['%date', '%day', '%project'];
+        var custom = ((currentSettings && currentSettings.folder_variables) || [])
+            .map(function(fv) { return '%' + fv.name; });
+        return builtins.concat(custom);
+    }
+
+    function updateCard(input, jobCard) {
+        jobCard.dataset.template = input.value;
+        var sb = jobCard.querySelector('.job-structure-btn');
+        if (sb) sb.classList.toggle('has-structure', !!input.value.trim());
+        refreshPreviewSoon();
+    }
+
+    function handleInput(input, jobCard) {
+        if (acPending) return;
+        var token = tokenAtCursor(input);
+        if (!token) { hide(); return; }
+        var presets = (currentSettings && currentSettings.folder_presets) || [];
+        var q = token.word.toLowerCase();
+
+        if (token.trigger === '#') {
+            var names = presets
+                .filter(function(p) { return p.name && p.name.toLowerCase().indexOf(q) === 0; })
+                .map(function(p) { return '#' + p.name; });
+            show(input, names, function(item) {
+                replaceToken(input, item, token.start, token.end);
+                hide();
+                updateCard(input, jobCard);
+            });
+        } else {
+            var allVars = getAllVars().filter(function(v) {
+                return v.toLowerCase().indexOf('%' + q) === 0;
+            });
+            show(input, allVars, function(item) {
+                var pos = replaceToken(input, item, token.start, token.end);
+                var varName = item.slice(1).toLowerCase();
+                var fv = ((currentSettings && currentSettings.folder_variables) || [])
+                    .find(function(v) { return v.name.toLowerCase() === varName; });
+                var values = fv ? (fv.values || []) : [];
+                if (values.length) {
+                    acPending = true;
+                    show(input, values, function(val) {
+                        var v = input.value;
+                        input.value = v.slice(0, pos.start) + val + v.slice(pos.end);
+                        var newPos = pos.start + val.length;
+                        input.setSelectionRange(newPos, newPos);
+                        hide();
+                        updateCard(input, jobCard);
+                    });
+                } else {
+                    hide();
+                    updateCard(input, jobCard);
+                }
+            });
+        }
+    }
+
+    window.attachTemplateAutocomplete = function(input, jobCard) {
+        input.addEventListener('input', function() {
+            updateCard(input, jobCard);
+            handleInput(input, jobCard);
+        });
+
+        input.addEventListener('blur', function() {
+            acBlurTimer = setTimeout(hide, 160);
+        });
+        input.addEventListener('focus', function() {
+            if (acBlurTimer) { clearTimeout(acBlurTimer); acBlurTimer = null; }
+        });
+        input.addEventListener('keydown', function(e) {
+            if (acEl.classList.contains('hidden')) return;
+            var items  = acEl.querySelectorAll('.tmpl-ac-item');
+            var active = acEl.querySelector('.tmpl-ac-item.ac-active');
+            var idx = -1;
+            items.forEach(function(it, i) { if (it === active) idx = i; });
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (active) active.classList.remove('ac-active');
+                (items[idx + 1] || items[0]).classList.add('ac-active');
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (active) active.classList.remove('ac-active');
+                (items[idx - 1] || items[items.length - 1]).classList.add('ac-active');
+            } else if (e.key === 'Enter' && active) {
+                e.preventDefault();
+                active.dispatchEvent(new MouseEvent('mousedown'));
+            } else if (e.key === 'Escape') {
+                hide();
+            }
+        });
+    };
+})();
+
+// ── Side panel toggle ─────────────────────────────────────────────────────────
+(function() {
+    var sidePanel   = document.getElementById('side-panel');
+    var leftResizer = document.getElementById('left-resizer');
+    var toggleBtn   = document.getElementById('side-toggle-btn');
+    var DURATION    = 280;
+    var EASE        = 'cubic-bezier(0.4,0,0.2,1)';
+    var isOpen      = false;
+    var savedW      = 270;
+    var animTimer   = null;
+
+    try {
+        var sw = parseInt(localStorage.getItem('bartleby_side_width'), 10);
+        if (sw && sw > 140) savedW = sw;
+    } catch(e) {}
+
+    function setOpen(open, instant) {
+        if (open === isOpen) return;
+        isOpen = open;
+        if (animTimer) { clearTimeout(animTimer); animTimer = null; }
+        toggleBtn.classList.toggle('active', open);
+        toggleBtn.title = open ? 'Hide explorer panel' : 'Show explorer panel';
+        var T = DURATION + 'ms ' + EASE;
+
+        if (open) {
+            leftResizer.classList.remove('hidden');
+            sidePanel.style.transition = '';
+            sidePanel.style.flex = 'none';
+            sidePanel.style.minWidth = '0';
+            sidePanel.style.width = '0px';
+            void sidePanel.offsetWidth;
+            if (!instant) sidePanel.style.transition = 'width ' + T;
+            sidePanel.style.width = savedW + 'px';
+            var done = function() {
+                sidePanel.style.flex = '0 0 ' + savedW + 'px';
+                sidePanel.style.width = '';
+                sidePanel.style.minWidth = '';
+                sidePanel.style.transition = '';
+                animTimer = null;
+            };
+            if (instant) done(); else animTimer = setTimeout(done, DURATION + 16);
+            loadVolumes();
+        } else {
+            savedW = sidePanel.offsetWidth || savedW;
+            try { localStorage.setItem('bartleby_side_width', String(savedW)); } catch(e) {}
+            leftResizer.classList.add('hidden');
+            sidePanel.style.transition = '';
+            sidePanel.style.flex = 'none';
+            sidePanel.style.minWidth = '0';
+            sidePanel.style.width = savedW + 'px';
+            void sidePanel.offsetWidth;
+            if (!instant) sidePanel.style.transition = 'width ' + T;
+            sidePanel.style.width = '0px';
+        }
+        try { localStorage.setItem('bartleby_side_open', open ? '1' : '0'); } catch(e) {}
+    }
+
+    toggleBtn.addEventListener('click', function() { setOpen(!isOpen); });
+
+    leftResizer.classList.add('hidden');
+    try {
+        if (localStorage.getItem('bartleby_side_open') === '1') setOpen(true, true);
+    } catch(e) {}
+})();
+
+// ── Left resizer ──────────────────────────────────────────────────────────────
+(function() {
+    var resizer   = document.getElementById('left-resizer');
+    var sidePanel = document.getElementById('side-panel');
+    var panels    = document.getElementById('main-panels');
+    var resizing  = false;
+
+    resizer.addEventListener('mousedown', function(e) {
+        resizing = true;
+        resizer.classList.add('active');
+        document.body.style.cursor     = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+        if (!resizing) return;
+        var rect = panels.getBoundingClientRect();
+        var newW = Math.max(160, Math.min(480, e.clientX - rect.left));
+        sidePanel.style.flex  = 'none';
+        sidePanel.style.width = newW + 'px';
+    });
+    document.addEventListener('mouseup', function() {
+        if (!resizing) return;
+        resizing = false;
+        resizer.classList.remove('active');
+        document.body.style.cursor     = '';
+        document.body.style.userSelect = '';
+        var w = sidePanel.offsetWidth;
+        sidePanel.style.flex  = '0 0 ' + w + 'px';
+        sidePanel.style.width = '';
+        try { localStorage.setItem('bartleby_side_width', String(w)); } catch(e) {}
+    });
+})();
+
+// ── Side panel tabs ───────────────────────────────────────────────────────────
+function switchSideTab(tab) {
+    document.querySelectorAll('.side-tab-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.stab === tab);
+    });
+    document.querySelectorAll('.side-tab-body').forEach(function(p) {
+        p.classList.add('hidden');
+    });
+    var body = document.getElementById('sbody-' + tab);
+    if (body) body.classList.remove('hidden');
+    if (tab === 'preview') refreshPreview();
+}
+document.querySelectorAll('.side-tab-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { switchSideTab(btn.dataset.stab); });
+});
+
+// ── Explorer tree (lazy loading) ──────────────────────────────────────────────
+async function loadVolumes() {
+    var tree = document.getElementById('explorer-tree');
+    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
+    var vols;
+    try { vols = await invoke('list_volumes'); }
+    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
+    tree.innerHTML = '';
+    if (!vols || !vols.length) {
+        tree.innerHTML = '<div class="tree-empty-msg">No volumes found.</div>';
+        return;
+    }
+    vols.forEach(function(v) {
+        tree.appendChild(buildTreeNode(v.path, v.name, true, v.media_type, true));
+    });
+}
+
+// Maps a volume's media type to its explorer icon.
+function volumeIcon(mediaType) {
+    switch ((mediaType || '').toLowerCase()) {
+        case 'hdd':   return 'ico-hard-drive';
+        case 'ssd':   return 'ico-disk-ssd';
+        case 'nvme':  return 'ico-disk-nvme';
+        case 'sd':    return 'ico-card-sd';
+        case 'flash': return 'ico-usb';
+        default:      return 'ico-hard-drive';
+    }
+}
+
+function buildTreeNode(path, name, isVolume, mediaType, isDir) {
+    var node = document.createElement('div');
+    node.className = 'tree-node';
+
+    var row = document.createElement('div');
+    row.className = 'tree-row' + (isVolume ? ' is-volume' : '') + (isDir ? '' : ' is-file');
+    row.dataset.path = path;
+
+    var chevron = document.createElement('span');
+    chevron.className = 'tree-chevron' + (isDir ? '' : ' empty');
+    chevron.innerHTML = '<svg><use href="#ico-chevron-right"/></svg>';
+
+    var labelEl = document.createElement('span');
+    labelEl.className = 'tree-label';
+    labelEl.textContent = (isVolume && mediaType) ? (name + ' · ' + mediaType) : name;
+    labelEl.title = path;
+
+    var iconId = isVolume ? volumeIcon(mediaType) : (isDir ? 'ico-folder' : 'ico-file');
+    row.appendChild(chevron);
+    row.insertAdjacentHTML('beforeend',
+        '<svg class="tree-icon"><use href="#' + iconId + '"/></svg>');
+    row.appendChild(labelEl);
+
+    var children = document.createElement('div');
+    children.className = 'tree-children';
+
+    node.appendChild(row);
+    node.appendChild(children);
+
+    // Files are leaf nodes: not expandable, no folder-action context menu.
+    if (isDir) {
+        var loaded = false;
+        var toggle = function() {
+            if (node.classList.contains('expanded')) {
+                node.classList.remove('expanded');
+                return;
+            }
+            node.classList.add('expanded');
+            if (!loaded) {
+                loaded = true;
+                loadChildren(path, children, chevron);
+            }
+        };
+        chevron.addEventListener('click', function(e) { e.stopPropagation(); toggle(); });
+        row.addEventListener('click', function() { toggle(); });
+        row.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            showExplorerCtxMenu(e.clientX, e.clientY, {
+                path: path, node: node, childrenEl: children, chevron: chevron
+            });
+        });
+    }
+
+    return node;
+}
+
+async function loadChildren(path, childrenEl, chevron) {
+    chevron.classList.add('loading');
+    childrenEl.innerHTML = '';
+    var subs;
+    try { subs = await invoke('list_dir', { path: path }); }
+    catch(e) {
+        chevron.classList.remove('loading');
+        childrenEl.innerHTML = '<div class="tree-empty-msg">Cannot read folder.</div>';
+        return;
+    }
+    chevron.classList.remove('loading');
+    if (!subs || !subs.length) {
+        childrenEl.innerHTML = '<div class="tree-empty-msg">empty</div>';
+        return;
+    }
+    subs.forEach(function(s) {
+        childrenEl.appendChild(buildTreeNode(s.path, s.name, false, '', s.is_dir));
+    });
+}
+
+// ── Explorer context menu ─────────────────────────────────────────────────────
+var explorerCtxTarget = null;
+
+function showExplorerCtxMenu(x, y, target) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    explorerCtxTarget = target;
+    var hasJob = !!selectedJobCard;
+    menu.querySelector('[data-act="set-source"]').disabled = !hasJob;
+    menu.querySelector('[data-act="add-dest"]').disabled   = !hasJob;
+    menu.classList.remove('hidden');
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    var r = menu.getBoundingClientRect();
+    if (r.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+    if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+}
+
+function hideExplorerCtxMenu() {
+    document.getElementById('explorer-ctx-menu').classList.add('hidden');
+}
+
+document.addEventListener('click', function(e) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target)) hideExplorerCtxMenu();
+});
+document.addEventListener('contextmenu', function(e) {
+    var menu = document.getElementById('explorer-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target) &&
+        !e.target.closest('#explorer-tree')) {
+        hideExplorerCtxMenu();
+    }
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hideExplorerCtxMenu();
+});
+
+function ctxSetSource(path) {
+    if (!selectedJobCard) return;
+    var srcEl = selectedJobCard.querySelector('.job-src-input');
+    if (!srcEl) return;
+    srcEl.value = shortenPath(path);
+    var vi = selectedJobCard.querySelector('.job-src-section .vol-info');
+    if (vi) updateVolInfo(vi, srcEl.value);
+    refreshPreviewSoon();
+}
+
+function ctxAddDest(path) {
+    if (!selectedJobCard) return;
+    var destListEl = selectedJobCard.querySelector('.job-dest-list');
+    if (!destListEl) return;
+    var inputs = Array.from(destListEl.querySelectorAll('input[type="text"]'));
+    var empty = inputs.find(function(i) { return i.value.trim() === ''; });
+    if (empty) {
+        empty.value = shortenPath(path);
+        var di = empty.closest('.dest-item');
+        if (di) updateVolInfo(di.querySelector('.vol-info'), empty.value);
+    } else {
+        addDestRowToJob(destListEl, shortenPath(path));
+    }
+    refreshPreviewSoon();
+}
+
+function ctxNewFolder(target) {
+    target.node.classList.add('expanded');
+    var childrenEl = target.childrenEl;
+    var existing = childrenEl.querySelector('.tree-newfolder-row');
+    if (existing) existing.remove();
+
+    var row = document.createElement('div');
+    row.className = 'tree-newfolder-row';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'New folder name…';
+    input.spellcheck = false;
+    row.appendChild(input);
+    childrenEl.insertBefore(row, childrenEl.firstChild);
+    input.focus();
+
+    var done = false;
+    function commit() {
+        if (done) return;
+        var name = input.value.trim();
+        if (!name) { row.remove(); return; }
+        done = true;
+        invoke('create_folder', { path: joinPath(target.path, name) }).then(function() {
+            loadChildren(target.path, childrenEl, target.chevron);
+        }).catch(function(err) {
+            done = false;
+            alert('Could not create folder: ' + err);
+            input.focus();
+        });
+    }
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter')      { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { done = true; row.remove(); }
+    });
+    input.addEventListener('blur', function() { setTimeout(commit, 0); });
+}
+
+document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item) {
+    item.addEventListener('click', function() {
+        if (item.disabled || !explorerCtxTarget) { hideExplorerCtxMenu(); return; }
+        var t = explorerCtxTarget;
+        var act = item.dataset.act;
+        if      (act === 'set-source') ctxSetSource(t.path);
+        else if (act === 'add-dest')   ctxAddDest(t.path);
+        else if (act === 'new-folder') ctxNewFolder(t);
+        hideExplorerCtxMenu();
+    });
+});
+
+// ── Per-job structure popup ───────────────────────────────────────────────────
+(function() {
+    var overlay     = document.getElementById('structure-overlay');
+    var presetSel   = document.getElementById('structure-preset');
+    var tmplInput   = document.getElementById('structure-template');
+    var varDrops    = document.getElementById('structure-var-dropdowns');
+    var previewEl   = document.getElementById('structure-preview');
+    var okBtn       = document.getElementById('structure-popup-ok');
+    var cancelBtn   = document.getElementById('structure-popup-cancel');
+    var clearBtn    = document.getElementById('structure-clear');
+    var activeCard  = null;
+
+    function getJobvars() {
+        var jv = {};
+        varDrops.querySelectorAll('select').forEach(function(sel) {
+            if (sel.value) jv[sel.dataset.varname] = sel.value;
+        });
+        return jv;
+    }
+
+    function refresh() {
+        var res = resolveTemplate({ template: tmplInput.value, jobvars: getJobvars() });
+        if (!res.path && !res.bad.length) {
+            previewEl.textContent = '(no template — destination used as-is)';
+        } else {
+            previewEl.innerHTML = highlightBad('…/' + res.path + '/', res.bad);
+        }
+    }
+
+    window.openStructurePopup = function(jobCard) {
+        activeCard = jobCard;
+        var presets = (currentSettings && currentSettings.folder_presets) || [];
+        presetSel.innerHTML = '';
+        var none = document.createElement('option');
+        none.value = ''; none.textContent = '— Custom template —';
+        presetSel.appendChild(none);
+        presets.forEach(function(p) {
+            var o = document.createElement('option');
+            o.value = '#' + p.name; o.textContent = '#' + p.name;
+            presetSel.appendChild(o);
+        });
+        tmplInput.value = jobCard.dataset.template || '';
+        presetSel.value = presets.some(function(p) { return '#' + p.name === tmplInput.value; })
+            ? tmplInput.value : '';
+
+        // Build per-variable dropdowns from settings
+        var savedJv = {};
+        try { savedJv = JSON.parse(jobCard.dataset.jobvars || '{}'); } catch(e) {}
+        varDrops.innerHTML = '';
+        ((currentSettings && currentSettings.folder_variables) || []).forEach(function(fv) {
+            if (!fv.values || !fv.values.length) return;
+            var label = document.createElement('label');
+            label.className = 'struct-field';
+            var span = document.createElement('span');
+            span.className = 'struct-field-label';
+            span.textContent = '%' + fv.name;
+            var sel = document.createElement('select');
+            sel.className = 'modal-input';
+            sel.dataset.varname = fv.name.toLowerCase();
+            var ph = document.createElement('option');
+            ph.value = ''; ph.textContent = '— ' + fv.name + ' —';
+            sel.appendChild(ph);
+            fv.values.forEach(function(val) {
+                var o = document.createElement('option');
+                o.value = val; o.textContent = val;
+                sel.appendChild(o);
+            });
+            sel.value = savedJv[fv.name.toLowerCase()] || '';
+            sel.addEventListener('change', refresh);
+            label.appendChild(span);
+            label.appendChild(sel);
+            varDrops.appendChild(label);
+        });
+
+        refresh();
+        overlay.classList.remove('hidden');
+    };
+
+    presetSel.addEventListener('change', function() {
+        if (presetSel.value) tmplInput.value = presetSel.value;
+        refresh();
+    });
+    tmplInput.addEventListener('input', function() {
+        if (presetSel.value && tmplInput.value !== presetSel.value) presetSel.value = '';
+        refresh();
+    });
+
+    okBtn.addEventListener('click', function() {
+        if (!activeCard) return;
+        var tmpl = tmplInput.value.trim();
+        activeCard.dataset.template = tmpl;
+        activeCard.dataset.jobvars  = JSON.stringify(getJobvars());
+        var btn = activeCard.querySelector('.job-structure-btn');
+        if (btn) btn.classList.toggle('has-structure', tmpl.length > 0);
+        syncJobTemplateInput(activeCard);
+        overlay.classList.add('hidden');
+        activeCard = null;
+        refreshPreviewSoon();
+    });
+    clearBtn.addEventListener('click', function() {
+        tmplInput.value = ''; presetSel.value = '';
+        varDrops.querySelectorAll('select').forEach(function(s) { s.value = ''; });
+        refresh();
+    });
+    cancelBtn.addEventListener('click', function() {
+        syncJobTemplateInput(activeCard);
+        overlay.classList.add('hidden');
+        activeCard = null;
+    });
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) {
+            syncJobTemplateInput(activeCard);
+            overlay.classList.add('hidden');
+            activeCard = null;
+        }
+    });
+})();
+
+// ── Structure settings tab ────────────────────────────────────────────────────
+function updateDateSample() {
+    var fmt = document.getElementById('s-date-format').value || '%Y-%m-%d';
+    document.getElementById('s-date-sample').textContent = 'Sample: ' + formatStrftime(fmt);
+}
+
+function addStructValueRow(container, val) {
+    var row = document.createElement('div');
+    row.className = 'struct-value-row';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'struct-value-input';
+    input.value = val || '';
+    var rm = document.createElement('button');
+    rm.className = 'icon-btn icon-btn-danger';
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rm.addEventListener('click', function() { row.remove(); });
+    row.appendChild(input);
+    row.appendChild(rm);
+    container.appendChild(row);
+    return input;
+}
+
+function addStructPresetRow(container, preset) {
+    var row = document.createElement('div');
+    row.className = 'struct-preset-row';
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'struct-preset-name';
+    nameInput.placeholder = 'name';
+    nameInput.value = (preset && preset.name) || '';
+    var tmplInput = document.createElement('input');
+    tmplInput.type = 'text';
+    tmplInput.className = 'struct-preset-tmpl';
+    tmplInput.placeholder = 'template, e.g. IMAGE/%date/%camera';
+    tmplInput.spellcheck = false;
+    tmplInput.value = (preset && preset.template) || '';
+    var rm = document.createElement('button');
+    rm.className = 'icon-btn icon-btn-danger';
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rm.addEventListener('click', function() { row.remove(); });
+    row.appendChild(nameInput);
+    row.appendChild(tmplInput);
+    row.appendChild(rm);
+    container.appendChild(row);
+}
+
+function populateStructureFields() {
+    if (!currentSettings) return;
+    document.getElementById('s-date-format').value = currentSettings.folder_var_date_format || '%Y-%m-%d';
+    document.getElementById('s-shoot-day').value   = currentSettings.folder_shoot_day || '';
+    updateDateSample();
+    var fvarList = document.getElementById('s-fvar-list');
+    fvarList.innerHTML = '';
+    (currentSettings.folder_variables || []).forEach(function(fv) { addFolderVarCard(fvarList, fv); });
+    var presetList = document.getElementById('s-preset-list');
+    presetList.innerHTML = '';
+    (currentSettings.folder_presets || []).forEach(function(p) { addStructPresetRow(presetList, p); });
+}
+
+function addFolderVarCard(container, fvar) {
+    var card = document.createElement('div');
+    card.className = 'card modal-card folder-var-card';
+
+    var header = document.createElement('div');
+    header.className = 'folder-var-card-header';
+
+    var prefix = document.createElement('span');
+    prefix.className = 'folder-var-prefix';
+    prefix.textContent = '%';
+
+    var nameInp = document.createElement('input');
+    nameInp.type = 'text';
+    nameInp.className = 'modal-input fvar-name';
+    nameInp.placeholder = 'variable name (e.g. cam, type, reel)';
+    nameInp.spellcheck = false;
+    nameInp.value = (fvar && fvar.name) || '';
+
+    var rmCard = document.createElement('button');
+    rmCard.className = 'icon-btn icon-btn-danger';
+    rmCard.type = 'button';
+    rmCard.title = 'Remove variable';
+    rmCard.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
+    rmCard.addEventListener('click', function() { card.remove(); });
+
+    header.appendChild(prefix);
+    header.appendChild(nameInp);
+    header.appendChild(rmCard);
+    card.appendChild(header);
+
+    var valList = document.createElement('div');
+    valList.className = 'struct-value-list folder-var-values';
+    ((fvar && fvar.values) || []).forEach(function(v) { addStructValueRow(valList, v); });
+    card.appendChild(valList);
+
+    var addValBtn = document.createElement('button');
+    addValBtn.className = 'flat-btn';
+    addValBtn.type = 'button';
+    addValBtn.textContent = '+ Add value';
+    addValBtn.addEventListener('click', function() { addStructValueRow(valList, '').focus(); });
+    card.appendChild(addValBtn);
+
+    container.appendChild(card);
+    return nameInp;
+}
+
+function collectFolderVars() {
+    var vars = [];
+    document.querySelectorAll('#s-fvar-list .folder-var-card').forEach(function(card) {
+        var name = card.querySelector('.fvar-name').value.trim();
+        if (!name) return;
+        var values = [];
+        card.querySelectorAll('.struct-value-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            if (v) values.push(v);
+        });
+        vars.push({ name: name, values: values });
+    });
+    return vars;
+}
+
+function collectStructPresets() {
+    var presets = [];
+    document.querySelectorAll('#s-preset-list .struct-preset-row').forEach(function(row) {
+        var name = row.querySelector('.struct-preset-name').value.trim();
+        var tmpl = row.querySelector('.struct-preset-tmpl').value.trim();
+        if (name) presets.push({ name: name, template: tmpl });
+    });
+    return presets;
+}
+
+(function() {
+    var dateFmt = document.getElementById('s-date-format');
+    if (dateFmt) dateFmt.addEventListener('input', updateDateSample);
+
+    var fvarAdd = document.getElementById('s-fvar-add');
+    if (fvarAdd) fvarAdd.addEventListener('click', function() {
+        addFolderVarCard(document.getElementById('s-fvar-list'), null).focus();
+    });
+
+    var presetAdd = document.getElementById('s-preset-add');
+    if (presetAdd) presetAdd.addEventListener('click', function() {
+        addStructPresetRow(document.getElementById('s-preset-list'), null);
+    });
+
+    var cancelBtn = document.getElementById('structure-cancel');
+    if (cancelBtn) cancelBtn.addEventListener('click', function() {
+        settingsOverlay.classList.add('hidden');
+    });
+    var saveBtn = document.getElementById('structure-save');
+    if (saveBtn) saveBtn.addEventListener('click', async function() {
+        if (!currentSettings) return;
+        currentSettings.folder_var_date_format =
+            document.getElementById('s-date-format').value.trim() || '%Y-%m-%d';
+        currentSettings.folder_shoot_day  = document.getElementById('s-shoot-day').value.trim();
+        currentSettings.folder_variables  = collectFolderVars();
+        currentSettings.folder_presets    = collectStructPresets();
+        jobsContainer.querySelectorAll('.job-group').forEach(function(card) {
+            syncJobTemplateInput(card);
+        });
+        await persistSettings();
+        settingsOverlay.classList.add('hidden');
+        refreshPreviewSoon();
+    });
+})();
+
+// ── Live structure preview tab ────────────────────────────────────────────────
+var PREVIEW_STATUS = {
+    will_create: { cls: 'st-create',     text: 'will be created' },
+    empty:       { cls: 'st-empty',      text: 'exists — empty' },
+    non_empty:   { cls: 'st-nonempty',   text: 'exists — NOT empty' },
+    not_mounted: { cls: 'st-notmounted', text: 'volume not mounted' }
+};
+
+var previewTimer = null;
+function refreshPreviewSoon() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(function() {
+        var body = document.getElementById('sbody-preview');
+        if (body && !body.classList.contains('hidden')) refreshPreview();
+    }, 350);
+}
+
+async function refreshPreview() {
+    var container = document.getElementById('preview-content');
+    if (!container) return;
+    var jobs = getJobs();
+    if (!jobs.length) {
+        container.innerHTML = '<div class="preview-empty-msg">No jobs.</div>';
+        return;
+    }
+
+    var rows = [];
+    jobs.forEach(function(job, ji) {
+        var res = resolveTemplate(job);
+        job.dsts.forEach(function(root) {
+            var full = res.path ? joinPath(root, res.path) : root;
+            if (job.copyAsSubfolder && job.src) full = joinPath(full, baseName(job.src));
+            rows.push({ jobIdx: ji, root: root, full: full, res: res });
+        });
+    });
+    if (!rows.length) {
+        container.innerHTML = '<div class="preview-empty-msg">No destinations set.</div>';
+        return;
+    }
+
+    var statuses;
+    try {
+        statuses = await invoke('dest_path_status', {
+            items: rows.map(function(r) { return { root: r.root, full: r.full }; })
+        });
+    } catch(e) {
+        statuses = rows.map(function() { return 'will_create'; });
+    }
+    rows.forEach(function(r, i) { r.status = statuses[i] || 'will_create'; });
+
+    var multi = jobs.length > 1;
+    container.innerHTML = '';
+    jobs.forEach(function(job, ji) {
+        var section = document.createElement('div');
+        section.className = 'preview-job';
+        var title = document.createElement('div');
+        title.className = 'preview-job-title';
+        title.textContent = job.name || (multi ? 'Job ' + (ji + 1) : 'Job');
+        section.appendChild(title);
+
+        var jobRows = rows.filter(function(r) { return r.jobIdx === ji; });
+        if (!jobRows.length) {
+            var none = document.createElement('div');
+            none.className = 'preview-empty-msg';
+            none.textContent = 'No destinations.';
+            section.appendChild(none);
+        }
+        jobRows.forEach(function(r) {
+            var row = document.createElement('div');
+            row.className = 'preview-dest';
+            var pathEl = document.createElement('div');
+            pathEl.className = 'preview-path';
+            var shown = shortenPath(r.full);
+            if (r.res.bad && r.res.bad.length) pathEl.innerHTML = highlightBad(shown, r.res.bad);
+            else pathEl.textContent = shown;
+            var st = PREVIEW_STATUS[r.status] || PREVIEW_STATUS.will_create;
+            var statusEl = document.createElement('div');
+            statusEl.className = 'preview-status ' + st.cls;
+            statusEl.textContent = st.text;
+            row.appendChild(pathEl);
+            row.appendChild(statusEl);
+            section.appendChild(row);
+        });
+        container.appendChild(section);
+    });
+}
+
+(function() {
+    var refreshBtn = document.getElementById('preview-refresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', refreshPreview);
 })();
 
 // ── Initialisation ────────────────────────────────────────────────────────────

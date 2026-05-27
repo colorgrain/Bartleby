@@ -470,7 +470,10 @@ pub fn run(
     let non_empty: Vec<String> = destinations.iter()
         .filter(|d| {
             let check = if copy_as_subfolder { d.join(&src_name) } else { d.to_path_buf() };
-            fs::read_dir(&check).map(|mut r| r.next().is_some()).unwrap_or(false)
+            fs::read_dir(&check)
+                .map(|entries| entries.filter_map(|e| e.ok())
+                    .any(|e| !is_os_system_entry(&e.file_name().to_string_lossy())))
+                .unwrap_or(false)
         })
         .map(|d| d.to_string_lossy().to_string())
         .collect();
@@ -680,6 +683,25 @@ pub fn run(
 
     log(&tx, &format!("── Phase 1 — Copy {} ──────────────────────\n", ts(&start)));
 
+    // Create all source subdirectories on every destination, including empty ones.
+    // The per-file create_dir_all below only covers parents of copied files,
+    // so empty directories would otherwise be silently skipped.
+    if let Ok(src_dirs) = collect_dirs(&src) {
+        for src_dir in &src_dirs {
+            let rel = src_dir.strip_prefix(&src).unwrap_or(src_dir);
+            for dst in &destinations {
+                let dst_dir = if copy_as_subfolder {
+                    dst.join(&src_name).join(rel)
+                } else {
+                    dst.join(rel)
+                };
+                if let Err(e) = fs::create_dir_all(&dst_dir) {
+                    log(&tx, &format!("  △  mkdir {}: {}\n", dst_dir.display(), e));
+                }
+            }
+        }
+    }
+
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
     let mut copy_errors = 0usize;
 
@@ -747,17 +769,14 @@ pub fn run(
         }
         if any_error { copy_errors += 1; continue; }
 
-        // On non-Linux: fsync each destination file immediately after copy.
-        // Per-file fsync gives crash-safety granularity: if the process is
-        // killed mid-transfer, every file copied so far is safely on disk.
-        //
-        // On Linux: per-file fsync is intentionally omitted here. A single
-        // syncfs() call after *all* files are copied (see below) replaces
-        // N×M fsync calls. This is far more efficient on FUSE filesystems
-        // where every fsync triggers a round-trip through the FUSE daemon.
-        // syncfs(2) provides the same durability guarantee: all dirty pages
-        // on the filesystem are flushed to physical storage in one pass.
-        #[cfg(not(target_os = "linux"))]
+        // macOS: fsync each destination file immediately after copy.
+        // Per-file fsync gives crash-safety granularity on macOS (APFS/HFS+
+        // where fsync is cheap). Linux uses a single syncfs() after all files
+        // (see below). Windows uses a batch flush after all files (see below)
+        // — per-file FlushFileBuffers on FAT/exFAT is catastrophically slow
+        // because each call forces a FAT-chain + directory-entry metadata write,
+        // serialising copy→flush→copy→flush and dropping throughput ~13×.
+        #[cfg(target_os = "macos")]
         {
             let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
                 .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
@@ -818,6 +837,37 @@ pub fn run(
         }
     }
 
+    // ── Windows: single batch flush after all files are copied ───────────────
+    //
+    // Per-file FlushFileBuffers (sync_all) is skipped in the copy loop above.
+    // All file data now sits in the Windows write-back cache. We issue one
+    // parallel flush of every written file here, before Phase 2 hashing, so
+    // that FILE_FLAG_NO_BUFFERING reads in Phase 2 see on-disk data.
+    //
+    // Flushing after all copies lets the Windows cache manager write all dirty
+    // pages in a single large sequential pass — far more efficient than the
+    // per-file pattern which forces one FAT-chain + directory-entry metadata
+    // update per file, each blocking the next copy.
+    #[cfg(target_os = "windows")]
+    {
+        log(&tx, "△  Windows: flushing write cache to storage…\n");
+        let flush_paths: Vec<PathBuf> = copied.iter().flat_map(|(_, rel_str)| {
+            let rel_native = rel_str.replace('/', "\\");
+            destinations.iter().map(|dst| {
+                if copy_as_subfolder {
+                    dst.join(&src_name).join(&rel_native)
+                } else {
+                    dst.join(&rel_native)
+                }
+            }).collect::<Vec<_>>()
+        }).collect();
+        flush_paths.par_iter().for_each(|path| {
+            if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+                let _ = f.sync_all();
+            }
+        });
+    }
+
     log(&tx, &format!("\n── Phase 1 complete {} ─────────────────────\n", ts(&start)));
 
     // ── Metadata extraction (only when CSV, PDF, or HTML is requested) ───────
@@ -843,7 +893,7 @@ pub fn run(
     if !verify {
         let no_hashes: Vec<(FileHashes, bool)> =
             copied.iter().map(|_| (FileHashes::default(), true)).collect();
-        generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
+        generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                          &meta_entries, &no_hashes,
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
                          &comment, &mhl_comment, &location, &settings, &reply_rx);
@@ -1032,7 +1082,7 @@ pub fn run(
     log(&tx, &format!("\n── Phase 2 complete {} ─────────────────────\n", ts(&start)));
 
     // ── Phase 3: reports ──────────────────────────────────────────────────────
-    generate_reports(&tx, &destinations, &src_name, &src, total_bytes,
+    generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                      &meta_entries, &results,
                      hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
                      &comment, &mhl_comment, &location, &settings, &reply_rx);
@@ -1773,6 +1823,7 @@ fn generate_reports(
     tx:           &Sender<Msg>,
     destinations: &[PathBuf],
     src_name:     &str,
+    copy_as_subfolder: bool,
     src:          &Path,
     total_bytes:  u64,
     meta_entries: &[(String, metadata::FileMeta)],
@@ -1792,6 +1843,10 @@ fn generate_reports(
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
     let col_label = hash_algo.col_label();
 
+    // Timestamp shared across all report files generated in this operation (UTC).
+    let now_utc   = chrono::Utc::now();
+    let timestamp = format!("{}_{}", now_utc.format("%Y-%m-%d"), now_utc.format("%H%M%SZ"));
+
     // ── MHL: scan source for generational chain (once, before the dst loop) ──
     let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
         let src_ascmhl = src.join("ascmhl");
@@ -1806,10 +1861,36 @@ fn generate_reports(
     };
 
     for dst in destinations {
+        // report_name = the destination folder name (last component of dst).
+        // When copy_as_subfolder: dst is the parent, subfolder name = src_name.
+        // When not:               dst is the folder itself, possibly renamed via template.
+        let report_name: String = if copy_as_subfolder {
+            src_name.to_string()
+        } else {
+            dst.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| src_name.to_string())
+        };
+
+        // report_dir = where checksum / CSV / PDF / HTML / ascmhl files are written.
+        // Always sits NEXT TO the destination folder, not inside it:
+        //   copy_as_subfolder=true  → dst already is the parent  → use dst
+        //   copy_as_subfolder=false → dst is the folder itself   → use dst.parent()
+        let report_dir: &Path = if copy_as_subfolder {
+            dst
+        } else {
+            dst.parent().unwrap_or(dst)
+        };
+
+        // Relative path prefix recorded inside checksum and MHL files.
+        // Reports sit in report_dir; files sit in report_dir/{report_name}/…
+        // so every entry needs the "{report_name}/" prefix to resolve correctly.
+        let path_prefix = format!("{}/", report_name);
+
         // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
         if let Some(ext) = hash_algo.checksum_ext() {
-            let p = dst.join(format!("{}_checksum.{}", src_name, ext));
-            match write_checksum(&p, meta_entries, hashes) {
+            let p = report_dir.join(format!("{}_{}.{}", report_name, timestamp, ext));
+            match write_checksum(&p, meta_entries, hashes, &path_prefix) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
             }
@@ -1822,10 +1903,10 @@ fn generate_reports(
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(dst, src_name, src, total_bytes, destinations,
+            match metadata::write_csv(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                       &csv_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
-                    dst.join(format!("{}_report.csv", src_name)).display())),
+                    report_dir.join(format!("{}_{}.csv", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
@@ -1838,10 +1919,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(dst, src_name, src, total_bytes, destinations,
+            match pdf_report::write_pdf(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                         &pdf_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    dst.join(format!("{}_report.pdf", src_name)).display())),
+                    report_dir.join(format!("{}_{}.pdf", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
             }
         }
@@ -1854,10 +1935,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(dst, src_name, src, total_bytes, destinations,
+            match html_report::write_html(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
                                           &html_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    dst.join(format!("{}_report.html", src_name)).display())),
+                    report_dir.join(format!("{}_{}.html", report_name, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
             }
         }
@@ -1866,19 +1947,20 @@ fn generate_reports(
                 let mhl_entries: Vec<(String, String)> =
                     meta_entries.iter().zip(hashes.iter())
                         .map(|((rel, _), (fh, _))| {
-                            (rel.clone(), fh.hash.clone().unwrap_or_default())
+                            (format!("{}{}", path_prefix, rel),
+                             fh.hash.clone().unwrap_or_default())
                         })
                         .collect();
 
                 // Determine generation number; prompt if a previous MHL exists.
                 let (generation, should_write) =
-                    match mhl_report::find_dst_mhl_for_src(dst, src_name) {
+                    match mhl_report::find_dst_mhl_for_src(report_dir, &report_name) {
                         Some((existing_path, existing_gen)) => {
                             let existing_name = existing_path
                                 .file_name().unwrap_or_default()
                                 .to_string_lossy().to_string();
                             let _ = tx.send(Msg::MhlConflict {
-                                dst:          dst.display().to_string(),
+                                dst:          report_dir.display().to_string(),
                                 existing_mhl: existing_name,
                             });
                             match reply_rx.recv().unwrap_or(Reply::Cancel) {
@@ -1910,9 +1992,9 @@ fn generate_reports(
                     };
 
                 if should_write {
-                    match mhl_report::write_mhl(dst, src_name, src, &mhl_entries, mhl_elem,
+                    match mhl_report::write_mhl(report_dir, &report_name, src, &mhl_entries, mhl_elem,
                                                 mhl_comment, location, settings,
-                                                generation, src_mhl_ref.as_ref()) {
+                                                generation, now_utc, src_mhl_ref.as_ref()) {
                         Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
                         Err(e) => log(tx, &format!("✖  MHL error: {}\n", e)),
                     }
@@ -1928,18 +2010,40 @@ fn write_checksum(
     path:    &Path,
     entries: &[(String, metadata::FileMeta)],
     hashes:  &[(FileHashes, bool)],
+    prefix:  &str,
 ) -> io::Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, _)) in entries.iter().zip(hashes.iter()) {
         if let Some(ref hash) = fh.hash {
-            writeln!(f, "{}  {}", hash, rel)?;
+            writeln!(f, "{}  {}{}", hash, prefix, rel)?;
         }
     }
     Ok(())
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────
+
+/// Returns `true` for OS-managed system entries that appear on drive roots
+/// regardless of user content: Windows system folders (`System Volume Information`,
+/// `$RECYCLE.BIN`, …) and macOS volume metadata (`.Spotlight-V100`, …).
+///
+/// Used to ignore these entries when deciding whether a destination is "occupied"
+/// and whether to prompt the user — Windows creates them automatically the moment
+/// a writable volume is mounted, even on a freshly formatted drive.
+fn is_os_system_entry(name: &str) -> bool {
+    const SYSTEM_NAMES: &[&str] = &[
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "$Recycle.Bin",
+        "RECYCLER",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".Trashes",
+        ".TemporaryItems",
+    ];
+    SYSTEM_NAMES.iter().any(|s| name.eq_ignore_ascii_case(s))
+}
 
 /// Recursively collects all **files** (not directories) under `dir`.
 ///
@@ -1968,11 +2072,33 @@ fn collect_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
 /// `entry?.path()` : `entry` is `io::Result<DirEntry>`, `?` unwraps or returns.
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() { collect_recursive(&path, out)?; } // recurse into subdirs
-        else             { out.push(path); }                  // add files to accumulator
+        let entry = entry?;
+        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        let path = entry.path();
+        if path.is_dir() { collect_recursive(&path, out)?; }
+        else             { out.push(path); }
     }
-    Ok(()) // explicit Ok(()) : this function produces no meaningful value on success
+    Ok(())
+}
+
+/// Collects all subdirectories under `dir` recursively (not including `dir` itself).
+fn collect_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_dirs_recursive(dir, &mut out)?;
+    Ok(out)
+}
+
+fn collect_dirs_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        let path = entry.path();
+        if path.is_dir() {
+            out.push(path.clone());
+            collect_dirs_recursive(&path, out)?;
+        }
+    }
+    Ok(())
 }
 
 // ── Log and ETA ──────────────────────────────────────────────────────────────

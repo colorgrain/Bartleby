@@ -285,11 +285,12 @@ const AUDIO_EXTS: &[&str] = &[
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Generates a PDF report and writes it to `{dst_dir}/{src_name}_report.pdf`.
+/// Generates a PDF report and writes it to `{dst_dir}/{report_name}_{timestamp}.pdf`.
 ///
 /// # Parameters
 /// - `dst_dir`  : destination directory. The PDF is written inside it.
-/// - `src_name` : base name for the output file and the report's internal title.
+/// - `report_name` : destination folder name, used for the output filename and PDF title.
+/// - `timestamp`   : UTC timestamp string shared across all report files (`YYYY-MM-DD_HHMMSSZ`).
 ///                Example: `"SHOOT_2024"` → file `SHOOT_2024_report.pdf`.
 /// - `src_path` : absolute path to the source directory. Used to resolve the
 ///                absolute path of each file for thumbnail extraction (by joining
@@ -503,7 +504,8 @@ fn hex_to_rgb(hex: &str, default: (f32, f32, f32)) -> (f32, f32, f32) {
 
 pub fn write_pdf(
     dst_dir:         &Path,
-    src_name:        &str,
+    report_name:     &str,
+    timestamp:       &str,
     src_path:        &Path,
     src_total_bytes: u64,
     destinations:    &[PathBuf],
@@ -535,7 +537,7 @@ pub fn write_pdf(
     // `Mm(W)` : wraps the width in printpdf's `Mm` unit type.
     // printpdf uses newtype wrappers (Mm, Pt, Px) to prevent accidental unit mixing.
     let (doc, p1, l1) = PdfDocument::new(
-        format!("Bartleby — {}", src_name),  // PDF document title (visible in Acrobat tab)
+        format!("Bartleby — {}", report_name),  // PDF document title (visible in Acrobat tab)
         Mm(W), Mm(H),                         // A4 landscape: 297 × 210 mm
         "Page 1",                             // name of the first content layer
     );
@@ -756,7 +758,7 @@ pub fn write_pdf(
     // `.map_err(|e| std::io::Error::new(…, e.to_string()))` :
     //   converts `printpdf::Error` to `std::io::Error` so the return type is
     //   consistent: `std::io::Result<()>` throughout this file.
-    let path   = dst_dir.join(format!("{}_report.pdf", src_name));
+    let path   = dst_dir.join(format!("{}_{}.pdf", report_name, timestamp));
     let mut wr = BufWriter::new(File::create(path)?);
     doc.save(&mut wr)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
