@@ -1079,6 +1079,7 @@ function showPrompt(kind, items, conflictItems) {
         message.removeAttribute('style');
         title.innerHTML = '';
         title.style.position = '';
+        title.style.zIndex   = '';
 
         if (kind === 'mhl_conflict') {
             title.textContent = 'Existing MHL at destination';
@@ -1103,6 +1104,7 @@ function showPrompt(kind, items, conflictItems) {
         } else {
             title.textContent = 'File conflicts detected';
             title.style.position = 'relative';
+            title.style.zIndex   = '10';
 
             var helpBtn = document.createElement('button');
             helpBtn.className = 'conflict-help-btn';

@@ -287,7 +287,11 @@ pub fn write_html(
     comment:         &str,
     location:        &str,
 ) -> io::Result<()> {
-    let out_path = dst_dir.join(format!("{}_{}.html", report_name, timestamp));
+    let out_path = if timestamp.is_empty() {
+        dst_dir.join(format!("{}.html", report_name))
+    } else {
+        dst_dir.join(format!("{}_{}.html", report_name, timestamp))
+    };
     let mut out  = std::fs::File::create(&out_path)?;
 
     let now = Local::now().format("%Y-%m-%d at %I:%M %p").to_string();

@@ -1921,7 +1921,8 @@ fn generate_reports(
                 .unwrap_or_else(|| src_name.to_string())
         };
 
-        // Reports go inside dst, optionally in a subfolder requested by the user.
+        // Checksum files (.md5, .xxh3, MHL) always land directly in dst.
+        // Report files (CSV, PDF, HTML) go into an optional subfolder.
         let report_dir_buf: PathBuf = if report_subfolder.is_empty() {
             dst.to_path_buf()
         } else {
@@ -1931,7 +1932,8 @@ fn generate_reports(
             }
             sub
         };
-        let report_dir: &Path = &report_dir_buf;
+        let checksum_dir: &Path = dst;
+        let report_dir:   &Path = &report_dir_buf;
 
         // Path prefix recorded inside checksum / MHL entries, relative to dst:
         //   copy_as_subfolder=true  → "src_name/"   files are at dst/src_name/rel
@@ -1944,12 +1946,19 @@ fn generate_reports(
 
         // Filename labels — may be overridden by the user via settings.
         // path_prefix (structural) is always derived from report_name, never overridden.
+        // When an override is active the timestamp is omitted from the filename.
         let checksum_label: &str = if checksum_name_override.is_empty() { &report_name } else { checksum_name_override };
         let report_label:   &str = if report_name_override.is_empty()   { &report_name } else { report_name_override   };
+        let cs_ts:          &str = if checksum_name_override.is_empty() { &timestamp   } else { "" };
+        let rpt_ts:         &str = if report_name_override.is_empty()   { &timestamp   } else { "" };
 
         // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
         if let Some(ext) = hash_algo.checksum_ext() {
-            let p = report_dir.join(format!("{}_{}.{}", checksum_label, timestamp, ext));
+            let p = if cs_ts.is_empty() {
+                checksum_dir.join(format!("{}.{}", checksum_label, ext))
+            } else {
+                checksum_dir.join(format!("{}_{}.{}", checksum_label, cs_ts, ext))
+            };
             match write_checksum(&p, meta_entries, hashes, &path_prefix) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
@@ -1963,10 +1972,10 @@ fn generate_reports(
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(report_dir, report_label, &timestamp, src, total_bytes, destinations,
+            match metadata::write_csv(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
                                       &csv_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
-                    report_dir.join(format!("{}_{}.csv", report_label, timestamp)).display())),
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.csv", report_label) } else { format!("{}_{}.csv", report_label, rpt_ts) }).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
@@ -1979,10 +1988,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(report_dir, report_label, &timestamp, src, total_bytes, destinations,
+            match pdf_report::write_pdf(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
                                         &pdf_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    report_dir.join(format!("{}_{}.pdf", report_label, timestamp)).display())),
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.pdf", report_label) } else { format!("{}_{}.pdf", report_label, rpt_ts) }).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
             }
         }
@@ -1995,10 +2004,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(report_dir, report_label, &timestamp, src, total_bytes, destinations,
+            match html_report::write_html(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
                                           &html_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    report_dir.join(format!("{}_{}.html", report_label, timestamp)).display())),
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.html", report_label) } else { format!("{}_{}.html", report_label, rpt_ts) }).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
             }
         }
@@ -2014,7 +2023,7 @@ fn generate_reports(
 
                 // Determine generation number; prompt if a previous MHL exists.
                 let (generation, should_write) =
-                    match mhl_report::find_dst_mhl_for_src(report_dir, checksum_label) {
+                    match mhl_report::find_dst_mhl_for_src(checksum_dir, checksum_label) {
                         Some((existing_path, existing_gen)) => {
                             let existing_name = existing_path
                                 .file_name().unwrap_or_default()
@@ -2052,7 +2061,7 @@ fn generate_reports(
                     };
 
                 if should_write {
-                    match mhl_report::write_mhl(report_dir, checksum_label, src, &mhl_entries, mhl_elem,
+                    match mhl_report::write_mhl(checksum_dir, checksum_label, src, &mhl_entries, mhl_elem,
                                                 mhl_comment, location, settings,
                                                 generation, now_utc, src_mhl_ref.as_ref()) {
                         Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),

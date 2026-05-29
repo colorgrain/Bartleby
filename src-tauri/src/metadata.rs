@@ -544,7 +544,11 @@ pub fn write_csv(
 ) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = dst_dir.join(format!("{}_{}.csv", report_name, timestamp));
+    let path = if timestamp.is_empty() {
+        dst_dir.join(format!("{}.csv", report_name))
+    } else {
+        dst_dir.join(format!("{}_{}.csv", report_name, timestamp))
+    };
     let mut f = std::fs::File::create(path)?;
 
     write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment, location)?;
