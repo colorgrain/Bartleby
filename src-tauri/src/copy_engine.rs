@@ -341,10 +341,12 @@ pub enum Msg {
 /// Sent via `Sender<Reply>` in `main.rs` when the user clicks a dialog button.
 /// The engine receives this via `reply_rx.recv()` and resumes accordingly.
 pub enum Reply {
-    /// Proceed — overwrite conflicting files (or ignore non-empty destinations).
+    /// Proceed — overwrite all conflicting files.
     Continue,
-    /// Skip conflicting files, copy everything else.
+    /// Smart skip: skip files where size AND date match; overwrite files that differ.
     Skip,
+    /// Skip all conflicting files; keep existing destination files untouched.
+    SkipKeep,
     /// Abort the entire operation immediately.
     Cancel,
 }
@@ -422,6 +424,9 @@ pub fn run(
     comment:           String,
     mhl_comment:       String,
     location:          String,
+    checksum_name_override: String,
+    report_name_override:   String,
+    report_subfolder:       String,
     settings:          Settings,
     tx:                Sender<Msg>,
     reply_rx:          std::sync::mpsc::Receiver<Reply>,
@@ -524,9 +529,15 @@ pub fn run(
         })
         .collect();
 
-    // skip_pairs: (rel_path, dst_index) — only skip where size AND date both match.
+    // skip_pairs: (rel_path, dst_index) pairs excluded from the main copy loop
+    // (size+date match → file already there, identical).
     let mut skip_pairs: std::collections::HashSet<(String, usize)> =
         std::collections::HashSet::new();
+    // rename_dest_pairs: differing conflicts in "skip-and-keep" mode — the existing
+    // destination file is renamed to _conflict_01 before the source is copied normally.
+    let mut rename_dest_pairs: std::collections::HashSet<(String, usize)> =
+        std::collections::HashSet::new();
+
     if !conflict_entries.is_empty() {
         let _ = tx.send(Msg::Conflicts(conflict_infos));
         match reply_rx.recv().unwrap_or(Reply::Cancel) {
@@ -534,6 +545,23 @@ pub fn run(
                 log(&tx, "✖  Cancelled.\n");
                 let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
                 return;
+            }
+            Reply::SkipKeep => {
+                let mut skip_count   = 0usize;
+                let mut rename_count = 0usize;
+                for entry in &conflict_entries {
+                    for &(dst_idx, size_match, date_match) in &entry.dst_matches {
+                        if size_match && date_match {
+                            skip_pairs.insert((entry.rel_path.clone(), dst_idx));
+                            skip_count += 1;
+                        } else {
+                            rename_dest_pairs.insert((entry.rel_path.clone(), dst_idx));
+                            rename_count += 1;
+                        }
+                    }
+                }
+                if skip_count   > 0 { log(&tx, &format!("△  Skipping {} identical file(s) (size & date match).\n", skip_count)); }
+                if rename_count > 0 { log(&tx, &format!("△  {} differing file(s): existing destination copy renamed _conflict_01.\n", rename_count)); }
             }
             Reply::Skip => {
                 for entry in &conflict_entries {
@@ -543,7 +571,7 @@ pub fn run(
                         }
                     }
                 }
-                log(&tx, &format!("△  Skipping {} file×destination pair(s) where size & date match.\n", skip_pairs.len()));
+                log(&tx, &format!("△  Skipping {} identical file×destination pair(s); different files will be overwritten.\n", skip_pairs.len()));
             }
             Reply::Continue => { log(&tx, "△  Conflicting files will be overwritten.\n"); }
         }
@@ -750,6 +778,20 @@ pub fn run(
         }
         if !dir_ok { copy_errors += 1; continue; }
 
+        // Rename conflicting destination files before overwriting (skip-and-keep mode).
+        for (i, dst_path) in dst_entries.iter() {
+            if rename_dest_pairs.contains(&(rel_str.clone(), *i)) && dst_path.exists() {
+                let conflict_path = find_conflict_rename(dst_path);
+                match fs::rename(dst_path, &conflict_path) {
+                    Ok(_)  => log(&tx, &format!("  ↷  existing file renamed: {} → {}\n",
+                        dst_path.file_name().unwrap_or_default().to_string_lossy(),
+                        conflict_path.file_name().unwrap_or_default().to_string_lossy())),
+                    Err(e) => log(&tx, &format!("  △  could not rename conflict {}: {}\n",
+                        dst_path.display(), e)),
+                }
+            }
+        }
+
         // Copy to active destinations in parallel.
         let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter()
             .map(|dst_path| copy_file(src_path, dst_path, &pc, &in_flight))
@@ -896,7 +938,9 @@ pub fn run(
         generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                          &meta_entries, &no_hashes,
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
-                         &comment, &mhl_comment, &location, &settings, &reply_rx);
+                         &comment, &mhl_comment, &location,
+                         &checksum_name_override, &report_name_override, &report_subfolder,
+                         &settings, &reply_rx);
         let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
             copied.len(), destinations.len());
         log(&tx, &format!("\n{}\n", summary));
@@ -1085,7 +1129,9 @@ pub fn run(
     generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                      &meta_entries, &results,
                      hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
-                     &comment, &mhl_comment, &location, &settings, &reply_rx);
+                     &comment, &mhl_comment, &location,
+                     &checksum_name_override, &report_name_override, &report_subfolder,
+                     &settings, &reply_rx);
 
     if verify_errors > 0 {
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -1837,6 +1883,9 @@ fn generate_reports(
     comment:      &str,
     mhl_comment:  &str,
     location:     &str,
+    checksum_name_override: &str,
+    report_name_override:   &str,
+    report_subfolder:       &str,
     settings:     &Settings,
     reply_rx:     &std::sync::mpsc::Receiver<Reply>,
 ) {
@@ -1861,9 +1910,9 @@ fn generate_reports(
     };
 
     for dst in destinations {
-        // report_name = the destination folder name (last component of dst).
-        // When copy_as_subfolder: dst is the parent, subfolder name = src_name.
-        // When not:               dst is the folder itself, possibly renamed via template.
+        // report_name = structural name driving path_prefix inside checksums.
+        //   copy_as_subfolder=true  → src_name  (the subfolder created inside dst)
+        //   copy_as_subfolder=false → dst folder name (files sit directly in dst)
         let report_name: String = if copy_as_subfolder {
             src_name.to_string()
         } else {
@@ -1872,24 +1921,35 @@ fn generate_reports(
                 .unwrap_or_else(|| src_name.to_string())
         };
 
-        // report_dir = where checksum / CSV / PDF / HTML / ascmhl files are written.
-        // Always sits NEXT TO the destination folder, not inside it:
-        //   copy_as_subfolder=true  → dst already is the parent  → use dst
-        //   copy_as_subfolder=false → dst is the folder itself   → use dst.parent()
-        let report_dir: &Path = if copy_as_subfolder {
-            dst
+        // Reports go inside dst, optionally in a subfolder requested by the user.
+        let report_dir_buf: PathBuf = if report_subfolder.is_empty() {
+            dst.to_path_buf()
         } else {
-            dst.parent().unwrap_or(dst)
+            let sub = dst.join(report_subfolder);
+            if let Err(e) = fs::create_dir_all(&sub) {
+                log(tx, &format!("△  could not create report subfolder {}: {}\n", sub.display(), e));
+            }
+            sub
+        };
+        let report_dir: &Path = &report_dir_buf;
+
+        // Path prefix recorded inside checksum / MHL entries, relative to dst:
+        //   copy_as_subfolder=true  → "src_name/"   files are at dst/src_name/rel
+        //   copy_as_subfolder=false → ""            files are at dst/rel
+        let path_prefix: String = if copy_as_subfolder {
+            format!("{}/", report_name)
+        } else {
+            String::new()
         };
 
-        // Relative path prefix recorded inside checksum and MHL files.
-        // Reports sit in report_dir; files sit in report_dir/{report_name}/…
-        // so every entry needs the "{report_name}/" prefix to resolve correctly.
-        let path_prefix = format!("{}/", report_name);
+        // Filename labels — may be overridden by the user via settings.
+        // path_prefix (structural) is always derived from report_name, never overridden.
+        let checksum_label: &str = if checksum_name_override.is_empty() { &report_name } else { checksum_name_override };
+        let report_label:   &str = if report_name_override.is_empty()   { &report_name } else { report_name_override   };
 
         // Checksum sidecar file (.md5 / .sha1 / .xxh64 / .xxh3 / .xxh128 / .c4)
         if let Some(ext) = hash_algo.checksum_ext() {
-            let p = report_dir.join(format!("{}_{}.{}", report_name, timestamp, ext));
+            let p = report_dir.join(format!("{}_{}.{}", checksum_label, timestamp, ext));
             match write_checksum(&p, meta_entries, hashes, &path_prefix) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
@@ -1903,10 +1963,10 @@ fn generate_reports(
                          if has_verify { Some(*ok) } else { None })
                     })
                     .collect();
-            match metadata::write_csv(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
+            match metadata::write_csv(report_dir, report_label, &timestamp, src, total_bytes, destinations,
                                       &csv_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
-                    report_dir.join(format!("{}_{}.csv", report_name, timestamp)).display())),
+                    report_dir.join(format!("{}_{}.csv", report_label, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
@@ -1919,10 +1979,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
+            match pdf_report::write_pdf(report_dir, report_label, &timestamp, src, total_bytes, destinations,
                                         &pdf_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    report_dir.join(format!("{}_{}.pdf", report_name, timestamp)).display())),
+                    report_dir.join(format!("{}_{}.pdf", report_label, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
             }
         }
@@ -1935,10 +1995,10 @@ fn generate_reports(
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(report_dir, &report_name, &timestamp, src, total_bytes, destinations,
+            match html_report::write_html(report_dir, report_label, &timestamp, src, total_bytes, destinations,
                                           &html_entries, settings, col_label, comment, location) {
                 Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    report_dir.join(format!("{}_{}.html", report_name, timestamp)).display())),
+                    report_dir.join(format!("{}_{}.html", report_label, timestamp)).display())),
                 Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
             }
         }
@@ -1954,7 +2014,7 @@ fn generate_reports(
 
                 // Determine generation number; prompt if a previous MHL exists.
                 let (generation, should_write) =
-                    match mhl_report::find_dst_mhl_for_src(report_dir, &report_name) {
+                    match mhl_report::find_dst_mhl_for_src(report_dir, checksum_label) {
                         Some((existing_path, existing_gen)) => {
                             let existing_name = existing_path
                                 .file_name().unwrap_or_default()
@@ -1972,7 +2032,7 @@ fn generate_reports(
                                         .unwrap_or(1);
                                     (gen, true)
                                 }
-                                Reply::Skip => {
+                                Reply::Skip | Reply::SkipKeep => {
                                     // Keep both: existing_gen is already the highest for this src
                                     (existing_gen + 1, true)
                                 }
@@ -1992,7 +2052,7 @@ fn generate_reports(
                     };
 
                 if should_write {
-                    match mhl_report::write_mhl(report_dir, &report_name, src, &mhl_entries, mhl_elem,
+                    match mhl_report::write_mhl(report_dir, checksum_label, src, &mhl_entries, mhl_elem,
                                                 mhl_comment, location, settings,
                                                 generation, now_utc, src_mhl_ref.as_ref()) {
                         Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
@@ -2002,6 +2062,28 @@ fn generate_reports(
             }
         }
     }
+}
+
+// ── Conflict rename helper ────────────────────────────────────────────────────
+
+/// Returns the first non-existing path of the form `stem_conflict_01.ext`, `_02`, …
+/// Used by the "skip and keep" mode to preserve the existing destination file before
+/// overwriting it with the source copy.
+fn find_conflict_rename(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext   = path.extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 1u32..=99 {
+        let candidate = parent.join(format!("{}_conflict_{:02}{}", stem, n, ext));
+        if !candidate.exists() { return candidate; }
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    parent.join(format!("{}_conflict_{}{}", stem, ts, ext))
 }
 
 // ── Checksum file writer ──────────────────────────────────────────────────────

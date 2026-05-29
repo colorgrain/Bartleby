@@ -321,6 +321,7 @@ fn main() {
             get_home_dir,
             get_app_version,
             get_volume_info,
+            get_source_size,
             list_volumes,
             list_dir,
             create_folder,
@@ -616,6 +617,18 @@ struct StartCopyArgs {
     /// This flag is read by JavaScript in the `copy-done` handler, not by Rust.
     #[allow(dead_code)]
     open_dest:    bool,
+    /// Optional filename override for checksum sidecar files (.md5, .xxh3, etc.).
+    /// Empty string means use the default name (derived from source/destination name).
+    #[serde(default)]
+    checksum_name_override: String,
+    /// Optional filename override for report files (.csv, .pdf, .html).
+    /// Empty string means use the default name (derived from source/destination name).
+    #[serde(default)]
+    report_name_override: String,
+    /// Optional subfolder inside each destination where reports are written.
+    /// Empty string means reports land directly in the destination root.
+    #[serde(default)]
+    report_subfolder: String,
 }
 
 /// Launches the file transfer pipeline in two background threads and returns immediately.
@@ -736,9 +749,12 @@ fn start_copy(
     let gen_pdf   = args.gen_pdf;
     let gen_html  = args.gen_html;
     let gen_mhl   = args.gen_mhl;
-    let comment     = args.comment;
-    let mhl_comment = args.mhl_comment;
-    let location    = args.location;
+    let comment              = args.comment;
+    let mhl_comment          = args.mhl_comment;
+    let location             = args.location;
+    let checksum_name_override = args.checksum_name_override;
+    let report_name_override   = args.report_name_override;
+    let report_subfolder       = args.report_subfolder;
 
     // ── Thread 1: Copy engine ──────────────────────────────────────────────────
     // `thread::spawn(move || { … })` starts a new OS thread.
@@ -768,6 +784,9 @@ fn start_copy(
             comment,
             mhl_comment,
             location,
+            checksum_name_override,
+            report_name_override,
+            report_subfolder,
             settings_snapshot,
             tx,
             reply_rx,
@@ -929,10 +948,10 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
     // `match` is exhaustive: the `_` arm catches any unexpected values (e.g. typos
     // or future additions in JS) and treats them as "Cancel" for safety.
     let r = match reply.as_str() {
-        // `.as_str()` converts &String to &str so we can match string literals
-        "continue" => copy_engine::Reply::Continue,
-        "skip"     => copy_engine::Reply::Skip,
-        _          => copy_engine::Reply::Cancel, // default: cancel on unknown input
+        "continue"  => copy_engine::Reply::Continue,
+        "skip"      => copy_engine::Reply::Skip,
+        "skip_keep" => copy_engine::Reply::SkipKeep,
+        _           => copy_engine::Reply::Cancel,
     };
     // Acquire the lock, get an Option<&SyncSender<Reply>>, and send if Some.
     // `let _ = tx.send(r)` discards the Result — a send failure here means the
@@ -1621,6 +1640,29 @@ fn get_volume_info(path: String) -> VolumeInfo {
     let (total, free) = match vol_space(&probe) { Some(v) => v, None => return none };
     let (label, media_type) = vol_label_type(&probe);
     VolumeInfo { ok: true, label, media_type, total_bytes: total, free_bytes: free }
+}
+
+#[tauri::command]
+fn get_source_size(path: String) -> u64 {
+    fn walk(p: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_symlink() { continue; }
+                if child.is_file() {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                } else if child.is_dir() {
+                    total += walk(&child);
+                }
+            }
+        }
+        total
+    }
+    let p = std::path::Path::new(&path);
+    if p.is_symlink() { return 0; }
+    if p.is_file() { return p.metadata().map(|m| m.len()).unwrap_or(0); }
+    if p.is_dir() { walk(p) } else { 0 }
 }
 
 // ── File explorer (left side panel) ───────────────────────────────────────────

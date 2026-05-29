@@ -69,9 +69,23 @@ function expandPath(p) {
 // Uses SI decimal prefixes and French unit names (Go = giga-octet, To = téra-octet)
 // — standard in French-speaking broadcast/film production environments.
 function formatBytes(b) {
-    if (b <= 0) return '0 o';
-    if (b < 1e12) return (b / 1e9).toFixed(1) + ' Go';
-    return (b / 1e12).toFixed(2) + ' To';
+    if (b <= 0) return '0 B';
+    if (b < 1e6)  return (b / 1e3).toFixed(0) + ' KB';
+    if (b < 1e9)  return (b / 1e6).toFixed(1) + ' MB';
+    if (b < 1e12) return (b / 1e9).toFixed(2) + ' GB';
+    return (b / 1e12).toFixed(2) + ' TB';
+}
+
+function formatEta(secs) {
+    secs = Math.round(secs);
+    if (secs < 5)  return '< 5s';
+    if (secs < 60) return secs + 's';
+    var m = Math.floor(secs / 60);
+    var s = secs % 60;
+    if (m < 60)    return s ? m + 'm ' + s + 's' : m + 'm';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return m ? h + 'h ' + m + 'm' : h + 'h';
 }
 
 function escHtml(s) {
@@ -117,6 +131,37 @@ function makeVolInfoWatcher(inputEl, volInfoEl) {
     });
 }
 
+async function updateSrcInfo(el, displayPath) {
+    if (!el || !displayPath || !displayPath.trim()) { el && el.classList.add('hidden'); return; }
+    el.innerHTML = '<div class="vol-info-row"><span class="vol-type-name">…</span></div>';
+    el.classList.remove('hidden');
+    var expandedPath = expandPath(displayPath.trim());
+    var info, size;
+    try {
+        var results = await Promise.all([
+            invoke('get_volume_info', { path: expandedPath }),
+            invoke('get_source_size', { path: expandedPath })
+        ]);
+        info = results[0]; size = results[1];
+    } catch(e) { el.classList.add('hidden'); return; }
+    if (!info.ok && size === 0) { el.classList.add('hidden'); return; }
+    var typeName = [info.media_type, info.label].filter(Boolean).join(' – ') || '';
+    el.innerHTML =
+        '<div class="vol-info-row">' +
+            (typeName ? '<span class="vol-type-name">' + escHtml(typeName) + '</span>' : '') +
+            '<span class="vol-stat">' + formatBytes(size) + '</span>' +
+        '</div>';
+    el.classList.remove('hidden');
+}
+
+function makeSrcInfoWatcher(inputEl, srcInfoEl) {
+    var timer = null;
+    inputEl.addEventListener('input', function() {
+        clearTimeout(timer);
+        timer = setTimeout(function() { updateSrcInfo(srcInfoEl, inputEl.value); }, 450);
+    });
+}
+
 // ── DOM references ────────────────────────────────────────────────────────────
 var jobsContainer = document.getElementById('jobs-container');
 var addJobBtn     = document.getElementById('add-job-btn');
@@ -128,6 +173,7 @@ var cancelBtn     = document.getElementById('cancel-btn');
 var copyIsPaused  = false;
 var userCancelledQueue = false;
 var currentJobIndex    = -1;
+var copyJobStartTime   = null;
 var menuBtn            = document.getElementById('menu-btn');
 var settingsOverlay    = document.getElementById('settings-overlay');
 var verifyBtn          = document.getElementById('verify-btn');
@@ -499,11 +545,11 @@ function addJob() {
     srcBrowseBtn.title = 'Browse…';
     srcBrowseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-folder"/></svg>';
     var srcVolInfo = createVolInfoEl();
-    makeVolInfoWatcher(srcInputEl, srcVolInfo);
+    makeSrcInfoWatcher(srcInputEl, srcVolInfo);
 
     srcBrowseBtn.addEventListener('click', async function() {
         var p = await pickFolder();
-        if (p) { srcInputEl.value = shortenPath(p); updateVolInfo(srcVolInfo, srcInputEl.value); }
+        if (p) { srcInputEl.value = shortenPath(p); updateSrcInfo(srcVolInfo, srcInputEl.value); }
     });
 
     srcRow.appendChild(srcInputEl);
@@ -651,10 +697,20 @@ function addJob() {
     structureBtn.innerHTML = '<svg><use href="#ico-folder-tree"/></svg>';
     structureBtn.addEventListener('click', function() { openStructurePopup(jobCard); });
 
-    // Trailing group after the MHL toggle: template / structure / note.
+    var reportSettingsBtn = document.createElement('button');
+    reportSettingsBtn.className = 'job-structure-btn job-report-settings-btn';
+    reportSettingsBtn.title = 'Report settings for this job';
+    reportSettingsBtn.innerHTML = '<svg><use href="#ico-report-settings"/></svg>';
+    reportSettingsBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        openReportSettingsPopup(jobCard);
+    });
+
+    // Trailing group after the MHL toggle: template / structure / note / report-settings.
     jobOptsRow.appendChild(templateInput);
     jobOptsRow.appendChild(structureBtn);
     jobOptsRow.appendChild(commentBtn);
+    jobOptsRow.appendChild(reportSettingsBtn);
 
     card.appendChild(jobOptsRow);
 
@@ -668,10 +724,16 @@ function addJob() {
     var jobProgressFillEl = document.createElement('div');
     jobProgressFillEl.className = 'job-progress-fill';
     jobProgressTrack.appendChild(jobProgressFillEl);
+    var jobProgressInfoEl = document.createElement('div');
+    jobProgressInfoEl.className = 'job-progress-info';
     var jobProgressTextEl = document.createElement('span');
     jobProgressTextEl.className = 'job-progress-text';
+    var jobProgressEtaEl = document.createElement('span');
+    jobProgressEtaEl.className = 'job-progress-eta';
+    jobProgressInfoEl.appendChild(jobProgressTextEl);
+    jobProgressInfoEl.appendChild(jobProgressEtaEl);
     jobProgress.appendChild(jobProgressTrack);
-    jobProgress.appendChild(jobProgressTextEl);
+    jobProgress.appendChild(jobProgressInfoEl);
     jobCard.appendChild(jobProgress);
 
     jobsContainer.appendChild(jobCard);
@@ -725,8 +787,11 @@ function getJobs() {
             comment:         card.dataset.comment     || '',
             mhl_comment:     card.dataset.mhl_comment || '',
             location:        card.dataset.location    || '',
-            template:        card.dataset.template    || '',
-            jobvars:         (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
+            template:         card.dataset.template         || '',
+            jobvars:          (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
+            checksumName:     card.dataset.checksumName     || '',
+            reportName:       card.dataset.reportName       || '',
+            reportSubfolder:  card.dataset.reportSubfolder  || '',
         });
     });
     return result;
@@ -745,10 +810,23 @@ async function registerListeners() {
         var cards = jobsContainer.querySelectorAll('.job-group');
         var activeCard = cards[currentJobIndex];
         if (activeCard) {
-            var fill = activeCard.querySelector('.job-progress-fill');
-            var text = activeCard.querySelector('.job-progress-text');
-            if (fill) fill.style.width = Math.round(event.payload.fraction * 100) + '%';
+            var fraction = event.payload.fraction;
+            var fill  = activeCard.querySelector('.job-progress-fill');
+            var text  = activeCard.querySelector('.job-progress-text');
+            var etaEl = activeCard.querySelector('.job-progress-eta');
+            if (fill) fill.style.width = Math.round(fraction * 100) + '%';
             if (text) text.textContent = event.payload.label;
+            if (etaEl) {
+                if (fraction > 0.01 && fraction < 0.99) {
+                    if (!copyJobStartTime) copyJobStartTime = Date.now();
+                    var elapsed = (Date.now() - copyJobStartTime) / 1000;
+                    if (elapsed > 1.0) {
+                        etaEl.textContent = 'Remaining time: ' + formatEta(elapsed * (1.0 - fraction) / fraction);
+                    }
+                } else {
+                    etaEl.textContent = '';
+                }
+            }
         }
     }));
 
@@ -787,6 +865,7 @@ async function runJob(job) {
         });
 
         try {
+            var srcBase = (job.src || '').replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() || '';
             await invoke('start_copy', {
                 args: {
                     src:               job.src,
@@ -800,7 +879,10 @@ async function runJob(job) {
                     comment:           job.comment      || '',
                     mhl_comment:       job.mhl_comment  || '',
                     location:          job.location     || '',
-                    open_dest:         false // handled at the end of launchCopy()
+                    open_dest:         false,
+                    checksum_name_override: resolveNameTemplate(job.checksumName    || '', srcBase),
+                    report_name_override:   resolveNameTemplate(job.reportName      || '', srcBase),
+                    report_subfolder:       resolveNameTemplate(job.reportSubfolder || '', srcBase),
                 }
             });
         } catch(e) {
@@ -856,6 +938,7 @@ async function launchCopy() {
         p.classList.add('hidden');
         var f = p.querySelector('.job-progress-fill');
         var t = p.querySelector('.job-progress-text');
+        var e = p.querySelector('.job-progress-eta');
         if (f) {
             f.style.transition = 'none';
             f.style.width = '0%';
@@ -864,6 +947,7 @@ async function launchCopy() {
             f.style.transition = '';
         }
         if (t) t.textContent = '';
+        if (e) e.textContent = '';
     });
 
     await registerListeners();
@@ -876,6 +960,7 @@ async function launchCopy() {
         var jobCards  = jobsContainer.querySelectorAll('.job-group');
         var jobProgEl = jobCards[i] ? jobCards[i].querySelector('.job-progress') : null;
 
+        copyJobStartTime = null;
         currentJobIndex = i;
 
         if (jobProgEl) {
@@ -883,6 +968,8 @@ async function launchCopy() {
             jobProgEl.querySelector('.job-progress-fill').style.width = '0%';
             jobProgEl.querySelector('.job-progress-fill').classList.remove('job-progress-error');
             jobProgEl.querySelector('.job-progress-text').textContent = 'Starting…';
+            var etaSpan = jobProgEl.querySelector('.job-progress-eta');
+            if (etaSpan) etaSpan.textContent = '';
         }
 
         if (multi) {
@@ -903,6 +990,8 @@ async function launchCopy() {
             if (result.ok) fill.classList.add('job-progress-done');
             else           fill.classList.add('job-progress-error');
             jobProgEl.querySelector('.job-progress-text').textContent = result.summary || (result.ok ? 'Done' : 'Error');
+            var doneEta = jobProgEl.querySelector('.job-progress-eta');
+            if (doneEta) doneEta.textContent = '';
         }
 
         if (!result.ok) allOk = false;
@@ -988,6 +1077,8 @@ function showPrompt(kind, items, conflictItems) {
         btnRow.innerHTML = '';
         message.innerHTML = '';
         message.removeAttribute('style');
+        title.innerHTML = '';
+        title.style.position = '';
 
         if (kind === 'mhl_conflict') {
             title.textContent = 'Existing MHL at destination';
@@ -1005,11 +1096,55 @@ function showPrompt(kind, items, conflictItems) {
             title.textContent = 'Non-empty destination';
             message.textContent =
                 'The following destination(s) already contain files:\n\n' +
-                items.join('\n') + '\n\nContinue anyway?';
+                items.join('\n') + '\n\n' +
+                'Nothing will be deleted. You are about to copy new files alongside the existing ones. Continue?';
             addPromptBtn(btnRow, 'Cancel',   'cancel',   false, false, resolve);
             addPromptBtn(btnRow, 'Continue', 'continue', true,  false, resolve);
         } else {
             title.textContent = 'File conflicts detected';
+            title.style.position = 'relative';
+
+            var helpBtn = document.createElement('button');
+            helpBtn.className = 'conflict-help-btn';
+            helpBtn.setAttribute('aria-label', 'Help');
+            helpBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>';
+
+            var helpPopover = document.createElement('div');
+            helpPopover.className = 'conflict-help-popover hidden';
+            helpPopover.innerHTML =
+                '<dl>' +
+                '<dt>Cancel</dt>' +
+                '<dd>Abort the copy entirely. Nothing is written to any destination.</dd>' +
+                '<dt>Skip and keep</dt>' +
+                '<dd>Identical files (same size &amp; date) are skipped. Differing files: the existing destination copy is renamed <em>_conflict_01</em>, then the source file is copied normally and can be verified.</dd>' +
+                '<dt>Skip and replace</dt>' +
+                '<dd>Identical files (same size &amp; date) are skipped. Files that differ are overwritten with the source version.</dd>' +
+                '<dt>Replace all</dt>' +
+                '<dd>All conflicting files are overwritten with the source, regardless of size or date.</dd>' +
+                '</dl>';
+            helpBtn.appendChild(helpPopover);
+
+            var helpPinned = false;
+            helpBtn.addEventListener('mouseenter', function() {
+                helpPopover.classList.remove('hidden');
+            });
+            helpBtn.addEventListener('mouseleave', function() {
+                if (!helpPinned) helpPopover.classList.add('hidden');
+            });
+            helpBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                helpPinned = !helpPinned;
+                helpPopover.classList.toggle('hidden', !helpPinned);
+                helpPopover.classList.toggle('pinned', helpPinned);
+            });
+            document.addEventListener('click', function closeHelp() {
+                helpPinned = false;
+                helpPopover.classList.add('hidden');
+                helpPopover.classList.remove('pinned');
+                document.removeEventListener('click', closeHelp);
+            });
+
+            title.appendChild(helpBtn);
 
             message.style.background   = 'none';
             message.style.padding      = '0';
@@ -1062,9 +1197,10 @@ function showPrompt(kind, items, conflictItems) {
             wrap.appendChild(table);
             message.appendChild(wrap);
 
-            addPromptBtn(btnRow, 'Cancel',                   'cancel',   false, false, resolve);
-            addPromptBtn(btnRow, 'Skip — size & date match', 'skip',     true,  false, resolve);
-            addPromptBtn(btnRow, 'Replace all',              'continue', true,  true,  resolve);
+            addPromptBtn(btnRow, 'Cancel',           'cancel',    false, false, resolve);
+            addPromptBtn(btnRow, 'Skip and keep',    'skip_keep', false, false, resolve);
+            addPromptBtn(btnRow, 'Skip and replace', 'skip',      true,  false, resolve);
+            addPromptBtn(btnRow, 'Replace all',      'continue',  true,  true,  resolve);
         }
         promptOverlay.classList.remove('hidden');
     });
@@ -1121,7 +1257,7 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
                 if (srcInputEl) {
                     srcInputEl.value = shortenPath(droppedPath);
                     var srcVi = targetCard.querySelector('.job-src-section .vol-info');
-                    if (srcVi) updateVolInfo(srcVi, srcInputEl.value);
+                    if (srcVi) updateSrcInfo(srcVi, srcInputEl.value);
                 }
             } else if (destListEl) {
                 var inputs = Array.from(destListEl.querySelectorAll('input[type="text"]'));
@@ -1411,6 +1547,26 @@ function highlightBad(text, bad) {
         html = html.split(escHtml(tok)).join('<span class="tok-bad">' + escHtml(tok) + '</span>');
     });
     return html;
+}
+
+// Resolve a name-override template (checksum / report).
+// Returns the resolved filename string, or '' if template is blank.
+// Supports %date, %day, %project, %source (= baseName of source path).
+// Unresolved tokens are left as-is. Result is sanitized (no path separators).
+function resolveNameTemplate(template, srcName) {
+    var raw = (template || '').trim();
+    if (!raw) return '';
+    var vars = {
+        date:    formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
+        day:     (currentSettings && currentSettings.folder_shoot_day) || '',
+        project: (currentSettings && currentSettings.project_title) || '',
+        source:  srcName || '',
+    };
+    var out = raw.replace(/%([A-Za-z]+)/g, function(m, name) {
+        var key = name.toLowerCase();
+        return (key in vars) ? vars[key] : m;
+    });
+    return out.replace(/[\/\\]/g, '_').trim();
 }
 
 // ── Job selection ─────────────────────────────────────────────────────────────
@@ -1845,7 +2001,7 @@ function ctxSetSource(path) {
     if (!srcEl) return;
     srcEl.value = shortenPath(path);
     var vi = selectedJobCard.querySelector('.job-src-section .vol-info');
-    if (vi) updateVolInfo(vi, srcEl.value);
+    if (vi) updateSrcInfo(vi, srcEl.value);
     refreshPreviewSoon();
 }
 
@@ -2029,6 +2185,51 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
             overlay.classList.add('hidden');
             activeCard = null;
         }
+    });
+})();
+
+// ── Per-job report settings popup ────────────────────────────────────────────
+(function() {
+    var overlay    = document.getElementById('report-settings-overlay');
+    var csInput    = document.getElementById('rset-checksum-name');
+    var rptInput   = document.getElementById('rset-report-name');
+    var subInput   = document.getElementById('rset-report-subfolder');
+    var okBtn      = document.getElementById('rset-ok');
+    var cancelBtn  = document.getElementById('rset-cancel');
+    var activeCard = null;
+
+    window.openReportSettingsPopup = function(jobCard) {
+        activeCard = jobCard;
+        csInput.value  = jobCard.dataset.checksumName    || '';
+        rptInput.value = jobCard.dataset.reportName      || '';
+        subInput.value = jobCard.dataset.reportSubfolder || '';
+        overlay.classList.remove('hidden');
+        csInput.focus();
+    };
+
+    function commit() {
+        if (!activeCard) return;
+        activeCard.dataset.checksumName    = csInput.value.trim();
+        activeCard.dataset.reportName      = rptInput.value.trim();
+        activeCard.dataset.reportSubfolder = subInput.value.trim();
+        var btn = activeCard.querySelector('.job-report-settings-btn');
+        var hasCustom = csInput.value.trim() || rptInput.value.trim() || subInput.value.trim();
+        if (btn) btn.classList.toggle('has-structure', !!hasCustom);
+        overlay.classList.add('hidden');
+        activeCard = null;
+    }
+
+    okBtn.addEventListener('click', commit);
+    cancelBtn.addEventListener('click', function() {
+        overlay.classList.add('hidden');
+        activeCard = null;
+    });
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) { overlay.classList.add('hidden'); activeCard = null; }
+    });
+    overlay.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') { overlay.classList.add('hidden'); activeCard = null; }
     });
 })();
 

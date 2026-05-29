@@ -111,6 +111,10 @@
     <path d="M3 3v13a2 2 0 0 0 2 2h3"/>
   </symbol>
 
+  <symbol id="ico-report-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 7H9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>
+  </symbol>
+
   <symbol id="ico-log-in" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
     <polyline points="10 17 15 12 10 7"/>
@@ -410,6 +414,27 @@
       <button id="structure-clear"        class="action-btn">Clear</button>
       <button id="structure-popup-cancel" class="action-btn">Cancel</button>
       <button id="structure-popup-ok"     class="action-btn suggested">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ REPORT SETTINGS POPUP ═══════════════════════════════════════════════ -->
+<div id="report-settings-overlay" class="overlay hidden">
+  <div class="modal structure-modal" role="dialog" aria-modal="true">
+    <div class="modal-header">Report settings for this job</div>
+    <div class="modal-section-label">Checksum file name</div>
+    <input id="rset-checksum-name" class="modal-input" type="text"
+           placeholder="Default: source or folder name" spellcheck="false" />
+    <div class="modal-section-label" style="margin-top:6px">Report file name</div>
+    <input id="rset-report-name" class="modal-input" type="text"
+           placeholder="Default: source or folder name" spellcheck="false" />
+    <div class="modal-section-label" style="margin-top:6px">Reports subfolder</div>
+    <input id="rset-report-subfolder" class="modal-input" type="text"
+           placeholder="e.g. Reports (leave blank for none)" spellcheck="false" />
+    <div class="struct-hint">%date, %day, %project, %source — leave blank for default.</div>
+    <div class="modal-btn-row">
+      <button id="rset-cancel" class="action-btn">Cancel</button>
+      <button id="rset-ok"     class="action-btn suggested">OK</button>
     </div>
   </div>
 </div>

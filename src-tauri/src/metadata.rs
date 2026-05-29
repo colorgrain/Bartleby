@@ -676,9 +676,9 @@ fn clean_number(s: &str) -> String {
 /// English or a space in French notation). It improves readability with no effect
 /// on the value. `1_024 == 1024`.
 pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = 1_024 * KB;
-    const GB: u64 = 1_024 * MB;
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000 * KB;
+    const GB: u64 = 1_000 * MB;
     if bytes >= GB      { format!("{:.2} GB", bytes as f64 / GB as f64) }
     else if bytes >= MB { format!("{:.1} MB", bytes as f64 / MB as f64) }
     else if bytes >= KB { format!("{:.0} KB", bytes as f64 / KB as f64) }
