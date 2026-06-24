@@ -523,9 +523,16 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-header-row {
   display:         flex;
   align-items:     center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap:             6px;
   min-height:      16px;
 }
+/* The label hugs the left; the badge and remove button form a group pinned to
+   the right edge with the row's natural 6px gap between them. Putting the auto
+   margin on the label (instead of on both right-side items) keeps the badge
+   snug against the red cross — two separate margin-left:auto would split the
+   free space and leave a gap between them. */
+.job-label        { margin-right: auto; }
 
 /* Small uppercase label used inside the job card for "Source" / "Destinations" */
 .job-subsection-label {
@@ -540,8 +547,47 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Destination list inside a job card — mirrors the old #dest-list behaviour */
 .job-dest-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 
-/* Job label turns green when the job finishes successfully */
-.job-label.job-done { color: var(--success); font-weight: 700; }
+/* Job label turns green/red when the job finishes */
+.job-label.job-done   { color: var(--success); font-weight: 700; }
+.job-label.job-failed { color: var(--error);   font-weight: 700; }
+
+/* ── Job status badge (DaVinci-style queue state) ────────────────────────── */
+.job-status-badge {
+  display:        inline-flex;
+  align-items:    center;
+  gap:            4px;
+  flex-shrink:    0;
+  margin-left:    auto;
+  padding:        2px 8px;
+  border-radius:  999px;
+  font-size:      10px;
+  font-weight:    700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border:         1px solid transparent;
+  white-space:    nowrap;
+  user-select:    none;
+}
+.job-status-badge svg { width: 11px; height: 11px; stroke: currentColor; fill: none; }
+/* Idle = "to do": neutral. */
+.job-status-badge[data-status="idle"] {
+  color: var(--text-dim);
+  border-color: var(--card-border);
+}
+.job-status-badge[data-status="running"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.job-status-badge[data-status="done"] {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.job-status-badge[data-status="failed"] {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
 
 /* Horizontal source / destinations layout inside each job card */
 .job-group .card { padding: 0; overflow: hidden; min-width: 0; }
@@ -602,7 +648,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 .job-progress-fill.job-progress-done  { background: #4caf50; }
 .job-progress-fill.job-progress-error { background: var(--error); }
-.job-progress-text { font-size: 11px; color: var(--text-dim); min-height: 14px; }
+.job-progress-info { display: flex; justify-content: space-between; align-items: baseline; min-height: 14px; }
+.job-progress-text { font-size: 11px; color: var(--text-dim); }
+.job-progress-eta  { font-size: 11px; color: var(--text-dim); }
 
 /* ── Status ───────────────────────────────────────────────────────────────── */
 #status-label {
@@ -932,6 +980,50 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .match-ok   { color: #16a34a; }   /* vivid green  */
 .match-fail { color: #dc2626; }   /* vivid red    */
 
+/* ── Conflict help button & popover ──────────────────────────────────────── */
+.conflict-help-btn {
+  position:   absolute;
+  right:      0;
+  top:        50%;
+  transform:  translateY(-50%);
+  background: none;
+  border:     none;
+  padding:    2px;
+  cursor:     pointer;
+  color:      var(--text-dim);
+  border-radius: 50%;
+  display:    flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  line-height: 0;
+}
+.conflict-help-btn:hover { color: var(--text); }
+
+.conflict-help-popover {
+  position:      absolute;
+  top:           calc(100% + 6px);
+  right:         -6px;
+  width:         270px;
+  background:    var(--surface);
+  border:        1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding:       10px 12px;
+  font-size:     11.5px;
+  color:         var(--text);
+  box-shadow:    0 6px 20px var(--shadow);
+  z-index:       20;
+  text-align:    left;
+  font-weight:   400;
+  line-height:   1.45;
+  pointer-events: none;
+}
+.conflict-help-popover.pinned { pointer-events: auto; }
+.conflict-help-popover dl { margin: 0; }
+.conflict-help-popover dt { font-weight: 700; margin-top: 8px; font-size: 11px; }
+.conflict-help-popover dt:first-child { margin-top: 0; }
+.conflict-help-popover dd { margin: 2px 0 0 0; color: var(--text-dim); }
+
 /* ── Comment button (per-job "T" note button) ───────────────────────────── */
 .job-comment-btn {
   display:         inline-flex;
@@ -1224,6 +1316,21 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ctx-item:disabled  { opacity: 0.4; }
 .ctx-item:disabled:hover { background: transparent; color: var(--text); }
 
+/* ── Explorer toolbar (refresh mounted volumes) ──────────────────────────── */
+#explorer-toolbar {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  gap:             8px;
+  padding:         6px 10px;
+  border-bottom:   1px solid var(--separator);
+  position:        sticky;
+  top:             0;
+  background:      var(--surface);
+  z-index:         1;
+}
+#explorer-hint   { font-size: 10.5px; color: var(--text-dim); }
+
 /* ── Structure preview tab ───────────────────────────────────────────────── */
 #preview-toolbar {
   display:         flex;
@@ -1306,7 +1413,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   box-shadow:   0 0 0 2px rgba(31,158,222,0.18);
 }
 .job-label.job-name-input::placeholder { color: var(--text-dim); }
-.job-label.job-name-input.job-done { color: var(--success); }
+.job-label.job-name-input.job-done   { color: var(--success); }
+.job-label.job-name-input.job-failed { color: var(--error); }
 
 /* ── Per-job structure button (next to the "T" note button) ──────────────── */
 .job-structure-btn {

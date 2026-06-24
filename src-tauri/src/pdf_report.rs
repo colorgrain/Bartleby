@@ -758,7 +758,11 @@ pub fn write_pdf(
     // `.map_err(|e| std::io::Error::new(…, e.to_string()))` :
     //   converts `printpdf::Error` to `std::io::Error` so the return type is
     //   consistent: `std::io::Result<()>` throughout this file.
-    let path   = dst_dir.join(format!("{}_{}.pdf", report_name, timestamp));
+    let path   = if timestamp.is_empty() {
+        dst_dir.join(format!("{}.pdf", report_name))
+    } else {
+        dst_dir.join(format!("{}_{}.pdf", report_name, timestamp))
+    };
     let mut wr = BufWriter::new(File::create(path)?);
     doc.save(&mut wr)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

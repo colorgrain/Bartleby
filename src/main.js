@@ -69,9 +69,23 @@ function expandPath(p) {
 // Uses SI decimal prefixes and French unit names (Go = giga-octet, To = téra-octet)
 // — standard in French-speaking broadcast/film production environments.
 function formatBytes(b) {
-    if (b <= 0) return '0 o';
-    if (b < 1e12) return (b / 1e9).toFixed(1) + ' Go';
-    return (b / 1e12).toFixed(2) + ' To';
+    if (b <= 0) return '0 B';
+    if (b < 1e6)  return (b / 1e3).toFixed(0) + ' KB';
+    if (b < 1e9)  return (b / 1e6).toFixed(1) + ' MB';
+    if (b < 1e12) return (b / 1e9).toFixed(2) + ' GB';
+    return (b / 1e12).toFixed(2) + ' TB';
+}
+
+function formatEta(secs) {
+    secs = Math.round(secs);
+    if (secs < 5)  return '< 5s';
+    if (secs < 60) return secs + 's';
+    var m = Math.floor(secs / 60);
+    var s = secs % 60;
+    if (m < 60)    return s ? m + 'm ' + s + 's' : m + 'm';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return m ? h + 'h ' + m + 'm' : h + 'h';
 }
 
 function escHtml(s) {
@@ -117,6 +131,37 @@ function makeVolInfoWatcher(inputEl, volInfoEl) {
     });
 }
 
+async function updateSrcInfo(el, displayPath) {
+    if (!el || !displayPath || !displayPath.trim()) { el && el.classList.add('hidden'); return; }
+    el.innerHTML = '<div class="vol-info-row"><span class="vol-type-name">…</span></div>';
+    el.classList.remove('hidden');
+    var expandedPath = expandPath(displayPath.trim());
+    var info, size;
+    try {
+        var results = await Promise.all([
+            invoke('get_volume_info', { path: expandedPath }),
+            invoke('get_source_size', { path: expandedPath })
+        ]);
+        info = results[0]; size = results[1];
+    } catch(e) { el.classList.add('hidden'); return; }
+    if (!info.ok && size === 0) { el.classList.add('hidden'); return; }
+    var typeName = [info.media_type, info.label].filter(Boolean).join(' – ') || '';
+    el.innerHTML =
+        '<div class="vol-info-row">' +
+            (typeName ? '<span class="vol-type-name">' + escHtml(typeName) + '</span>' : '') +
+            '<span class="vol-stat">' + formatBytes(size) + '</span>' +
+        '</div>';
+    el.classList.remove('hidden');
+}
+
+function makeSrcInfoWatcher(inputEl, srcInfoEl) {
+    var timer = null;
+    inputEl.addEventListener('input', function() {
+        clearTimeout(timer);
+        timer = setTimeout(function() { updateSrcInfo(srcInfoEl, inputEl.value); }, 450);
+    });
+}
+
 // ── DOM references ────────────────────────────────────────────────────────────
 var jobsContainer = document.getElementById('jobs-container');
 var addJobBtn     = document.getElementById('add-job-btn');
@@ -128,6 +173,7 @@ var cancelBtn     = document.getElementById('cancel-btn');
 var copyIsPaused  = false;
 var userCancelledQueue = false;
 var currentJobIndex    = -1;
+var copyJobStartTime   = null;
 var menuBtn            = document.getElementById('menu-btn');
 var settingsOverlay    = document.getElementById('settings-overlay');
 var verifyBtn          = document.getElementById('verify-btn');
@@ -147,7 +193,10 @@ var defaultGenHtml  = false;
 var defaultGenMhl   = false;
 
 // ── Transport control helpers ─────────────────────────────────────────────────
+// True while a copy/queue is running — used to warn on cancel and on app close.
+var copyInProgress = false;
 function setCopyInProgress(active) {
+    copyInProgress = active;
     copyIsPaused = false;
     copyBtn.classList.toggle('hidden', active);
     pauseBtn.classList.toggle('hidden', !active);
@@ -435,6 +484,37 @@ function makeJobToggle(cls, labelText, checked) {
     return lbl;
 }
 
+// ── Job status (DaVinci-style queue state) ─────────────────────────────────────
+// Persisted on the card via dataset.status ∈ {idle, running, done, failed}.
+// Survives across copy launches because the cards themselves persist in the DOM.
+function setJobStatus(card, status) {
+    if (!card) return;
+    card.dataset.status = status;
+    // Tint the job title green/red once the job finishes.
+    var nameInput = card.querySelector('.job-name-input');
+    if (nameInput) {
+        nameInput.classList.toggle('job-done',   status === 'done');
+        nameInput.classList.toggle('job-failed', status === 'failed');
+    }
+    var badge = card.querySelector('.job-status-badge');
+    if (!badge) return;
+    badge.dataset.status = status;
+    // Idle/"to do": show nothing — keeps the header clean until the job runs.
+    if (status === 'idle') {
+        badge.style.display = 'none';
+        badge.innerHTML = '';
+        return;
+    }
+    badge.style.display = '';
+    var map = {
+        running: { icon: '',           text: 'Running' },
+        done:    { icon: '#ico-check', text: 'Done'    },
+        failed:  { icon: '#ico-close', text: 'Failed'  },
+    };
+    var m = map[status] || map.running;
+    badge.innerHTML = (m.icon ? '<svg><use href="' + m.icon + '"/></svg>' : '') + m.text;
+}
+
 function addJob() {
     var jobCard = document.createElement('section');
     jobCard.className = 'group job-group';
@@ -466,9 +546,23 @@ function addJob() {
         refreshPreviewSoon();
     });
 
+    var statusBadge = document.createElement('span');
+    statusBadge.className = 'job-status-badge';
+    statusBadge.title = 'Job status — right-click the job to reset it';
+
     headerRow.appendChild(label);
+    headerRow.appendChild(statusBadge);
     headerRow.appendChild(removeJobBtn);
     jobCard.appendChild(headerRow);
+
+    setJobStatus(jobCard, 'idle');
+
+    // Right-click anywhere on the card (except text fields) → status menu.
+    jobCard.addEventListener('contextmenu', function(e) {
+        if (e.target.closest('input, textarea, select')) return;
+        e.preventDefault();
+        showJobCtxMenu(e.clientX, e.clientY, jobCard);
+    });
 
     // ── Card body ─────────────────────────────────────────────────────────────
     var card = document.createElement('div');
@@ -499,11 +593,11 @@ function addJob() {
     srcBrowseBtn.title = 'Browse…';
     srcBrowseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-folder"/></svg>';
     var srcVolInfo = createVolInfoEl();
-    makeVolInfoWatcher(srcInputEl, srcVolInfo);
+    makeSrcInfoWatcher(srcInputEl, srcVolInfo);
 
     srcBrowseBtn.addEventListener('click', async function() {
         var p = await pickFolder();
-        if (p) { srcInputEl.value = shortenPath(p); updateVolInfo(srcVolInfo, srcInputEl.value); }
+        if (p) { srcInputEl.value = shortenPath(p); updateSrcInfo(srcVolInfo, srcInputEl.value); }
     });
 
     srcRow.appendChild(srcInputEl);
@@ -651,10 +745,20 @@ function addJob() {
     structureBtn.innerHTML = '<svg><use href="#ico-folder-tree"/></svg>';
     structureBtn.addEventListener('click', function() { openStructurePopup(jobCard); });
 
-    // Trailing group after the MHL toggle: template / structure / note.
+    var reportSettingsBtn = document.createElement('button');
+    reportSettingsBtn.className = 'job-structure-btn job-report-settings-btn';
+    reportSettingsBtn.title = 'Report settings for this job';
+    reportSettingsBtn.innerHTML = '<svg><use href="#ico-report-settings"/></svg>';
+    reportSettingsBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        openReportSettingsPopup(jobCard);
+    });
+
+    // Trailing group after the MHL toggle: template / structure / note / report-settings.
     jobOptsRow.appendChild(templateInput);
     jobOptsRow.appendChild(structureBtn);
     jobOptsRow.appendChild(commentBtn);
+    jobOptsRow.appendChild(reportSettingsBtn);
 
     card.appendChild(jobOptsRow);
 
@@ -668,10 +772,16 @@ function addJob() {
     var jobProgressFillEl = document.createElement('div');
     jobProgressFillEl.className = 'job-progress-fill';
     jobProgressTrack.appendChild(jobProgressFillEl);
+    var jobProgressInfoEl = document.createElement('div');
+    jobProgressInfoEl.className = 'job-progress-info';
     var jobProgressTextEl = document.createElement('span');
     jobProgressTextEl.className = 'job-progress-text';
+    var jobProgressEtaEl = document.createElement('span');
+    jobProgressEtaEl.className = 'job-progress-eta';
+    jobProgressInfoEl.appendChild(jobProgressTextEl);
+    jobProgressInfoEl.appendChild(jobProgressEtaEl);
     jobProgress.appendChild(jobProgressTrack);
-    jobProgress.appendChild(jobProgressTextEl);
+    jobProgress.appendChild(jobProgressInfoEl);
     jobCard.appendChild(jobProgress);
 
     jobsContainer.appendChild(jobCard);
@@ -725,8 +835,11 @@ function getJobs() {
             comment:         card.dataset.comment     || '',
             mhl_comment:     card.dataset.mhl_comment || '',
             location:        card.dataset.location    || '',
-            template:        card.dataset.template    || '',
-            jobvars:         (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
+            template:         card.dataset.template         || '',
+            jobvars:          (function() { try { return JSON.parse(card.dataset.jobvars || '{}'); } catch(e) { return {}; } })(),
+            checksumName:     card.dataset.checksumName     || '',
+            reportName:       card.dataset.reportName       || '',
+            reportSubfolder:  card.dataset.reportSubfolder  || '',
         });
     });
     return result;
@@ -745,10 +858,23 @@ async function registerListeners() {
         var cards = jobsContainer.querySelectorAll('.job-group');
         var activeCard = cards[currentJobIndex];
         if (activeCard) {
-            var fill = activeCard.querySelector('.job-progress-fill');
-            var text = activeCard.querySelector('.job-progress-text');
-            if (fill) fill.style.width = Math.round(event.payload.fraction * 100) + '%';
+            var fraction = event.payload.fraction;
+            var fill  = activeCard.querySelector('.job-progress-fill');
+            var text  = activeCard.querySelector('.job-progress-text');
+            var etaEl = activeCard.querySelector('.job-progress-eta');
+            if (fill) fill.style.width = Math.round(fraction * 100) + '%';
             if (text) text.textContent = event.payload.label;
+            if (etaEl) {
+                // ETA is computed in Rust (phase-aware slowest-medium model) and
+                // sent as eta_secs. It is null during warmup / scan / done — in
+                // those cases we leave the field empty rather than guessing.
+                var etaSecs = event.payload.eta_secs;
+                if (fraction > 0.01 && fraction < 0.99 && etaSecs != null) {
+                    etaEl.textContent = 'Remaining time: ' + formatEta(etaSecs);
+                } else if (fraction >= 0.99) {
+                    etaEl.textContent = '';
+                }
+            }
         }
     }));
 
@@ -787,6 +913,7 @@ async function runJob(job) {
         });
 
         try {
+            var srcBase = (job.src || '').replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() || '';
             await invoke('start_copy', {
                 args: {
                     src:               job.src,
@@ -800,7 +927,10 @@ async function runJob(job) {
                     comment:           job.comment      || '',
                     mhl_comment:       job.mhl_comment  || '',
                     location:          job.location     || '',
-                    open_dest:         false // handled at the end of launchCopy()
+                    open_dest:         false,
+                    checksum_name_override: resolveNameTemplate(job.checksumName    || '', srcBase),
+                    report_name_override:   resolveNameTemplate(job.reportName      || '', srcBase),
+                    report_subfolder:       resolveNameTemplate(job.reportSubfolder || '', srcBase),
                 }
             });
         } catch(e) {
@@ -812,28 +942,57 @@ async function runJob(job) {
 
 async function launchCopy() {
     userCancelledQueue = false;
-    var jobs  = getJobs();
-    var multi = jobs.length > 1;
+    var cards = Array.prototype.slice.call(jobsContainer.querySelectorAll('.job-group'));
+    var jobs  = getJobs();   // parallel to `cards` by index
 
-    for (var i = 0; i < jobs.length; i++) {
-        var prefix = multi ? 'Job ' + (i + 1) + ': p' : 'P';
-        if (!jobs[i].src) {
-            alert(prefix + 'lease choose a source directory.');
-            return;
-        }
-        if (!jobs[i].dsts.length) {
-            alert(prefix + 'lease add at least one destination.');
-            return;
+    // ── Decide which jobs to run (skip already-done ones on request) ──────────
+    var allIdx  = jobs.map(function(_, i) { return i; });
+    var doneIdx = allIdx.filter(function(i) { return cards[i] && cards[i].dataset.status === 'done'; });
+    var runSet  = allIdx;
+
+    if (doneIdx.length > 0) {
+        var choice = await showChoice(
+            'Some jobs are already done.',
+            doneIdx.length + ' of ' + jobs.length + ' job(s) are marked as done.\n\n' +
+            'Choose to re-run everything, or only the jobs that are not done yet.',
+            [
+                { label: 'Cancel',                 value: null },
+                { label: 'Start undone jobs only', value: 'undone' },
+                { label: 'Start all jobs',         value: 'all', kind: 'suggested' },
+            ]);
+        if (choice === null) return;
+        if (choice === 'all') {
+            cards.forEach(function(c) { setJobStatus(c, 'idle'); });
+            runSet = allIdx;
+        } else {
+            runSet = allIdx.filter(function(i) { return cards[i].dataset.status !== 'done'; });
         }
     }
 
-    // Resolve per-job folder templates: rewrite each destination to
-    // root + '/' + <resolved template>. The copy engine then builds the full
-    // hierarchy via create_dir_all — no backend change needed.
-    for (var i = 0; i < jobs.length; i++) {
+    if (runSet.length === 0) {
+        statusLabel.textContent = 'Nothing to run — all jobs are already done.';
+        statusLabel.className = '';
+        return;
+    }
+
+    var multi = runSet.length > 1;
+
+    // ── Validate the jobs we are about to run ─────────────────────────────────
+    for (var s = 0; s < runSet.length; s++) {
+        var i = runSet[s];
+        var prefix = (jobs.length > 1) ? 'Job ' + (i + 1) + ': p' : 'P';
+        if (!jobs[i].src)         { alert(prefix + 'lease choose a source directory.'); return; }
+        if (!jobs[i].dsts.length) { alert(prefix + 'lease add at least one destination.'); return; }
+    }
+
+    // Resolve per-job folder templates for the jobs we run: rewrite each
+    // destination to root + '/' + <resolved template>. The copy engine then
+    // builds the full hierarchy via create_dir_all — no backend change needed.
+    for (var s = 0; s < runSet.length; s++) {
+        var i = runSet[s];
         var res = resolveTemplate(jobs[i]);
         if (res.bad && res.bad.length) {
-            var jp = multi ? 'Job ' + (i + 1) + ': ' : '';
+            var jp = (jobs.length > 1) ? 'Job ' + (i + 1) + ': ' : '';
             alert(jp + 'the folder template has unresolved tokens: ' + res.bad.join(', ') +
                   '\n\nFix it in the job structure popup or in Settings → Structure.');
             return;
@@ -849,13 +1008,15 @@ async function launchCopy() {
     statusLabel.className   = '';
     logView.textContent     = '';
 
-    jobsContainer.querySelectorAll('.job-label').forEach(function(lbl) {
-        lbl.classList.remove('job-done');
-    });
-    jobsContainer.querySelectorAll('.job-progress').forEach(function(p) {
+    // Reset progress bars and status for the jobs we will run.
+    runSet.forEach(function(idx) {
+        setJobStatus(cards[idx], 'idle');
+        var p = cards[idx] ? cards[idx].querySelector('.job-progress') : null;
+        if (!p) return;
         p.classList.add('hidden');
         var f = p.querySelector('.job-progress-fill');
         var t = p.querySelector('.job-progress-text');
+        var e = p.querySelector('.job-progress-eta');
         if (f) {
             f.style.transition = 'none';
             f.style.width = '0%';
@@ -864,6 +1025,7 @@ async function launchCopy() {
             f.style.transition = '';
         }
         if (t) t.textContent = '';
+        if (e) e.textContent = '';
     });
 
     await registerListeners();
@@ -871,38 +1033,42 @@ async function launchCopy() {
     var allOk       = true;
     var lastSummary = '';
 
-    for (var i = 0; i < jobs.length; i++) {
+    for (var s = 0; s < runSet.length; s++) {
+        var i   = runSet[s];
         var job = jobs[i];
         var jobCards  = jobsContainer.querySelectorAll('.job-group');
         var jobProgEl = jobCards[i] ? jobCards[i].querySelector('.job-progress') : null;
 
+        copyJobStartTime = null;
         currentJobIndex = i;
+        setJobStatus(jobCards[i], 'running');
 
         if (jobProgEl) {
             jobProgEl.classList.remove('hidden');
             jobProgEl.querySelector('.job-progress-fill').style.width = '0%';
             jobProgEl.querySelector('.job-progress-fill').classList.remove('job-progress-error');
             jobProgEl.querySelector('.job-progress-text').textContent = 'Starting…';
+            var etaSpan = jobProgEl.querySelector('.job-progress-eta');
+            if (etaSpan) etaSpan.textContent = '';
         }
 
         if (multi) {
-            currentJobPrefix = 'Job ' + (i + 1) + '/' + jobs.length;
+            currentJobPrefix = 'Job ' + (s + 1) + '/' + runSet.length;
             logView.textContent += '\n── ' + currentJobPrefix + ' — ' + job.src + '\n';
             logView.scrollTop = logView.scrollHeight;
         }
 
         var result = await runJob(job);
 
-        if (jobCards[i]) {
-            var doneLbl = jobCards[i].querySelector('.job-label');
-            if (doneLbl && result.ok) doneLbl.classList.add('job-done');
-        }
+        setJobStatus(jobCards[i], result.ok ? 'done' : 'failed');
         if (jobProgEl) {
             var fill = jobProgEl.querySelector('.job-progress-fill');
             fill.style.width = '100%';
             if (result.ok) fill.classList.add('job-progress-done');
             else           fill.classList.add('job-progress-error');
             jobProgEl.querySelector('.job-progress-text').textContent = result.summary || (result.ok ? 'Done' : 'Error');
+            var doneEta = jobProgEl.querySelector('.job-progress-eta');
+            if (doneEta) doneEta.textContent = '';
         }
 
         if (!result.ok) allOk = false;
@@ -922,7 +1088,7 @@ async function launchCopy() {
     unlisteners = [];
 
     statusLabel.textContent = multi
-        ? (allOk ? 'All ' + jobs.length + ' jobs completed successfully.' : 'Queue finished with errors — check log.')
+        ? (allOk ? 'All ' + runSet.length + ' jobs completed successfully.' : 'Queue finished with errors — check log.')
         : lastSummary;
     statusLabel.className = allOk ? 'success' : 'error';
     setCopyInProgress(false);
@@ -949,7 +1115,7 @@ async function launchCopy() {
     // Open destinations (setting stored in currentSettings.open_dest)
     if (allOk && currentSettings && currentSettings.open_dest) {
         var allDsts = [];
-        jobs.forEach(function(j) { allDsts = allDsts.concat(j.dsts); });
+        runSet.forEach(function(i) { allDsts = allDsts.concat(jobs[i].dsts); });
         var uniqueDsts = allDsts.filter(function(d, idx) { return allDsts.indexOf(d) === idx; });
         if (uniqueDsts.length > 0) {
             try { await invoke('open_destinations', { paths: uniqueDsts }); }
@@ -971,11 +1137,36 @@ pauseBtn.addEventListener('click', async function() {
 });
 
 cancelBtn.addEventListener('click', async function() {
+    var ok = await confirmDialog(
+        'Cancel copy',
+        'A copy is in progress. Cancel it?\n\nNothing already copied is deleted, but the current transfer will stop.',
+        'Cancel copy', 'Keep copying', true);
+    if (!ok || !copyInProgress) return;
     cancelBtn.disabled = true;
     pauseBtn.disabled  = true;
     userCancelledQueue = true;
     try { await invoke('cancel_copy'); } catch(e) {}
 });
+
+// ── Warn before quitting while a copy is running ───────────────────────────────
+// The Rust main-window CloseRequested handler vetoes the close and emits this
+// event; we decide here whether to quit (always via the quit_app command).
+(async function setupCloseGuard() {
+    try {
+        await listen('app-close-requested', async function() {
+            if (copyInProgress) {
+                var ok = await confirmDialog(
+                    'Quit Bartleby?',
+                    'A copy is still in progress. Quitting now will cancel it.\n\nNothing already copied is deleted.',
+                    'Quit', 'Stay', true);
+                if (!ok) return;
+                userCancelledQueue = true;
+                try { await invoke('cancel_copy'); } catch(e) {}
+            }
+            try { await invoke('quit_app'); } catch(e) {}
+        });
+    } catch(e) { console.warn('close guard setup failed:', e); }
+})();
 
 // ── Prompt modal ──────────────────────────────────────────────────────────────
 var promptOverlay = document.getElementById('prompt-overlay');
@@ -988,6 +1179,9 @@ function showPrompt(kind, items, conflictItems) {
         btnRow.innerHTML = '';
         message.innerHTML = '';
         message.removeAttribute('style');
+        title.innerHTML = '';
+        title.style.position = '';
+        title.style.zIndex   = '';
 
         if (kind === 'mhl_conflict') {
             title.textContent = 'Existing MHL at destination';
@@ -1005,11 +1199,56 @@ function showPrompt(kind, items, conflictItems) {
             title.textContent = 'Non-empty destination';
             message.textContent =
                 'The following destination(s) already contain files:\n\n' +
-                items.join('\n') + '\n\nContinue anyway?';
+                items.join('\n') + '\n\n' +
+                'Nothing will be deleted. You are about to copy new files alongside the existing ones. Continue?';
             addPromptBtn(btnRow, 'Cancel',   'cancel',   false, false, resolve);
             addPromptBtn(btnRow, 'Continue', 'continue', true,  false, resolve);
         } else {
             title.textContent = 'File conflicts detected';
+            title.style.position = 'relative';
+            title.style.zIndex   = '10';
+
+            var helpBtn = document.createElement('button');
+            helpBtn.className = 'conflict-help-btn';
+            helpBtn.setAttribute('aria-label', 'Help');
+            helpBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>';
+
+            var helpPopover = document.createElement('div');
+            helpPopover.className = 'conflict-help-popover hidden';
+            helpPopover.innerHTML =
+                '<dl>' +
+                '<dt>Cancel</dt>' +
+                '<dd>Abort the copy entirely. Nothing is written to any destination.</dd>' +
+                '<dt>Skip and keep</dt>' +
+                '<dd>Identical files (same size &amp; date) are skipped. Differing files: the existing destination copy is renamed <em>_conflict_01</em>, then the source file is copied normally and can be verified.</dd>' +
+                '<dt>Skip and replace</dt>' +
+                '<dd>Identical files (same size &amp; date) are skipped. Files that differ are overwritten with the source version.</dd>' +
+                '<dt>Replace all</dt>' +
+                '<dd>All conflicting files are overwritten with the source, regardless of size or date.</dd>' +
+                '</dl>';
+            helpBtn.appendChild(helpPopover);
+
+            var helpPinned = false;
+            helpBtn.addEventListener('mouseenter', function() {
+                helpPopover.classList.remove('hidden');
+            });
+            helpBtn.addEventListener('mouseleave', function() {
+                if (!helpPinned) helpPopover.classList.add('hidden');
+            });
+            helpBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                helpPinned = !helpPinned;
+                helpPopover.classList.toggle('hidden', !helpPinned);
+                helpPopover.classList.toggle('pinned', helpPinned);
+            });
+            document.addEventListener('click', function closeHelp() {
+                helpPinned = false;
+                helpPopover.classList.add('hidden');
+                helpPopover.classList.remove('pinned');
+                document.removeEventListener('click', closeHelp);
+            });
+
+            title.appendChild(helpBtn);
 
             message.style.background   = 'none';
             message.style.padding      = '0';
@@ -1062,9 +1301,10 @@ function showPrompt(kind, items, conflictItems) {
             wrap.appendChild(table);
             message.appendChild(wrap);
 
-            addPromptBtn(btnRow, 'Cancel',                   'cancel',   false, false, resolve);
-            addPromptBtn(btnRow, 'Skip — size & date match', 'skip',     true,  false, resolve);
-            addPromptBtn(btnRow, 'Replace all',              'continue', true,  true,  resolve);
+            addPromptBtn(btnRow, 'Cancel',           'cancel',    false, false, resolve);
+            addPromptBtn(btnRow, 'Skip and keep',    'skip_keep', false, false, resolve);
+            addPromptBtn(btnRow, 'Skip and replace', 'skip',      true,  false, resolve);
+            addPromptBtn(btnRow, 'Replace all',      'continue',  true,  true,  resolve);
         }
         promptOverlay.classList.remove('hidden');
     });
@@ -1080,6 +1320,51 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
         resolve(reply);
     });
     row.appendChild(btn);
+}
+
+// ── Generic confirm / choice modal ─────────────────────────────────────────────
+// showChoice(title, message, buttons) where buttons = [{label, value, kind}],
+// kind ∈ {'suggested','danger', undefined}. Resolves to the chosen value, or null
+// if dismissed via Escape. Independent of the copy-prompt overlay so it can be
+// shown at any time (including while a copy prompt would be active).
+function showChoice(title, message, buttons) {
+    return new Promise(function(resolve) {
+        var overlay = document.getElementById('confirm-overlay');
+        var titleEl = document.getElementById('confirm-title');
+        var msgEl   = document.getElementById('confirm-message');
+        var row     = document.getElementById('confirm-btn-row');
+        titleEl.textContent = title;
+        msgEl.textContent   = message;
+        row.innerHTML = '';
+
+        function close(value) {
+            overlay.classList.add('hidden');
+            document.removeEventListener('keydown', onKey);
+            resolve(value);
+        }
+        function onKey(e) { if (e.key === 'Escape') close(null); }
+
+        buttons.forEach(function(b) {
+            var btn = document.createElement('button');
+            btn.className = 'action-btn' +
+                (b.kind === 'suggested' ? ' suggested' : '') +
+                (b.kind === 'danger'    ? ' danger'    : '');
+            btn.textContent = b.label;
+            btn.addEventListener('click', function() { close(b.value); });
+            row.appendChild(btn);
+        });
+
+        document.addEventListener('keydown', onKey);
+        overlay.classList.remove('hidden');
+    });
+}
+
+// Two-button yes/no helper built on showChoice. Resolves true / false.
+function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
+    return showChoice(title, message, [
+        { label: cancelLabel,  value: false },
+        { label: confirmLabel, value: true, kind: danger ? 'danger' : 'suggested' },
+    ]).then(function(v) { return v === true; });
 }
 
 // ── Drag & drop ───────────────────────────────────────────────────────────────
@@ -1121,7 +1406,7 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
                 if (srcInputEl) {
                     srcInputEl.value = shortenPath(droppedPath);
                     var srcVi = targetCard.querySelector('.job-src-section .vol-info');
-                    if (srcVi) updateVolInfo(srcVi, srcInputEl.value);
+                    if (srcVi) updateSrcInfo(srcVi, srcInputEl.value);
                 }
             } else if (destListEl) {
                 var inputs = Array.from(destListEl.querySelectorAll('input[type="text"]'));
@@ -1413,6 +1698,26 @@ function highlightBad(text, bad) {
     return html;
 }
 
+// Resolve a name-override template (checksum / report).
+// Returns the resolved filename string, or '' if template is blank.
+// Supports %date, %day, %project, %source (= baseName of source path).
+// Unresolved tokens are left as-is. Result is sanitized (no path separators).
+function resolveNameTemplate(template, srcName) {
+    var raw = (template || '').trim();
+    if (!raw) return '';
+    var vars = {
+        date:    formatStrftime((currentSettings && currentSettings.folder_var_date_format) || '%Y-%m-%d'),
+        day:     (currentSettings && currentSettings.folder_shoot_day) || '',
+        project: (currentSettings && currentSettings.project_title) || '',
+        source:  srcName || '',
+    };
+    var out = raw.replace(/%([A-Za-z]+)/g, function(m, name) {
+        var key = name.toLowerCase();
+        return (key in vars) ? vars[key] : m;
+    });
+    return out.replace(/[\/\\]/g, '_').trim();
+}
+
 // ── Job selection ─────────────────────────────────────────────────────────────
 var selectedJobCard = null;
 
@@ -1699,12 +2004,14 @@ document.querySelectorAll('.side-tab-btn').forEach(function(btn) {
 });
 
 // ── Explorer tree (lazy loading) ──────────────────────────────────────────────
-async function loadVolumes() {
+// Signature of the mounted-volume set, used to detect plug/unplug events.
+var lastVolumeSig = null;
+function volumeSig(vols) {
+    return (vols || []).map(function(v) { return v.path; }).sort().join('\n');
+}
+
+function renderVolumes(vols) {
     var tree = document.getElementById('explorer-tree');
-    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
-    var vols;
-    try { vols = await invoke('list_volumes'); }
-    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
     tree.innerHTML = '';
     if (!vols || !vols.length) {
         tree.innerHTML = '<div class="tree-empty-msg">No volumes found.</div>';
@@ -1714,6 +2021,44 @@ async function loadVolumes() {
         tree.appendChild(buildTreeNode(v.path, v.name, true, v.media_type, true));
     });
 }
+
+async function loadVolumes() {
+    var tree = document.getElementById('explorer-tree');
+    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
+    var vols;
+    try { vols = await invoke('list_volumes'); }
+    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
+    lastVolumeSig = volumeSig(vols);
+    renderVolumes(vols);
+}
+
+// Re-fetch the volume list and rebuild the tree ONLY if a disk was plugged or
+// removed. This keeps any folders the user has expanded intact during normal
+// focus changes, while still surfacing drives mounted after Bartleby started.
+async function refreshVolumesIfChanged() {
+    if (!explorerPanelOpen()) return;
+    var vols;
+    try { vols = await invoke('list_volumes'); } catch(e) { return; }
+    var sig = volumeSig(vols);
+    if (sig === lastVolumeSig) return;
+    lastVolumeSig = sig;
+    renderVolumes(vols);
+}
+
+// The explorer panel is "open" when the side panel has width and its Explorer
+// tab is the active one.
+function explorerPanelOpen() {
+    var panel = document.getElementById('side-panel');
+    var body  = document.getElementById('sbody-explorer');
+    return !!panel && panel.offsetWidth > 40 && !!body && !body.classList.contains('hidden');
+}
+
+// Manual refresh button + auto-refresh when the window regains focus.
+(function setupVolumeRefresh() {
+    var btn = document.getElementById('explorer-refresh');
+    if (btn) btn.addEventListener('click', function() { loadVolumes(); });
+    window.addEventListener('focus', function() { refreshVolumesIfChanged(); });
+})();
 
 // Maps a volume's media type to its explorer icon.
 function volumeIcon(mediaType) {
@@ -1845,7 +2190,7 @@ function ctxSetSource(path) {
     if (!srcEl) return;
     srcEl.value = shortenPath(path);
     var vi = selectedJobCard.querySelector('.job-src-section .vol-info');
-    if (vi) updateVolInfo(vi, srcEl.value);
+    if (vi) updateSrcInfo(vi, srcEl.value);
     refreshPreviewSoon();
 }
 
@@ -1911,6 +2256,45 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
         else if (act === 'add-dest')   ctxAddDest(t.path);
         else if (act === 'new-folder') ctxNewFolder(t);
         hideExplorerCtxMenu();
+    });
+});
+
+// ── Job context menu (status) ──────────────────────────────────────────────────
+var jobCtxTarget = null;
+
+function showJobCtxMenu(x, y, card) {
+    if (copyInProgress) return;   // don't let status be changed mid-queue
+    var menu = document.getElementById('job-ctx-menu');
+    jobCtxTarget = card;
+    var status = card.dataset.status || 'idle';
+    menu.querySelector('[data-act="reset"]').disabled = (status === 'idle');
+    menu.classList.remove('hidden');
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    var r = menu.getBoundingClientRect();
+    if (r.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+    if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+}
+
+function hideJobCtxMenu() {
+    document.getElementById('job-ctx-menu').classList.add('hidden');
+    jobCtxTarget = null;
+}
+
+document.addEventListener('click', function(e) {
+    var menu = document.getElementById('job-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target)) hideJobCtxMenu();
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hideJobCtxMenu();
+});
+
+document.querySelectorAll('#job-ctx-menu .ctx-item').forEach(function(item) {
+    item.addEventListener('click', function() {
+        if (item.disabled || !jobCtxTarget) { hideJobCtxMenu(); return; }
+        var act = item.dataset.act;
+        if (act === 'reset') setJobStatus(jobCtxTarget, 'idle');
+        hideJobCtxMenu();
     });
 });
 
@@ -2029,6 +2413,51 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
             overlay.classList.add('hidden');
             activeCard = null;
         }
+    });
+})();
+
+// ── Per-job report settings popup ────────────────────────────────────────────
+(function() {
+    var overlay    = document.getElementById('report-settings-overlay');
+    var csInput    = document.getElementById('rset-checksum-name');
+    var rptInput   = document.getElementById('rset-report-name');
+    var subInput   = document.getElementById('rset-report-subfolder');
+    var okBtn      = document.getElementById('rset-ok');
+    var cancelBtn  = document.getElementById('rset-cancel');
+    var activeCard = null;
+
+    window.openReportSettingsPopup = function(jobCard) {
+        activeCard = jobCard;
+        csInput.value  = jobCard.dataset.checksumName    || '';
+        rptInput.value = jobCard.dataset.reportName      || '';
+        subInput.value = jobCard.dataset.reportSubfolder || '';
+        overlay.classList.remove('hidden');
+        csInput.focus();
+    };
+
+    function commit() {
+        if (!activeCard) return;
+        activeCard.dataset.checksumName    = csInput.value.trim();
+        activeCard.dataset.reportName      = rptInput.value.trim();
+        activeCard.dataset.reportSubfolder = subInput.value.trim();
+        var btn = activeCard.querySelector('.job-report-settings-btn');
+        var hasCustom = csInput.value.trim() || rptInput.value.trim() || subInput.value.trim();
+        if (btn) btn.classList.toggle('has-structure', !!hasCustom);
+        overlay.classList.add('hidden');
+        activeCard = null;
+    }
+
+    okBtn.addEventListener('click', commit);
+    cancelBtn.addEventListener('click', function() {
+        overlay.classList.add('hidden');
+        activeCard = null;
+    });
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) { overlay.classList.add('hidden'); activeCard = null; }
+    });
+    overlay.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') { overlay.classList.add('hidden'); activeCard = null; }
     });
 })();
 

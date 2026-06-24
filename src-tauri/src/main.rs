@@ -314,6 +314,7 @@ fn main() {
             pause_copy,
             resume_copy,
             cancel_copy,
+            quit_app,
             is_system_dark_mode,
             open_destinations,
             send_notification,
@@ -321,6 +322,7 @@ fn main() {
             get_home_dir,
             get_app_version,
             get_volume_info,
+            get_source_size,
             list_volumes,
             list_dir,
             create_folder,
@@ -376,14 +378,19 @@ fn main() {
                 Err(e) => eprintln!("Bartleby: could not create verifier window: {e}"),
             }
 
-            // Closing the main window quits the whole application. Without this,
-            // the still-existing (hidden) verifier window keeps the process
-            // alive after the main window is closed.
+            // Closing the main window quits the whole application (the still-existing
+            // hidden verifier window would otherwise keep the process alive). We do
+            // NOT exit directly: instead we veto the close and hand control to JS,
+            // which warns the user if a copy is running, then calls `quit_app`.
+            // When no copy is running, JS calls `quit_app` immediately.
             if let Some(main_win) = app.get_webview_window("main") {
                 let h = handle.clone();
                 main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        h.exit(0);
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = h.get_webview_window("main") {
+                            let _ = w.emit("app-close-requested", ());
+                        }
                     }
                 });
             }
@@ -512,8 +519,12 @@ fn save_settings(state: State<AppState>, new_settings: Settings) -> Result<(), S
 struct ProgressPayload {
     /// Progress fraction in [0.0, 1.0]. JavaScript multiplies by 100 for percentage.
     fraction: f64,
-    /// Text shown below the progress bar: current filename + optional ETA string.
+    /// Text shown below the progress bar: current filename + speed.
     label:    String,
+    /// Estimated remaining time in seconds (copy + verify), or `None` during the
+    /// warmup window / non-applicable phases. Computed by the phase-aware
+    /// slowest-medium model in the copy engine ticker.
+    eta_secs: Option<f64>,
 }
 
 /// Payload for `copy-log` events: one line of text to append to the log panel.
@@ -616,6 +627,18 @@ struct StartCopyArgs {
     /// This flag is read by JavaScript in the `copy-done` handler, not by Rust.
     #[allow(dead_code)]
     open_dest:    bool,
+    /// Optional filename override for checksum sidecar files (.md5, .xxh3, etc.).
+    /// Empty string means use the default name (derived from source/destination name).
+    #[serde(default)]
+    checksum_name_override: String,
+    /// Optional filename override for report files (.csv, .pdf, .html).
+    /// Empty string means use the default name (derived from source/destination name).
+    #[serde(default)]
+    report_name_override: String,
+    /// Optional subfolder inside each destination where reports are written.
+    /// Empty string means reports land directly in the destination root.
+    #[serde(default)]
+    report_subfolder: String,
 }
 
 /// Launches the file transfer pipeline in two background threads and returns immediately.
@@ -736,9 +759,12 @@ fn start_copy(
     let gen_pdf   = args.gen_pdf;
     let gen_html  = args.gen_html;
     let gen_mhl   = args.gen_mhl;
-    let comment     = args.comment;
-    let mhl_comment = args.mhl_comment;
-    let location    = args.location;
+    let comment              = args.comment;
+    let mhl_comment          = args.mhl_comment;
+    let location             = args.location;
+    let checksum_name_override = args.checksum_name_override;
+    let report_name_override   = args.report_name_override;
+    let report_subfolder       = args.report_subfolder;
 
     // ── Thread 1: Copy engine ──────────────────────────────────────────────────
     // `thread::spawn(move || { … })` starts a new OS thread.
@@ -747,7 +773,7 @@ fn start_copy(
     //   - `src_path`, `dst_paths`, `settings_snapshot` → owned by this thread
     //   - `tx` (Sender<Msg>) → the engine sends its progress here
     //   - `reply_rx` (Receiver<Reply>) → the engine waits for prompt replies here
-    //   - `verify`, `gen_md5`, `gen_csv`, `gen_pdf` → copied (bool is Copy)
+    //   - `hash_algo` (Copy enum), `gen_csv`/`gen_pdf`/`gen_html`/`gen_mhl` (bool is Copy) → copied
     //
     // After this `spawn`, `src_path`, `dst_paths`, `tx`, and `reply_rx` can no longer
     // be used in `start_copy` — ownership has been transferred to the new thread.
@@ -768,6 +794,9 @@ fn start_copy(
             comment,
             mhl_comment,
             location,
+            checksum_name_override,
+            report_name_override,
+            report_subfolder,
             settings_snapshot,
             tx,
             reply_rx,
@@ -809,10 +838,10 @@ fn start_copy(
                 // Sent on every 1 MiB chunk read. JavaScript uses this to update
                 // the progress bar. The event name "copy-progress" must match
                 // exactly what JS listens for: listen("copy-progress", …).
-                Ok(copy_engine::Msg::Progress(f, label)) => {
+                Ok(copy_engine::Msg::Progress(f, label, eta_secs)) => {
                     // `let _ = …` discards the Result from `.emit()`.
                     // A send failure means the window was closed — not actionable here.
-                    let _ = win.emit("copy-progress", ProgressPayload { fraction: f, label });
+                    let _ = win.emit("copy-progress", ProgressPayload { fraction: f, label, eta_secs });
                 }
 
                 // ── Log line ──────────────────────────────────────────────────
@@ -929,10 +958,10 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
     // `match` is exhaustive: the `_` arm catches any unexpected values (e.g. typos
     // or future additions in JS) and treats them as "Cancel" for safety.
     let r = match reply.as_str() {
-        // `.as_str()` converts &String to &str so we can match string literals
-        "continue" => copy_engine::Reply::Continue,
-        "skip"     => copy_engine::Reply::Skip,
-        _          => copy_engine::Reply::Cancel, // default: cancel on unknown input
+        "continue"  => copy_engine::Reply::Continue,
+        "skip"      => copy_engine::Reply::Skip,
+        "skip_keep" => copy_engine::Reply::SkipKeep,
+        _           => copy_engine::Reply::Cancel,
     };
     // Acquire the lock, get an Option<&SyncSender<Reply>>, and send if Some.
     // `let _ = tx.send(r)` discards the Result — a send failure here means the
@@ -969,6 +998,13 @@ fn cancel_copy(state: State<AppState>) {
     if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
         pc.cancel();
     }
+}
+
+/// Quits the whole application. Called from JS once the close-confirmation flow
+/// (see the main-window `CloseRequested` handler) has been resolved by the user.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // ── Folder dialog ─────────────────────────────────────────────────────────────
@@ -1623,6 +1659,29 @@ fn get_volume_info(path: String) -> VolumeInfo {
     VolumeInfo { ok: true, label, media_type, total_bytes: total, free_bytes: free }
 }
 
+#[tauri::command]
+fn get_source_size(path: String) -> u64 {
+    fn walk(p: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_symlink() { continue; }
+                if child.is_file() {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                } else if child.is_dir() {
+                    total += walk(&child);
+                }
+            }
+        }
+        total
+    }
+    let p = std::path::Path::new(&path);
+    if p.is_symlink() { return 0; }
+    if p.is_file() { return p.metadata().map(|m| m.len()).unwrap_or(0); }
+    if p.is_dir() { walk(p) } else { 0 }
+}
+
 // ── File explorer (left side panel) ───────────────────────────────────────────
 
 /// One mounted volume / drive shown at the root of the explorer tree.
@@ -1904,8 +1963,9 @@ fn save_verify_html(
         .map_err(|e| e.to_string())
 }
 
-/// Generate a post-verification MHL (`<process>verify</process>`, generation N+1)
-/// for the original MHL that was just verified.
+/// Generate a post-verification MHL (`<process>in-place</process>`, generation N+1)
+/// for the original MHL that was just verified. Per-file pass/fail is recorded via
+/// the hash `action` attribute (`verified` / `failed`).
 #[tauri::command]
 fn generate_post_verify_mhl(
     verified_mhl: String,

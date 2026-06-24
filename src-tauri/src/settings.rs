@@ -295,6 +295,23 @@ pub struct Settings {
     /// Named folder-structure presets, callable from a template via `#presetName`.
     pub folder_presets: Vec<FolderPreset>,
 
+    // ── File naming templates ─────────────────────────────────────────────────
+    //
+    // Optional templates that override the default stem used when naming generated
+    // files. Supports the same tokens as folder templates (%date, %day, %project,
+    // plus %source for the source folder name and any custom %variable).
+    // Resolved in JavaScript at copy time. Empty string = use default behaviour.
+
+    /// Stem template for checksum sidecar files (.md5, .xxh128, .mhl, …).
+    /// Example: `"%source_%date"` → `"A001_2026-05-29_20260529_120000Z.md5"`.
+    #[serde(default)]
+    pub checksum_name_template: String,
+
+    /// Stem template for visual report files (.csv, .pdf, .html).
+    /// Example: `"%project_%source"` → `"MyFilm_A001_20260529_120000Z.csv"`.
+    #[serde(default)]
+    pub report_name_template: String,
+
     // Legacy fields — kept for forward-compat deserialization of old settings files.
     // No longer written or used by the application.
     #[serde(default)] pub folder_cameras:   Vec<String>,
@@ -364,6 +381,9 @@ impl Default for Settings {
             folder_shoot_day:       String::new(),
             folder_variables:       Vec::new(),
             folder_presets:         Vec::new(),
+            checksum_name_template: String::new(),
+            report_name_template:   String::new(),
+
             folder_cameras:         Vec::new(),
             folder_types:           Vec::new(),
             folder_recorders:       Vec::new(),

@@ -544,7 +544,11 @@ pub fn write_csv(
 ) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = dst_dir.join(format!("{}_{}.csv", report_name, timestamp));
+    let path = if timestamp.is_empty() {
+        dst_dir.join(format!("{}.csv", report_name))
+    } else {
+        dst_dir.join(format!("{}_{}.csv", report_name, timestamp))
+    };
     let mut f = std::fs::File::create(path)?;
 
     write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment, location)?;
@@ -662,7 +666,9 @@ fn clean_number(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
-/// Formats a byte count as a human-readable string using binary prefixes (1 KB = 1024 bytes).
+/// Formats a byte count as a human-readable string using decimal SI prefixes
+/// (1 KB = 1000 bytes), matching how drive manufacturers and most file managers
+/// report capacity.
 ///
 /// - `>= 1 GB` → `"N.NN GB"` (2 decimal places)
 /// - `>= 1 MB` → `"N.N MB"` (1 decimal place)
@@ -672,13 +678,13 @@ fn clean_number(s: &str) -> String {
 /// `pub` because it is also used by `pdf_report.rs` for the size column.
 ///
 /// ### Digit separator
-/// `const KB: u64 = 1_024` — the `_` is a Rust digit separator (like a comma in
+/// `const KB: u64 = 1_000` — the `_` is a Rust digit separator (like a comma in
 /// English or a space in French notation). It improves readability with no effect
-/// on the value. `1_024 == 1024`.
+/// on the value. `1_000 == 1000`.
 pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = 1_024 * KB;
-    const GB: u64 = 1_024 * MB;
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000 * KB;
+    const GB: u64 = 1_000 * MB;
     if bytes >= GB      { format!("{:.2} GB", bytes as f64 / GB as f64) }
     else if bytes >= MB { format!("{:.1} MB", bytes as f64 / MB as f64) }
     else if bytes >= KB { format!("{:.0} KB", bytes as f64 / KB as f64) }
