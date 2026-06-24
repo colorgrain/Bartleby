@@ -51,6 +51,17 @@
     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
   </symbol>
 
+  <symbol id="ico-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+    <path d="M21 3v5h-5"/>
+    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+    <path d="M3 21v-5h5"/>
+  </symbol>
+
+  <symbol id="ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 6 9 17l-5-5"/>
+  </symbol>
+
   <symbol id="ico-arrow-right-dash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M11 9a1 1 0 0 0 1-1V4.707a.707.707 0 0 1 1.207-.5l6.94 6.94a1.207 1.207 0 0 1 0 1.707l-6.94 6.94a.707.707 0 0 1-1.207-.5V16a1 1 0 0 0-1-1H9a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z"/>
     <path d="M4 9v6"/>
@@ -157,6 +168,10 @@
         <button class="side-tab-btn" data-stab="preview">Preview</button>
       </div>
       <div class="side-tab-body" id="sbody-explorer">
+        <div id="explorer-toolbar">
+          <span id="explorer-hint">Mounted volumes</span>
+          <button id="explorer-refresh" class="flat-btn" title="Refresh the list of mounted volumes">Refresh</button>
+        </div>
         <div id="explorer-tree"></div>
       </div>
       <div class="side-tab-body hidden" id="sbody-preview">
@@ -335,7 +350,7 @@
       <div class="settings-panel hidden" id="stab-about">
         <div class="tab-scroll-card">
           <div id="about-content">
-            <img id="about-icon" src="bartleby.svg" width="80" height="80" alt="Bartleby" />
+            <img id="about-icon" src="bartleby-icon.png" width="80" height="80" alt="Bartleby" />
             <p id="about-tagline">If you would prefer not to, use</p>
             <h1 id="about-name">Bartleby</h1>
             <p id="about-version"></p>
@@ -383,6 +398,22 @@
     <div id="prompt-message" class="prompt-message"></div>
     <div id="prompt-btn-row" class="modal-btn-row"></div>
   </div>
+</div>
+
+<!-- ══ GENERIC CONFIRM / CHOICE MODAL ═════════════════════════════════════════ -->
+<div id="confirm-overlay" class="overlay hidden">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div id="confirm-title"   class="modal-header"></div>
+    <div id="confirm-message" class="prompt-message"></div>
+    <div id="confirm-btn-row" class="modal-btn-row"></div>
+  </div>
+</div>
+
+<!-- ══ JOB CONTEXT MENU (status) ══════════════════════════════════════════════ -->
+<div id="job-ctx-menu" class="ctx-menu hidden">
+  <button class="ctx-item" data-act="reset">
+    <svg width="15" height="15"><use href="#ico-refresh"/></svg>Reset status
+  </button>
 </div>
 
 <!-- ══ EXPLORER CONTEXT MENU ══════════════════════════════════════════════════ -->

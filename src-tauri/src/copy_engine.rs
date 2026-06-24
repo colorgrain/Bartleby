@@ -68,8 +68,6 @@
 //! It is always called from `std::thread::spawn()` in `main.rs`, never
 //! from the Tokio async executor, which would block the event loop.
 //! Progress updates are sent via `mpsc::Sender<Msg>` to the Tauri frontend.
-//!
-//! ### Phase 3 — Reports (.md5, .xxh3, .csv, .pdf)
 
 // libc: C standard library bindings for Unix-specific syscalls.
 // Used for:
@@ -262,6 +260,26 @@ impl PauseCancel {
     }
 }
 
+// ── Byte counters for progress + per-disk speed ────────────────────────────────
+
+/// Twin byte counter passed into `copy_file` / `hash_direct`. Each chunk bumps:
+///   - `total`  : the aggregate in-flight counter (reset per file) that drives the
+///                progress *fraction* — semantics unchanged from the original engine.
+///   - `device` : a *cumulative* per-device counter that drives the per-disk speed
+///                readout in the ticker. Never reset; one counter per medium
+///                (index 0 = source, 1..=N = destinations).
+struct ByteTally<'a> {
+    total:  &'a AtomicU64,
+    device: &'a AtomicU64,
+}
+impl ByteTally<'_> {
+    #[inline]
+    fn add(&self, n: u64) {
+        self.total.fetch_add(n, Ordering::Relaxed);
+        self.device.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
 // ── Hash result ───────────────────────────────────────────────────────────────
 
 /// Holds the computed hash digest for one file (single algorithm, one at a time).
@@ -275,7 +293,10 @@ impl FileHashes {
     fn matches(&self, other: &FileHashes) -> bool {
         match (&self.hash, &other.hash) {
             (Some(a), Some(b)) => a == b,
-            _ => true,
+            // Fail closed: if either digest is missing (could not be computed),
+            // never report a match. An integrity check must err on the side of
+            // "not verified" rather than silently passing a file it never hashed.
+            _ => false,
         }
     }
 
@@ -313,9 +334,11 @@ pub struct ConflictInfo {
 /// the JavaScript frontend. Using an enum (rather than separate channels)
 /// preserves message ordering — all messages arrive in the order they were sent.
 pub enum Msg {
-    /// Progress bar update: (fraction 0.0–1.0, label string for the status bar).
+    /// Progress bar update: (fraction 0.0–1.0, label string, ETA in seconds).
     /// The fraction is clamped to 0.98 during operation and set to 1.0 on completion.
-    Progress(f64, String),
+    /// The ETA is `None` until enough speed data is gathered (warmup), or when not
+    /// applicable (scan / done / report phases).
+    Progress(f64, String, Option<f64>),
     /// One log line to append to the UI log panel. Always ends with `\n`.
     Log(String),
     /// Operation complete: (success: bool, one-line summary for the status bar).
@@ -394,19 +417,25 @@ fn ts(start: &Instant) -> String {
 /// or the Tauri command handler, which would deadlock the event loop.
 ///
 /// ## Parameters
-/// - `src`          : absolute path to the source directory to copy.
-/// - `destinations` : list of destination root directories (1 or more).
-/// - `verify`       : if true, run Phase 2 (hash + comparison). Always equals
-///                    `gen_md5 || gen_xxh || gen_size` — pre-computed by the caller.
-/// - `gen_md5`      : compute MD5, verify destination, write `.md5` file.
-/// - `gen_xxh`      : compute XXH3-128, verify destination, write `.xxh3` file.
-/// - `gen_size`     : compare source vs destination file sizes (fast, no checksum file).
-/// - `gen_csv`      : generate a `.csv` metadata table report.
-/// - `gen_pdf`      : generate a `.pdf` visual report with thumbnails.
-/// - `gen_html`     : generate a self-contained `.html` report with thumbnails.
-/// - `settings`     : snapshot of user preferences (column flags, header text).
-/// - `tx`           : channel to send `Msg` events to the Tauri forwarding thread.
-/// - `reply_rx`     : channel to receive `Reply` decisions from the user.
+/// - `src`                : absolute path to the source directory to copy.
+/// - `destinations`       : list of destination root directories (1 or more).
+/// - `hash_algo`          : which integrity check to run in Phase 2 and which
+///                          checksum sidecar to write (None / Size / Md5 / Sha1 /
+///                          Xxh64 / Xxh3_64 / Xxh128 / C4). `None` = copy only.
+/// - `gen_csv`            : generate a `.csv` metadata table report.
+/// - `gen_pdf`            : generate a `.pdf` visual report with thumbnails.
+/// - `gen_html`           : generate a self-contained `.html` report with thumbnails.
+/// - `gen_mhl`            : generate an ASC MHL v2.0 hash list (ignored for None/Size).
+/// - `copy_as_subfolder`  : copy the source folder itself into each destination.
+/// - `comment`            : per-job note for the CSV/PDF/HTML report headers (HTML).
+/// - `mhl_comment`        : per-job plain-text note for the MHL `<comment>` field.
+/// - `location`           : per-job shooting location for report headers and MHL.
+/// - `checksum_name_override` / `report_name_override` / `report_subfolder` :
+///                          optional filename/placement overrides for outputs.
+/// - `settings`           : snapshot of user preferences (column flags, header text).
+/// - `tx`                 : channel to send `Msg` events to the Tauri forwarding thread.
+/// - `reply_rx`           : channel to receive `Reply` decisions from the user.
+/// - `pc`                 : shared pause/cancel handle checked between chunks.
 ///
 /// ## Error handling
 /// Errors are reported via `Msg::Log` (appended to the UI log) and
@@ -447,7 +476,7 @@ pub fn run(
         .unwrap_or_else(|| "source".to_string());
 
     // ── Scan source ───────────────────────────────────────────────────────────
-    let _ = tx.send(Msg::Progress(0.0, "Scanning source directory…".into()));
+    let _ = tx.send(Msg::Progress(0.0, "Scanning source directory…".into(), None));
     let files = match collect_files(&src) {
         Ok(f) => f,
         Err(e) => {
@@ -591,9 +620,14 @@ pub fn run(
     // Atomic counters shared with the ticker thread.
     // bytes_done_arc: updated after each file completes (end-of-file state).
     // in_flight:      updated per chunk inside copy_file / hash_direct (intra-file).
+    // dev_bytes:      cumulative per-medium counters for the per-disk speed readout.
+    //                 Index 0 = source (read during Phase 2), 1..=n_dst = destinations
+    //                 (written in Phase 1, read in Phase 2). Never reset.
     // is_verifying:   false during Phase 1 (copy), true during Phase 2 (verify).
     let bytes_done_arc = Arc::new(AtomicU64::new(0u64));
     let in_flight      = Arc::new(AtomicU64::new(0u64));
+    let dev_bytes: Vec<Arc<AtomicU64>> =
+        (0..=destinations.len()).map(|_| Arc::new(AtomicU64::new(0u64))).collect();
     let is_verifying   = Arc::new(AtomicBool::new(false));
     // Current file label shared with the ticker (e.g. "Copying clip.mxf").
     let action = Arc::new(std::sync::Mutex::new(String::new()));
@@ -605,15 +639,33 @@ pub fn run(
         let tx_t    = tx.clone();
         let bd      = bytes_done_arc.clone();
         let inf     = in_flight.clone();
+        let dev     = dev_bytes.iter().cloned().collect::<Vec<_>>();
         let is_ver  = is_verifying.clone();
         let act     = action.clone();
         let stop    = ticker_stop.clone();
         let gt      = grand_total;
         let n_dst_f = destinations.len() as f64;
+        let tb      = total_bytes;   // bytes per single device (one copy of the source)
+        let gh      = gen_hash;      // whether Phase 2 verification runs
         std::thread::spawn(move || {
-            let mut snap: u64    = 0;
+            let n_paths = dev.len();                          // 1 (source) + n_dst
+            let mut snap_dev: Vec<u64> = vec![0; n_paths];    // per-medium snapshot
+            let mut speeds:   Vec<f64> = vec![0.0; n_paths];  // per-medium bytes/s
             let mut snap_t       = Instant::now();
             let     global_start = Instant::now();
+            // ── Phase-aware ETA state (slowest-medium model) ──────────────────
+            // The verify wall-time is governed by the slowest medium's READ speed,
+            // NOT the destination count: source + all dsts are read in parallel,
+            // gated by the slowest. While copying, read speeds are unknown, so we
+            // proxy them with the measured (slowest) WRITE speed — reads are ≥
+            // writes, so the estimate is safe and slightly conservative, and self-
+            // corrects once Phase 2 measures real read speeds.
+            //   ema_copy_bot : slowest destination WRITE speed (bytes/s, Phase 1)
+            //   ema_ver_bot  : slowest medium  READ  speed (bytes/s, Phase 2)
+            let mut ema_copy_bot: f64 = 0.0;
+            let mut ema_ver_bot:  f64 = 0.0;
+            const ALPHA: f64 = 0.3;        // EMA weight on the newest sample
+            const WARMUP_SECS: f64 = 3.0;  // hide ETA until we have real data
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if stop.load(Ordering::Relaxed) { break; }
@@ -621,35 +673,83 @@ pub fn run(
                 let inflt = inf.load(Ordering::Relaxed);
                 let total = done + inflt;
                 let fraction = if gt > 0 { (total as f64 / gt as f64).min(0.98) } else { 0.0 };
-                // Speed: 2-second sliding window; cumulative average during warmup.
-                let elapsed = snap_t.elapsed().as_secs_f64();
-                let bps = if elapsed >= 2.0 {
-                    let b = total.saturating_sub(snap) as f64 / elapsed;
-                    snap   = total;
-                    snap_t = Instant::now();
-                    b
-                } else {
-                    let g = global_start.elapsed().as_secs_f64();
-                    if g > 0.5 && total > 0 { total as f64 / g } else { 0.0 }
-                };
-                // Phase 1: in_flight tracks dst writes → W = bps, R = bps / n_dst.
-                // Phase 2: in_flight tracks reads from src + all dsts → per-device = bps / (1+n_dst).
-                let verifying  = is_ver.load(Ordering::Relaxed);
-                let divisor    = if verifying { n_dst_f + 1.0 } else { n_dst_f };
-                let action_str = act.lock().unwrap().clone();
-                let label = if bps >= 100.0 {
-                    let r = fmt_speed(bps / divisor.max(1.0));
-                    let speed_str = if verifying {
-                        format!("R: {}", r)
+                let verifying      = is_ver.load(Ordering::Relaxed);
+                let global_elapsed = global_start.elapsed().as_secs_f64();
+
+                // ── Per-medium speeds: 2-second window; cumulative avg in warmup ──
+                // dev_bytes are cumulative per medium, so a window delta gives each
+                // disk's real throughput. With many small files the per-file barrier
+                // makes all disks converge to the slowest (true effective rate); on a
+                // single large file they diverge, exposing each disk's real speed.
+                let dev_now: Vec<u64> = dev.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+                let win = snap_t.elapsed().as_secs_f64();
+                if win >= 2.0 {
+                    for k in 0..n_paths {
+                        speeds[k] = dev_now[k].saturating_sub(snap_dev[k]) as f64 / win;
+                    }
+                    snap_dev = dev_now.clone();
+                    snap_t   = Instant::now();
+                } else if global_elapsed > 0.5 && global_elapsed <= 2.0 {
+                    // Still in the very first window — show a cumulative average so
+                    // the readout isn't blank for the first couple of seconds.
+                    for k in 0..n_paths { speeds[k] = dev_now[k] as f64 / global_elapsed; }
+                }
+                // Otherwise: keep the last computed window speeds between boundaries.
+
+                // Media relevant to the current phase: copy → destinations only
+                // (index 1..), verify → source + all destinations (index 0..).
+                let phase_speeds: &[f64] = if verifying { &speeds[..] } else { &speeds[1..] };
+
+                // ── ETA: the slowest active medium sets the tempo ────────────────
+                let slowest = phase_speeds.iter().cloned()
+                    .filter(|s| *s > 0.0)
+                    .fold(f64::INFINITY, f64::min);
+                if slowest.is_finite() {
+                    if verifying {
+                        ema_ver_bot = if ema_ver_bot == 0.0 { slowest }
+                                      else { ALPHA * slowest + (1.0 - ALPHA) * ema_ver_bot };
                     } else {
-                        format!("R: {}  W: {}", r, fmt_speed(bps))
+                        ema_copy_bot = if ema_copy_bot == 0.0 { slowest }
+                                       else { ALPHA * slowest + (1.0 - ALPHA) * ema_copy_bot };
+                    }
+                }
+                let eta_secs: Option<f64> =
+                    if global_elapsed >= WARMUP_SECS && ema_copy_bot > 0.0 {
+                        let tbf = tb as f64;
+                        // Remaining copy work (per slowest device) → wall-time.
+                        let copy_done_dev = if verifying { tbf }
+                                            else { (total as f64 / n_dst_f).min(tbf) };
+                        let rem_copy = (tbf - copy_done_dev).max(0.0) / ema_copy_bot;
+                        // Remaining verify work (per slowest device) → wall-time.
+                        let rem_verify = if gh {
+                            let read_speed = if verifying && ema_ver_bot > 0.0 { ema_ver_bot }
+                                             else { ema_copy_bot };  // proxy during copy
+                            let ver_done_dev = if verifying {
+                                ((total as f64 - tbf * n_dst_f) / (n_dst_f + 1.0)).max(0.0)
+                            } else { 0.0 };
+                            (tbf - ver_done_dev).max(0.0) / read_speed
+                        } else { 0.0 };
+                        Some(rem_copy + rem_verify)
+                    } else {
+                        None
+                    };
+
+                // ── Label: real speed of each disk, joined by " / " ──────────────
+                let agg: f64 = phase_speeds.iter().sum();
+                let action_str = act.lock().unwrap().clone();
+                let label = if agg >= 100.0 {
+                    let parts: Vec<String> = phase_speeds.iter().map(|s| fmt_speed(*s)).collect();
+                    let speed_str = if verifying {
+                        format!("R: {}", parts.join(" / "))
+                    } else {
+                        format!("W: {}", parts.join(" / "))
                     };
                     if action_str.is_empty() { speed_str }
                     else { format!("{} — {}", action_str, speed_str) }
                 } else {
                     action_str
                 };
-                let _ = tx_t.send(Msg::Progress(fraction, label));
+                let _ = tx_t.send(Msg::Progress(fraction, label, eta_secs));
             }
         });
     }
@@ -793,8 +893,13 @@ pub fn run(
         }
 
         // Copy to active destinations in parallel.
-        let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter()
-            .map(|dst_path| copy_file(src_path, dst_path, &pc, &in_flight))
+        let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter().enumerate()
+            .map(|(i, dst_path)| {
+                // dst_indices[i] maps this (possibly filtered) slot back to the
+                // original destination index → per-device counter (0 = source).
+                let tally = ByteTally { total: &in_flight, device: &dev_bytes[dst_indices[i] + 1] };
+                copy_file(src_path, dst_path, &pc, &tally)
+            })
             .collect();
 
         let mut any_error = false;
@@ -944,7 +1049,7 @@ pub fn run(
         let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
             copied.len(), destinations.len());
         log(&tx, &format!("\n{}\n", summary));
-        let _ = tx.send(Msg::Progress(1.0, "Done".into()));
+        let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
         let _ = tx.send(Msg::Done(true, summary));
         return;
     }
@@ -1070,8 +1175,13 @@ pub fn run(
                 }
             }
 
-            let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter()
-                .map(|path| hash_direct(path, hash_algo, &pc, &in_flight))
+            let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter().enumerate()
+                .map(|(i, path)| {
+                    // all_paths layout: [0] = source, [1..] = destinations, which
+                    // matches the dev_bytes indexing exactly.
+                    let tally = ByteTally { total: &in_flight, device: &dev_bytes[i] };
+                    hash_direct(path, hash_algo, &pc, &tally)
+                })
                 .collect();
 
             let mut read_error = false;
@@ -1143,7 +1253,7 @@ pub fn run(
     }
 
     let total_errors = copy_errors + verify_errors;
-    let _ = tx.send(Msg::Progress(1.0, "Done".into()));
+    let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
     let hash_label = if verify {
         format!(" — {} verified", hash_algo.log_name())
     } else {
@@ -1208,7 +1318,7 @@ pub fn run(
 /// If direct I/O fails (unsupported filesystem, insufficient permissions,
 /// very small files), we fall back to standard buffered I/O automatically.
 /// The hash result is still correct — only the cache-bypass guarantee is lost.
-fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
+fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<FileHashes> {
     // Try platform-specific direct I/O first, fall back to buffered on error.
     let result = hash_direct_impl(path, algo, pc, bytes_out);
     match result {
@@ -1227,7 +1337,7 @@ fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &A
 }
 
 /// Platform-specific direct I/O implementation.
-fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
+fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<FileHashes> {
     // Open with cache-bypassing flags — the file is moved into hash_buffered_file()
     // which passes it to the reader thread. No buffer needed here: the pipeline
     // allocates its own per-chunk buffers inside the reader thread.
@@ -1360,7 +1470,7 @@ fn hash_buffered_file(
     file:      fs::File,
     algo:      HashAlgo,
     pc:        Arc<PauseCancel>,
-    bytes_out: &Arc<AtomicU64>,
+    bytes_out: &ByteTally,
 ) -> io::Result<FileHashes> {
     use twox_hash::xxhash3_128::Hasher as Xxh128Hasher;
     use twox_hash::xxhash3_64::Hasher  as Xxh3Hasher;
@@ -1516,7 +1626,7 @@ fn hash_buffered_file(
                 if let Some(ref mut h) = xxh3_h   { std::hash::Hasher::write(h, &chunk); }
                 if let Some(ref mut h) = xxh128_h { h.write(&chunk); }
                 if let Some(ref mut h) = sha512_h { sha2::Digest::update(h, &chunk); }
-                bytes_out.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                bytes_out.add(chunk.len() as u64);
             }
             Ok(Err(e)) => return Err(e),
             Err(_)     => break,
@@ -1543,7 +1653,7 @@ fn hash_buffered_file(
 }
 
 /// Hashes a file using standard buffered I/O (fallback when direct I/O fails).
-fn hash_buffered(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &Arc<AtomicU64>) -> io::Result<FileHashes> {
+fn hash_buffered(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<FileHashes> {
     let file = fs::File::open(path)?;
     hash_buffered_file(file, algo, pc.clone(), bytes_out)
 }
@@ -1889,7 +1999,7 @@ fn generate_reports(
     settings:     &Settings,
     reply_rx:     &std::sync::mpsc::Receiver<Reply>,
 ) {
-    let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into()));
+    let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into(), None));
     let col_label = hash_algo.col_label();
 
     // Timestamp shared across all report files generated in this operation (UTC).
@@ -2106,8 +2216,14 @@ fn write_checksum(
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, _)) in entries.iter().zip(hashes.iter()) {
-        if let Some(ref hash) = fh.hash {
-            writeln!(f, "{}  {}{}", hash, prefix, rel)?;
+        match &fh.hash {
+            Some(hash) => writeln!(f, "{}  {}{}", hash, prefix, rel)?,
+            // No digest could be computed (read error during verification).
+            // Emit a commented marker rather than omitting the file entirely, so
+            // the sidecar is not silently incomplete. Lines starting with '#' are
+            // ignored by the re-verifier (see verify_engine::parse_checksum_file)
+            // and by standard checksum tools, so this never breaks a later check.
+            None => writeln!(f, "# FAILED (no checksum computed): {}{}", prefix, rel)?,
         }
     }
     Ok(())
@@ -2165,6 +2281,11 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        // Skip symlinks. Following them risks infinite recursion (a link that
+        // points back into its own ancestry) and would pull in data outside the
+        // source tree. `get_source_size()` in main.rs skips them too, so the set
+        // of files copied here matches the pre-copy size/ETA estimate shown in the UI.
+        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) { continue; }
         let path = entry.path();
         if path.is_dir() { collect_recursive(&path, out)?; }
         else             { out.push(path); }
@@ -2183,6 +2304,9 @@ fn collect_dirs_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
+        // Skip symlinks — see collect_recursive() for the rationale (cycle safety
+        // and staying within the source tree).
+        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) { continue; }
         let path = entry.path();
         if path.is_dir() {
             out.push(path.clone());
@@ -2208,7 +2332,7 @@ fn log(tx: &Sender<Msg>, msg: &str) {
 /// Copy a file with pause/cancel support, using chunked copy_file_range on Linux
 /// (64 MiB per call) or a 4 MiB buffered read/write loop on other platforms.
 /// `wait_if_paused()` is checked between each chunk.
-fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64>) -> io::Result<u64> {
+fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &ByteTally) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -2231,7 +2355,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64
             };
             match ret.cmp(&0) {
                 std::cmp::Ordering::Equal   => break,
-                std::cmp::Ordering::Greater => { total += ret as u64; bytes_out.fetch_add(ret as u64, Ordering::Relaxed); }
+                std::cmp::Ordering::Greater => { total += ret as u64; bytes_out.add(ret as u64); }
                 std::cmp::Ordering::Less    => {
                     let err = io::Error::last_os_error();
                     let raw = err.raw_os_error().unwrap_or(0);
@@ -2266,7 +2390,7 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64
 }
 
 /// Buffered chunked copy fallback — 4 MiB chunks with pause/cancel checks.
-fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &Arc<AtomicU64>) -> io::Result<u64> {
+fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &ByteTally) -> io::Result<u64> {
     use std::io::{Read, Write};
     let mut src_file = fs::File::open(src)?;
     #[cfg(target_os = "linux")]
@@ -2287,7 +2411,7 @@ fn copy_file_buffered_chunked(src: &Path, dst: &Path, pc: &PauseCancel, bytes_ou
         if n == 0 { break; }
         dst_file.write_all(&buf[..n])?;
         total += n as u64;
-        bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+        bytes_out.add(n as u64);
     }
     // On non-Linux: set mtime on the open fd — macOS/Windows don't override on close.
     // On Linux:     close first, then utimensat via path — FUSE drivers (ntfs-3g,

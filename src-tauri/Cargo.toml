@@ -50,7 +50,7 @@ name = "bartleby"
 #   • tauri.conf.json → "version"
 #   • The About modal reads this at runtime via the get_app_version command.
 #   • pub const VERSION uses env!("CARGO_PKG_VERSION") — no manual update needed.
-version = "0.1.0-9"
+version = "0.1.0-10"
 
 # The Rust edition determines which language features and idioms are available.
 # "2021" is the current stable edition (previous: "2015", "2018").

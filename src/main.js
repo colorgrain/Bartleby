@@ -193,7 +193,10 @@ var defaultGenHtml  = false;
 var defaultGenMhl   = false;
 
 // ── Transport control helpers ─────────────────────────────────────────────────
+// True while a copy/queue is running — used to warn on cancel and on app close.
+var copyInProgress = false;
 function setCopyInProgress(active) {
+    copyInProgress = active;
     copyIsPaused = false;
     copyBtn.classList.toggle('hidden', active);
     pauseBtn.classList.toggle('hidden', !active);
@@ -481,6 +484,37 @@ function makeJobToggle(cls, labelText, checked) {
     return lbl;
 }
 
+// ── Job status (DaVinci-style queue state) ─────────────────────────────────────
+// Persisted on the card via dataset.status ∈ {idle, running, done, failed}.
+// Survives across copy launches because the cards themselves persist in the DOM.
+function setJobStatus(card, status) {
+    if (!card) return;
+    card.dataset.status = status;
+    // Tint the job title green/red once the job finishes.
+    var nameInput = card.querySelector('.job-name-input');
+    if (nameInput) {
+        nameInput.classList.toggle('job-done',   status === 'done');
+        nameInput.classList.toggle('job-failed', status === 'failed');
+    }
+    var badge = card.querySelector('.job-status-badge');
+    if (!badge) return;
+    badge.dataset.status = status;
+    // Idle/"to do": show nothing — keeps the header clean until the job runs.
+    if (status === 'idle') {
+        badge.style.display = 'none';
+        badge.innerHTML = '';
+        return;
+    }
+    badge.style.display = '';
+    var map = {
+        running: { icon: '',           text: 'Running' },
+        done:    { icon: '#ico-check', text: 'Done'    },
+        failed:  { icon: '#ico-close', text: 'Failed'  },
+    };
+    var m = map[status] || map.running;
+    badge.innerHTML = (m.icon ? '<svg><use href="' + m.icon + '"/></svg>' : '') + m.text;
+}
+
 function addJob() {
     var jobCard = document.createElement('section');
     jobCard.className = 'group job-group';
@@ -512,9 +546,23 @@ function addJob() {
         refreshPreviewSoon();
     });
 
+    var statusBadge = document.createElement('span');
+    statusBadge.className = 'job-status-badge';
+    statusBadge.title = 'Job status — right-click the job to reset it';
+
     headerRow.appendChild(label);
+    headerRow.appendChild(statusBadge);
     headerRow.appendChild(removeJobBtn);
     jobCard.appendChild(headerRow);
+
+    setJobStatus(jobCard, 'idle');
+
+    // Right-click anywhere on the card (except text fields) → status menu.
+    jobCard.addEventListener('contextmenu', function(e) {
+        if (e.target.closest('input, textarea, select')) return;
+        e.preventDefault();
+        showJobCtxMenu(e.clientX, e.clientY, jobCard);
+    });
 
     // ── Card body ─────────────────────────────────────────────────────────────
     var card = document.createElement('div');
@@ -817,13 +865,13 @@ async function registerListeners() {
             if (fill) fill.style.width = Math.round(fraction * 100) + '%';
             if (text) text.textContent = event.payload.label;
             if (etaEl) {
-                if (fraction > 0.01 && fraction < 0.99) {
-                    if (!copyJobStartTime) copyJobStartTime = Date.now();
-                    var elapsed = (Date.now() - copyJobStartTime) / 1000;
-                    if (elapsed > 1.0) {
-                        etaEl.textContent = 'Remaining time: ' + formatEta(elapsed * (1.0 - fraction) / fraction);
-                    }
-                } else {
+                // ETA is computed in Rust (phase-aware slowest-medium model) and
+                // sent as eta_secs. It is null during warmup / scan / done — in
+                // those cases we leave the field empty rather than guessing.
+                var etaSecs = event.payload.eta_secs;
+                if (fraction > 0.01 && fraction < 0.99 && etaSecs != null) {
+                    etaEl.textContent = 'Remaining time: ' + formatEta(etaSecs);
+                } else if (fraction >= 0.99) {
                     etaEl.textContent = '';
                 }
             }
@@ -894,28 +942,57 @@ async function runJob(job) {
 
 async function launchCopy() {
     userCancelledQueue = false;
-    var jobs  = getJobs();
-    var multi = jobs.length > 1;
+    var cards = Array.prototype.slice.call(jobsContainer.querySelectorAll('.job-group'));
+    var jobs  = getJobs();   // parallel to `cards` by index
 
-    for (var i = 0; i < jobs.length; i++) {
-        var prefix = multi ? 'Job ' + (i + 1) + ': p' : 'P';
-        if (!jobs[i].src) {
-            alert(prefix + 'lease choose a source directory.');
-            return;
-        }
-        if (!jobs[i].dsts.length) {
-            alert(prefix + 'lease add at least one destination.');
-            return;
+    // ── Decide which jobs to run (skip already-done ones on request) ──────────
+    var allIdx  = jobs.map(function(_, i) { return i; });
+    var doneIdx = allIdx.filter(function(i) { return cards[i] && cards[i].dataset.status === 'done'; });
+    var runSet  = allIdx;
+
+    if (doneIdx.length > 0) {
+        var choice = await showChoice(
+            'Some jobs are already done.',
+            doneIdx.length + ' of ' + jobs.length + ' job(s) are marked as done.\n\n' +
+            'Choose to re-run everything, or only the jobs that are not done yet.',
+            [
+                { label: 'Cancel',                 value: null },
+                { label: 'Start undone jobs only', value: 'undone' },
+                { label: 'Start all jobs',         value: 'all', kind: 'suggested' },
+            ]);
+        if (choice === null) return;
+        if (choice === 'all') {
+            cards.forEach(function(c) { setJobStatus(c, 'idle'); });
+            runSet = allIdx;
+        } else {
+            runSet = allIdx.filter(function(i) { return cards[i].dataset.status !== 'done'; });
         }
     }
 
-    // Resolve per-job folder templates: rewrite each destination to
-    // root + '/' + <resolved template>. The copy engine then builds the full
-    // hierarchy via create_dir_all — no backend change needed.
-    for (var i = 0; i < jobs.length; i++) {
+    if (runSet.length === 0) {
+        statusLabel.textContent = 'Nothing to run — all jobs are already done.';
+        statusLabel.className = '';
+        return;
+    }
+
+    var multi = runSet.length > 1;
+
+    // ── Validate the jobs we are about to run ─────────────────────────────────
+    for (var s = 0; s < runSet.length; s++) {
+        var i = runSet[s];
+        var prefix = (jobs.length > 1) ? 'Job ' + (i + 1) + ': p' : 'P';
+        if (!jobs[i].src)         { alert(prefix + 'lease choose a source directory.'); return; }
+        if (!jobs[i].dsts.length) { alert(prefix + 'lease add at least one destination.'); return; }
+    }
+
+    // Resolve per-job folder templates for the jobs we run: rewrite each
+    // destination to root + '/' + <resolved template>. The copy engine then
+    // builds the full hierarchy via create_dir_all — no backend change needed.
+    for (var s = 0; s < runSet.length; s++) {
+        var i = runSet[s];
         var res = resolveTemplate(jobs[i]);
         if (res.bad && res.bad.length) {
-            var jp = multi ? 'Job ' + (i + 1) + ': ' : '';
+            var jp = (jobs.length > 1) ? 'Job ' + (i + 1) + ': ' : '';
             alert(jp + 'the folder template has unresolved tokens: ' + res.bad.join(', ') +
                   '\n\nFix it in the job structure popup or in Settings → Structure.');
             return;
@@ -931,10 +1008,11 @@ async function launchCopy() {
     statusLabel.className   = '';
     logView.textContent     = '';
 
-    jobsContainer.querySelectorAll('.job-label').forEach(function(lbl) {
-        lbl.classList.remove('job-done');
-    });
-    jobsContainer.querySelectorAll('.job-progress').forEach(function(p) {
+    // Reset progress bars and status for the jobs we will run.
+    runSet.forEach(function(idx) {
+        setJobStatus(cards[idx], 'idle');
+        var p = cards[idx] ? cards[idx].querySelector('.job-progress') : null;
+        if (!p) return;
         p.classList.add('hidden');
         var f = p.querySelector('.job-progress-fill');
         var t = p.querySelector('.job-progress-text');
@@ -955,13 +1033,15 @@ async function launchCopy() {
     var allOk       = true;
     var lastSummary = '';
 
-    for (var i = 0; i < jobs.length; i++) {
+    for (var s = 0; s < runSet.length; s++) {
+        var i   = runSet[s];
         var job = jobs[i];
         var jobCards  = jobsContainer.querySelectorAll('.job-group');
         var jobProgEl = jobCards[i] ? jobCards[i].querySelector('.job-progress') : null;
 
         copyJobStartTime = null;
         currentJobIndex = i;
+        setJobStatus(jobCards[i], 'running');
 
         if (jobProgEl) {
             jobProgEl.classList.remove('hidden');
@@ -973,17 +1053,14 @@ async function launchCopy() {
         }
 
         if (multi) {
-            currentJobPrefix = 'Job ' + (i + 1) + '/' + jobs.length;
+            currentJobPrefix = 'Job ' + (s + 1) + '/' + runSet.length;
             logView.textContent += '\n── ' + currentJobPrefix + ' — ' + job.src + '\n';
             logView.scrollTop = logView.scrollHeight;
         }
 
         var result = await runJob(job);
 
-        if (jobCards[i]) {
-            var doneLbl = jobCards[i].querySelector('.job-label');
-            if (doneLbl && result.ok) doneLbl.classList.add('job-done');
-        }
+        setJobStatus(jobCards[i], result.ok ? 'done' : 'failed');
         if (jobProgEl) {
             var fill = jobProgEl.querySelector('.job-progress-fill');
             fill.style.width = '100%';
@@ -1011,7 +1088,7 @@ async function launchCopy() {
     unlisteners = [];
 
     statusLabel.textContent = multi
-        ? (allOk ? 'All ' + jobs.length + ' jobs completed successfully.' : 'Queue finished with errors — check log.')
+        ? (allOk ? 'All ' + runSet.length + ' jobs completed successfully.' : 'Queue finished with errors — check log.')
         : lastSummary;
     statusLabel.className = allOk ? 'success' : 'error';
     setCopyInProgress(false);
@@ -1038,7 +1115,7 @@ async function launchCopy() {
     // Open destinations (setting stored in currentSettings.open_dest)
     if (allOk && currentSettings && currentSettings.open_dest) {
         var allDsts = [];
-        jobs.forEach(function(j) { allDsts = allDsts.concat(j.dsts); });
+        runSet.forEach(function(i) { allDsts = allDsts.concat(jobs[i].dsts); });
         var uniqueDsts = allDsts.filter(function(d, idx) { return allDsts.indexOf(d) === idx; });
         if (uniqueDsts.length > 0) {
             try { await invoke('open_destinations', { paths: uniqueDsts }); }
@@ -1060,11 +1137,36 @@ pauseBtn.addEventListener('click', async function() {
 });
 
 cancelBtn.addEventListener('click', async function() {
+    var ok = await confirmDialog(
+        'Cancel copy',
+        'A copy is in progress. Cancel it?\n\nNothing already copied is deleted, but the current transfer will stop.',
+        'Cancel copy', 'Keep copying', true);
+    if (!ok || !copyInProgress) return;
     cancelBtn.disabled = true;
     pauseBtn.disabled  = true;
     userCancelledQueue = true;
     try { await invoke('cancel_copy'); } catch(e) {}
 });
+
+// ── Warn before quitting while a copy is running ───────────────────────────────
+// The Rust main-window CloseRequested handler vetoes the close and emits this
+// event; we decide here whether to quit (always via the quit_app command).
+(async function setupCloseGuard() {
+    try {
+        await listen('app-close-requested', async function() {
+            if (copyInProgress) {
+                var ok = await confirmDialog(
+                    'Quit Bartleby?',
+                    'A copy is still in progress. Quitting now will cancel it.\n\nNothing already copied is deleted.',
+                    'Quit', 'Stay', true);
+                if (!ok) return;
+                userCancelledQueue = true;
+                try { await invoke('cancel_copy'); } catch(e) {}
+            }
+            try { await invoke('quit_app'); } catch(e) {}
+        });
+    } catch(e) { console.warn('close guard setup failed:', e); }
+})();
 
 // ── Prompt modal ──────────────────────────────────────────────────────────────
 var promptOverlay = document.getElementById('prompt-overlay');
@@ -1218,6 +1320,51 @@ function addPromptBtn(row, label, reply, suggested, danger, resolve) {
         resolve(reply);
     });
     row.appendChild(btn);
+}
+
+// ── Generic confirm / choice modal ─────────────────────────────────────────────
+// showChoice(title, message, buttons) where buttons = [{label, value, kind}],
+// kind ∈ {'suggested','danger', undefined}. Resolves to the chosen value, or null
+// if dismissed via Escape. Independent of the copy-prompt overlay so it can be
+// shown at any time (including while a copy prompt would be active).
+function showChoice(title, message, buttons) {
+    return new Promise(function(resolve) {
+        var overlay = document.getElementById('confirm-overlay');
+        var titleEl = document.getElementById('confirm-title');
+        var msgEl   = document.getElementById('confirm-message');
+        var row     = document.getElementById('confirm-btn-row');
+        titleEl.textContent = title;
+        msgEl.textContent   = message;
+        row.innerHTML = '';
+
+        function close(value) {
+            overlay.classList.add('hidden');
+            document.removeEventListener('keydown', onKey);
+            resolve(value);
+        }
+        function onKey(e) { if (e.key === 'Escape') close(null); }
+
+        buttons.forEach(function(b) {
+            var btn = document.createElement('button');
+            btn.className = 'action-btn' +
+                (b.kind === 'suggested' ? ' suggested' : '') +
+                (b.kind === 'danger'    ? ' danger'    : '');
+            btn.textContent = b.label;
+            btn.addEventListener('click', function() { close(b.value); });
+            row.appendChild(btn);
+        });
+
+        document.addEventListener('keydown', onKey);
+        overlay.classList.remove('hidden');
+    });
+}
+
+// Two-button yes/no helper built on showChoice. Resolves true / false.
+function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
+    return showChoice(title, message, [
+        { label: cancelLabel,  value: false },
+        { label: confirmLabel, value: true, kind: danger ? 'danger' : 'suggested' },
+    ]).then(function(v) { return v === true; });
 }
 
 // ── Drag & drop ───────────────────────────────────────────────────────────────
@@ -1857,12 +2004,14 @@ document.querySelectorAll('.side-tab-btn').forEach(function(btn) {
 });
 
 // ── Explorer tree (lazy loading) ──────────────────────────────────────────────
-async function loadVolumes() {
+// Signature of the mounted-volume set, used to detect plug/unplug events.
+var lastVolumeSig = null;
+function volumeSig(vols) {
+    return (vols || []).map(function(v) { return v.path; }).sort().join('\n');
+}
+
+function renderVolumes(vols) {
     var tree = document.getElementById('explorer-tree');
-    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
-    var vols;
-    try { vols = await invoke('list_volumes'); }
-    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
     tree.innerHTML = '';
     if (!vols || !vols.length) {
         tree.innerHTML = '<div class="tree-empty-msg">No volumes found.</div>';
@@ -1872,6 +2021,44 @@ async function loadVolumes() {
         tree.appendChild(buildTreeNode(v.path, v.name, true, v.media_type, true));
     });
 }
+
+async function loadVolumes() {
+    var tree = document.getElementById('explorer-tree');
+    tree.innerHTML = '<div class="tree-loading-msg">Loading volumes…</div>';
+    var vols;
+    try { vols = await invoke('list_volumes'); }
+    catch(e) { tree.innerHTML = '<div class="tree-empty-msg">Could not list volumes.</div>'; return; }
+    lastVolumeSig = volumeSig(vols);
+    renderVolumes(vols);
+}
+
+// Re-fetch the volume list and rebuild the tree ONLY if a disk was plugged or
+// removed. This keeps any folders the user has expanded intact during normal
+// focus changes, while still surfacing drives mounted after Bartleby started.
+async function refreshVolumesIfChanged() {
+    if (!explorerPanelOpen()) return;
+    var vols;
+    try { vols = await invoke('list_volumes'); } catch(e) { return; }
+    var sig = volumeSig(vols);
+    if (sig === lastVolumeSig) return;
+    lastVolumeSig = sig;
+    renderVolumes(vols);
+}
+
+// The explorer panel is "open" when the side panel has width and its Explorer
+// tab is the active one.
+function explorerPanelOpen() {
+    var panel = document.getElementById('side-panel');
+    var body  = document.getElementById('sbody-explorer');
+    return !!panel && panel.offsetWidth > 40 && !!body && !body.classList.contains('hidden');
+}
+
+// Manual refresh button + auto-refresh when the window regains focus.
+(function setupVolumeRefresh() {
+    var btn = document.getElementById('explorer-refresh');
+    if (btn) btn.addEventListener('click', function() { loadVolumes(); });
+    window.addEventListener('focus', function() { refreshVolumesIfChanged(); });
+})();
 
 // Maps a volume's media type to its explorer icon.
 function volumeIcon(mediaType) {
@@ -2069,6 +2256,45 @@ document.querySelectorAll('#explorer-ctx-menu .ctx-item').forEach(function(item)
         else if (act === 'add-dest')   ctxAddDest(t.path);
         else if (act === 'new-folder') ctxNewFolder(t);
         hideExplorerCtxMenu();
+    });
+});
+
+// ── Job context menu (status) ──────────────────────────────────────────────────
+var jobCtxTarget = null;
+
+function showJobCtxMenu(x, y, card) {
+    if (copyInProgress) return;   // don't let status be changed mid-queue
+    var menu = document.getElementById('job-ctx-menu');
+    jobCtxTarget = card;
+    var status = card.dataset.status || 'idle';
+    menu.querySelector('[data-act="reset"]').disabled = (status === 'idle');
+    menu.classList.remove('hidden');
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    var r = menu.getBoundingClientRect();
+    if (r.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+    if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+}
+
+function hideJobCtxMenu() {
+    document.getElementById('job-ctx-menu').classList.add('hidden');
+    jobCtxTarget = null;
+}
+
+document.addEventListener('click', function(e) {
+    var menu = document.getElementById('job-ctx-menu');
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target)) hideJobCtxMenu();
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hideJobCtxMenu();
+});
+
+document.querySelectorAll('#job-ctx-menu .ctx-item').forEach(function(item) {
+    item.addEventListener('click', function() {
+        if (item.disabled || !jobCtxTarget) { hideJobCtxMenu(); return; }
+        var act = item.dataset.act;
+        if (act === 'reset') setJobStatus(jobCtxTarget, 'idle');
+        hideJobCtxMenu();
     });
 });
 

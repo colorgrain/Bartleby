@@ -666,7 +666,9 @@ fn clean_number(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
-/// Formats a byte count as a human-readable string using binary prefixes (1 KB = 1024 bytes).
+/// Formats a byte count as a human-readable string using decimal SI prefixes
+/// (1 KB = 1000 bytes), matching how drive manufacturers and most file managers
+/// report capacity.
 ///
 /// - `>= 1 GB` → `"N.NN GB"` (2 decimal places)
 /// - `>= 1 MB` → `"N.N MB"` (1 decimal place)
@@ -676,9 +678,9 @@ fn clean_number(s: &str) -> String {
 /// `pub` because it is also used by `pdf_report.rs` for the size column.
 ///
 /// ### Digit separator
-/// `const KB: u64 = 1_024` — the `_` is a Rust digit separator (like a comma in
+/// `const KB: u64 = 1_000` — the `_` is a Rust digit separator (like a comma in
 /// English or a space in French notation). It improves readability with no effect
-/// on the value. `1_024 == 1024`.
+/// on the value. `1_000 == 1000`.
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_000;
     const MB: u64 = 1_000 * KB;

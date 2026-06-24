@@ -14,24 +14,33 @@
 //! If the destination already has an MHL for this source, the user is
 //! prompted (via `Msg::MhlConflict`) to Replace, Keep-both, or Skip.
 //!
-//! ## ASC MHL v2.0 structure
+//! ## ASC MHL v2.0 structure (as emitted by `write_mhl`)
 //! ```xml
 //! <?xml version="1.0" encoding="UTF-8"?>
 //! <hashlist xmlns="urn:ASC:MHL:v2.0" version="2.0">
-//!   <creatorinfo>…</creatorinfo>
+//!   <creatorinfo>
+//!     <creationdate>2024-06-15T12:00:00Z</creationdate>
+//!     <hostname>workstation</hostname>
+//!     <tool version="0.1.0">Bartleby</tool>
+//!     <author role="organization">Studio Nord</author>
+//!     <author email="a@b.c" phone="…">Alex</author>
+//!     <location>Stage 4</location>
+//!     <comment>…</comment>
+//!   </creatorinfo>
 //!   <processinfo><process>transfer</process></processinfo>
 //!   <hashes>
 //!     <hash>
-//!       <file><path>rel/path.mov</path><size>123456789</size></file>
-//!       <xxh128>abcdef…</xxh128>
-//!       <lastmodificationdate>2024-06-15T12:00:00Z</lastmodificationdate>
+//!       <path size="123456789" lastmodificationdate="2024-06-15T12:00:00Z">rel/path.mov</path>
+//!       <xxh128 action="original">abcdef…</xxh128>
 //!     </hash>
 //!   </hashes>
+//!   <!-- Generational chain: only when the parent MHL is within this dst's scope.
+//!        The path is relative to the destination root; the hash is always C4. -->
 //!   <references>
-//!     <reference>
-//!       <path>/abs/path/to/source/ascmhl/0001_…Z.mhl</path>
-//!       <xxh128>hash_of_that_mhl_file</xxh128>
-//!     </reference>
+//!     <hashlistreference>
+//!       <path>ascmhl/0001_…Z.mhl</path>
+//!       <c4>c4hash_of_that_mhl_file</c4>
+//!     </hashlistreference>
 //!   </references>
 //! </hashlist>
 //! ```

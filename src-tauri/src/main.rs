@@ -314,6 +314,7 @@ fn main() {
             pause_copy,
             resume_copy,
             cancel_copy,
+            quit_app,
             is_system_dark_mode,
             open_destinations,
             send_notification,
@@ -377,14 +378,19 @@ fn main() {
                 Err(e) => eprintln!("Bartleby: could not create verifier window: {e}"),
             }
 
-            // Closing the main window quits the whole application. Without this,
-            // the still-existing (hidden) verifier window keeps the process
-            // alive after the main window is closed.
+            // Closing the main window quits the whole application (the still-existing
+            // hidden verifier window would otherwise keep the process alive). We do
+            // NOT exit directly: instead we veto the close and hand control to JS,
+            // which warns the user if a copy is running, then calls `quit_app`.
+            // When no copy is running, JS calls `quit_app` immediately.
             if let Some(main_win) = app.get_webview_window("main") {
                 let h = handle.clone();
                 main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        h.exit(0);
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = h.get_webview_window("main") {
+                            let _ = w.emit("app-close-requested", ());
+                        }
                     }
                 });
             }
@@ -513,8 +519,12 @@ fn save_settings(state: State<AppState>, new_settings: Settings) -> Result<(), S
 struct ProgressPayload {
     /// Progress fraction in [0.0, 1.0]. JavaScript multiplies by 100 for percentage.
     fraction: f64,
-    /// Text shown below the progress bar: current filename + optional ETA string.
+    /// Text shown below the progress bar: current filename + speed.
     label:    String,
+    /// Estimated remaining time in seconds (copy + verify), or `None` during the
+    /// warmup window / non-applicable phases. Computed by the phase-aware
+    /// slowest-medium model in the copy engine ticker.
+    eta_secs: Option<f64>,
 }
 
 /// Payload for `copy-log` events: one line of text to append to the log panel.
@@ -763,7 +773,7 @@ fn start_copy(
     //   - `src_path`, `dst_paths`, `settings_snapshot` → owned by this thread
     //   - `tx` (Sender<Msg>) → the engine sends its progress here
     //   - `reply_rx` (Receiver<Reply>) → the engine waits for prompt replies here
-    //   - `verify`, `gen_md5`, `gen_csv`, `gen_pdf` → copied (bool is Copy)
+    //   - `hash_algo` (Copy enum), `gen_csv`/`gen_pdf`/`gen_html`/`gen_mhl` (bool is Copy) → copied
     //
     // After this `spawn`, `src_path`, `dst_paths`, `tx`, and `reply_rx` can no longer
     // be used in `start_copy` — ownership has been transferred to the new thread.
@@ -828,10 +838,10 @@ fn start_copy(
                 // Sent on every 1 MiB chunk read. JavaScript uses this to update
                 // the progress bar. The event name "copy-progress" must match
                 // exactly what JS listens for: listen("copy-progress", …).
-                Ok(copy_engine::Msg::Progress(f, label)) => {
+                Ok(copy_engine::Msg::Progress(f, label, eta_secs)) => {
                     // `let _ = …` discards the Result from `.emit()`.
                     // A send failure means the window was closed — not actionable here.
-                    let _ = win.emit("copy-progress", ProgressPayload { fraction: f, label });
+                    let _ = win.emit("copy-progress", ProgressPayload { fraction: f, label, eta_secs });
                 }
 
                 // ── Log line ──────────────────────────────────────────────────
@@ -988,6 +998,13 @@ fn cancel_copy(state: State<AppState>) {
     if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
         pc.cancel();
     }
+}
+
+/// Quits the whole application. Called from JS once the close-confirmation flow
+/// (see the main-window `CloseRequested` handler) has been resolved by the user.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // ── Folder dialog ─────────────────────────────────────────────────────────────
@@ -1946,8 +1963,9 @@ fn save_verify_html(
         .map_err(|e| e.to_string())
 }
 
-/// Generate a post-verification MHL (`<process>verify</process>`, generation N+1)
-/// for the original MHL that was just verified.
+/// Generate a post-verification MHL (`<process>in-place</process>`, generation N+1)
+/// for the original MHL that was just verified. Per-file pass/fail is recorded via
+/// the hash `action` attribute (`verified` / `failed`).
 #[tauri::command]
 fn generate_post_verify_mhl(
     verified_mhl: String,

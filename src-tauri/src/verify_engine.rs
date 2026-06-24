@@ -576,8 +576,13 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel
 // ── Post-verification MHL ─────────────────────────────────────────────────────
 
 /// Write a new MHL in the same `ascmhl/` directory as the verified MHL,
-/// with `<process>verify</process>`, generation N+1, and a `<references>`
-/// block pointing to the verified MHL.
+/// generation N+1, with a `<references>` block pointing to the verified MHL.
+///
+/// Per the ASC MHL v2.0 schema, `<process>` is constrained to
+/// `in-place | transfer | flatten` — there is no `verify` value. A verification
+/// re-hashes files where they already sit, so the correct process is `in-place`;
+/// the verification outcome is recorded per file via the hash `action` attribute
+/// (`verified` / `failed`, both defined by the schema's `ActionAttributeType`).
 pub fn write_post_verify_mhl(
     verified_mhl_path: &Path,
     result:            &VerifyResult,
@@ -604,7 +609,13 @@ pub fn write_post_verify_mhl(
         .map(|e| (e.rel_path.clone(), e.computed.clone(), e.status.clone()))
         .collect();
 
-    let new_gen = mhl_report::find_dst_mhl_for_src(dst, "")  // don't filter by src_name
+    // Next generation = highest existing generation in {dst}/ascmhl/ + 1, across
+    // ALL hash lists regardless of source name. scan_ascmhl_dir does exactly this;
+    // it must not be the name-filtered find_dst_mhl_for_src (an empty name there
+    // matches nothing, so the new MHL could collide with an existing generation
+    // when post-verifying anything other than the latest one). Falls back to the
+    // verified MHL's own generation + 1 if the directory cannot be read.
+    let new_gen = mhl_report::scan_ascmhl_dir(&dst.join("ascmhl"))
         .map(|(_, g)| g + 1)
         .unwrap_or(meta.generation + 1);
 
@@ -652,6 +663,10 @@ pub fn write_post_verify_mhl(
     }
     writeln!(f, "  </creatorinfo>")?;
     writeln!(f, "  <processinfo>")?;
+    // Spec-valid ProcessType values are in-place | transfer | flatten. A verify
+    // pass hashes files in place, so "in-place" is correct here (not "verify",
+    // which is not a valid value). The per-file action attribute carries the
+    // verified/failed outcome below.
     writeln!(f, "    <process>in-place</process>")?;
     writeln!(f, "  </processinfo>")?;
     writeln!(f, "  <hashes>")?;
