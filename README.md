@@ -24,9 +24,10 @@ Built with [Tauri v2](https://tauri.app/) (Rust backend + plain HTML/CSS/JS fron
 - **ASC MHL v2.0** hash list generation and multi-generation chain management
 - **Standalone verification window**: verify any checksum or MHL file with live per-file results, pause/resume/cancel, HTML report export, and post-verification MHL generation
 - **Metadata reports**: CSV table, self-contained HTML report, PDF with thumbnails — all optional, configurable per job
-- **Multi-job queue**: run several independent copy jobs in sequence, each with its own source, destinations, and options
+- **Multi-job queue**: run several independent copy jobs in sequence, each with its own source, destinations, and options — with a per-job status badge (idle / running / done / failed)
 - **Conflict detection**: interactive prompts for non-empty destinations and file conflicts, with size and date comparison
-- **Live progress**: per-job progress bar with transfer speed, ETA, and current filename
+- **Disk explorer**: browse the machine's mounted volumes, auto-refreshed as media is plugged in or unplugged
+- **Live progress**: per-job progress bar with per-disk transfer speed, phase-aware ETA, and current filename
 - **Light / dark mode** and multiple UI skins (Mint-Y Aqua, Adwaita, macOS, Windows 11)
 - **Native window decorations** synced to the active theme on all platforms
 
