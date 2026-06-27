@@ -1,5 +1,5 @@
 # Bartleby
-<img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/82851c10-9c74-4bb5-ba11-b6f00c435657" />
+<img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/2e68bce0-2450-491d-8247-1d56ef56f638" />
 
 
 <img width="2200" height="1464" alt="B1" src="https://github.com/user-attachments/assets/0faa0e1e-5259-42b0-b046-8cedd50752f7" />
