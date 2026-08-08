@@ -12,9 +12,15 @@ on:
         description: 'Tag to release (e.g. v0.1.0-5)'
         required: true
         type: string
+      arch_only:
+        description: 'Skip the Linux/Windows/macOS matrix and only (re)build the Arch package for an existing release'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   release:
+    if: ${{ !inputs.arch_only }}
     permissions:
       contents: write   # required to create the GitHub Release and upload assets
 
@@ -99,3 +105,61 @@ jobs:
           releaseName:  'Bartleby ${{ github.event.inputs.tag || github.ref_name }}'
           releaseDraft: true
           prerelease:   false
+
+  # Arch Linux / pacman package. Built separately from the tauri-action matrix
+  # above because it needs to run inside an Arch container to produce a native
+  # .pkg.tar.zst — see packaging/arch/PKGBUILD for how the build works.
+  # `needs: release` so the GitHub Release (created by the job above) already
+  # exists by the time we upload to it; `if: always()` so a Windows/macOS
+  # failure in the matrix (fail-fast: false), or a skipped release job
+  # (arch_only run), doesn't block this job.
+  arch-package:
+    needs: release
+    if: always()
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            git nodejs npm webkit2gtk-4.1 gtk3 librsvg patchelf github-cli
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sidecar binaries
+        run: bash scripts/download_sidecars.sh
+
+      - name: Resolve package version
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          RAW="${TAG#v}"
+          echo "pkgver=${RAW//-/.}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set PKGBUILD version
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.ver.outputs.pkgver }}/" packaging/arch/PKGBUILD
+
+      # makepkg refuses to run as root, so build as an unprivileged user.
+      - name: Build package
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c 'cd packaging/arch && makepkg -f --noconfirm'
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pkg=$(find packaging/arch -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
+          asset="Bartleby_${{ steps.ver.outputs.pkgver }}_x86_64.pkg.tar.zst"
+          mv "$pkg" "$asset"
+          gh release upload "${{ steps.ver.outputs.tag }}" "$asset" \
+            --clobber --repo "${{ github.repository }}"

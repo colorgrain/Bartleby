@@ -1,0 +1,53 @@
+# Maintainer: Alexandre Westphal <a.westphal@free.fr>
+#
+# Not published to the AUR — this PKGBUILD is built by .github/workflows/release.yml
+# on every tagged release, and the resulting package is attached to the GitHub
+# Release as an asset (Bartleby_<version>_x86_64.pkg.tar.zst).
+#
+# It builds directly from the repository this file lives in (two directories
+# up), rather than fetching a source tarball, so `source=()` is intentionally
+# empty. To build locally: from the repo root, run
+#   npm install && bash scripts/download_sidecars.sh
+# then `cd packaging/arch && makepkg -f`.
+pkgname=bartleby
+pkgver=0.1.0.10
+pkgrel=1
+pkgdesc="Multi-destination file copy with MD5/XXH3 integrity verification and metadata reports"
+arch=('x86_64')
+url="https://github.com/colorgrain/Bartleby"
+license=('GPL-3.0-only')
+depends=('webkit2gtk-4.1' 'gtk3')
+makedepends=('rust' 'nodejs' 'npm' 'librsvg' 'patchelf')
+options=('!lto')
+source=()
+
+_root() {
+  cd "$startdir/../.."
+  pwd
+}
+
+build() {
+  cd "$(_root)"
+  # Override target-cpu=native from .cargo/cargo_config.toml so the binary
+  # runs on any x86_64 CPU, not just the machine that built it.
+  RUSTFLAGS="" npm run tauri build -- --bundles deb
+}
+
+package() {
+  cd "$(_root)"
+
+  # Tauri's deb bundler is pure Rust (no dpkg-deb dependency), so it produces
+  # a valid .deb even on Arch. Reuse its file layout (binaries, desktop entry,
+  # icons) instead of duplicating it here, so it stays in sync automatically.
+  local deb
+  deb=$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)
+  [ -n "$deb" ] || { echo "no .deb bundle found"; return 1; }
+
+  local extract="$srcdir/deb-extract"
+  mkdir -p "$extract"
+  ar x "$deb" --output="$extract"
+
+  local data
+  data=$(find "$extract" -maxdepth 1 -iname 'data.tar.*' -print -quit)
+  tar -xf "$data" -C "$pkgdir"
+}
