@@ -28,6 +28,7 @@ _root() {
 
 build() {
   cd "$(_root)"
+  npm install
   # Override target-cpu=native from .cargo/cargo_config.toml so the binary
   # runs on any x86_64 CPU, not just the machine that built it.
   RUSTFLAGS="" npm run tauri build -- --bundles deb
