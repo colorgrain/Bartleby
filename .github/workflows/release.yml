@@ -127,7 +127,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
-            git nodejs npm webkit2gtk-4.1 gtk3 librsvg patchelf github-cli
+            git rust nodejs npm webkit2gtk-4.1 gtk3 librsvg patchelf github-cli
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -148,11 +148,14 @@ jobs:
           sed -i "s/^pkgver=.*/pkgver=${{ steps.ver.outputs.pkgver }}/" packaging/arch/PKGBUILD
 
       # makepkg refuses to run as root, so build as an unprivileged user.
+      # `su - builder` (with the dash) resets $HOME to /home/builder — without
+      # it, $HOME stays /root, which builder can't write to, and cargo/npm
+      # fail trying to create their cache dirs there.
       - name: Build package
         run: |
           useradd -m builder
           chown -R builder:builder .
-          su builder -c 'cd packaging/arch && makepkg -f --noconfirm'
+          su - builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && makepkg -f --noconfirm"
 
       - name: Upload to release
         env:
