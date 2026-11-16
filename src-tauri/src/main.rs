@@ -886,17 +886,6 @@ fn start_copy(
                     });
                 }
 
-                // ── MHL conflict prompt (Phase 3) ─────────────────────────────
-                // A previous MHL for this source was found at the destination.
-                // Reply::Continue → replace, Reply::Skip → keep both, Reply::Cancel → skip MHL.
-                Ok(copy_engine::Msg::MhlConflict { dst, existing_mhl }) => {
-                    let _ = win.emit("copy-prompt", PromptPayload {
-                        kind:           "mhl_conflict".into(),
-                        items:          vec![dst, existing_mhl],
-                        conflict_items: None,
-                    });
-                }
-
                 // ── Channel closed unexpectedly ───────────────────────────────
                 // All Sender<Msg> instances were dropped without sending Msg::Done.
                 // This can happen if the copy thread panicked. We emit a Done(false)

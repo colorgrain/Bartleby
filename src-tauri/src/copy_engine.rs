@@ -350,13 +350,6 @@ pub enum Msg {
     /// Pre-copy prompt: specific files already exist in a destination.
     /// Same blocking mechanism as `NonEmptyDest`.
     Conflicts(Vec<ConflictInfo>),
-    /// Phase-3 prompt: a previous MHL for this source already exists at the destination.
-    /// Reply::Continue → replace (delete old MHL), Reply::Skip → keep both (increment gen),
-    /// Reply::Cancel → skip MHL for this destination.
-    MhlConflict {
-        dst:          String,  // display path of destination
-        existing_mhl: String,  // filename of the conflicting MHL
-    },
 }
 
 /// User replies sent from the UI thread back to the blocked copy engine.
@@ -1102,7 +1095,7 @@ pub fn run(
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
                          &comment, &mhl_comment, &location,
                          &checksum_name_override, &report_name_override, &report_subfolder,
-                         &settings, &reply_rx);
+                         &settings);
         log_failed_copies(&tx, &copy_failed, flush_errors);
         let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
         let total_errors = copy_errors + flush_errors;
@@ -1306,7 +1299,7 @@ pub fn run(
                      hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, true,
                      &comment, &mhl_comment, &location,
                      &checksum_name_override, &report_name_override, &report_subfolder,
-                     &settings, &reply_rx);
+                     &settings);
 
     if verify_errors > 0 {
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -2167,7 +2160,6 @@ fn generate_reports(
     report_name_override:   &str,
     report_subfolder:       &str,
     settings:     &Settings,
-    reply_rx:     &std::sync::mpsc::Receiver<Reply>,
 ) {
     let _ = tx.send(Msg::Progress(0.98, "Generating reports…".into(), None));
     let col_label = hash_algo.col_label();
@@ -2175,19 +2167,6 @@ fn generate_reports(
     // Timestamp shared across all report files generated in this operation (UTC).
     let now_utc   = chrono::Utc::now();
     let timestamp = format!("{}_{}", now_utc.format("%Y-%m-%d"), now_utc.format("%H%M%SZ"));
-
-    // ── MHL: scan source for generational chain (once, before the dst loop) ──
-    let src_mhl_ref: Option<mhl_report::MhlRef> = if gen_mhl && hash_algo.mhl_element().is_some() {
-        let src_ascmhl = src.join("ascmhl");
-        mhl_report::scan_ascmhl_dir(&src_ascmhl).map(|(src_mhl_path, src_gen)| {
-            mhl_report::MhlRef {
-                path:       src_mhl_path.to_string_lossy().to_string(),
-                generation: src_gen,
-            }
-        })
-    } else {
-        None
-    };
 
     for (dst_idx, dst) in destinations.iter().enumerate() {
         // This destination's view: source hash + whether the file is complete
@@ -2264,64 +2243,36 @@ fn generate_reports(
         // failing PDF/HTML report must never prevent them from being written.
         if gen_mhl {
             if let Some(mhl_elem) = hash_algo.mhl_element() {
-                let mhl_entries: Vec<(String, String)> =
+                // ASC MHL root: the copied card folder (history travels with the
+                // card), or the destination itself when copying without subfolder.
+                let mhl_root: PathBuf = if copy_as_subfolder { dst.join(src_name) } else { dst.to_path_buf() };
+                // Earlier generations (e.g. the card's own history, copied in
+                // Phase 1) decide each file's action: original / verified / failed.
+                let recorded = mhl_report::recorded_hashes(&mhl_root);
+                let mhl_entries: Vec<mhl_report::MhlEntry> =
                     meta_entries.iter().zip(hashes.iter())
-                        .filter(|(_, (_, ok))| *ok)
+                        .filter(|((rel, _), (fh, ok))| *ok && fh.hash.is_some()
+                                && !mhl_report::is_history_path(rel))
                         .map(|((rel, _), (fh, _))| {
-                            (format!("{}{}", path_prefix, rel),
-                             fh.hash.clone().unwrap_or_default())
+                            let hash = fh.hash.clone().unwrap_or_default();
+                            let action = mhl_report::action_for(&recorded, rel, mhl_elem, &hash);
+                            mhl_report::MhlEntry { rel: rel.clone(), hash, action }
                         })
                         .collect();
-
-                // Determine generation number; prompt if a previous MHL exists.
-                let (generation, should_write) =
-                    match mhl_report::find_dst_mhl_for_src(checksum_dir, checksum_label) {
-                        Some((existing_path, existing_gen)) => {
-                            let existing_name = existing_path
-                                .file_name().unwrap_or_default()
-                                .to_string_lossy().to_string();
-                            let _ = tx.send(Msg::MhlConflict {
-                                dst:          report_dir.display().to_string(),
-                                existing_mhl: existing_name,
-                            });
-                            match reply_rx.recv().unwrap_or(Reply::Cancel) {
-                                Reply::Continue => {
-                                    // Replace: remove old MHL, start chain from source gen
-                                    let _ = std::fs::remove_file(&existing_path);
-                                    let gen = src_mhl_ref.as_ref()
-                                        .map(|r| r.generation + 1)
-                                        .unwrap_or(1);
-                                    (gen, true)
-                                }
-                                Reply::Skip | Reply::SkipKeep => {
-                                    // Keep both: existing_gen is already the highest for this src
-                                    (existing_gen + 1, true)
-                                }
-                                Reply::Cancel => {
-                                    log(tx, "△  MHL skipped for this destination.\n");
-                                    (0, false)
-                                }
-                            }
-                        }
-                        None => {
-                            // Clean destination — start chain from source gen or 1
-                            let gen = src_mhl_ref.as_ref()
-                                .map(|r| r.generation + 1)
-                                .unwrap_or(1);
-                            (gen, true)
-                        }
-                    };
-
-                if should_write {
-                    match mhl_report::write_mhl(checksum_dir, checksum_label, src, &mhl_entries, mhl_elem,
-                                                mhl_comment, location, settings,
-                                                generation, now_utc, src_mhl_ref.as_ref()) {
-                        Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
-                        Err(e) => log(tx, &format!("✖  MHL error: {}\n", e)),
-                    }
+                let n_failed = mhl_entries.iter().filter(|e| e.action == "failed").count();
+                if n_failed > 0 {
+                    log(tx, &format!(
+                        "⚠  {} file(s) differ from the hash recorded in the existing MHL history ({})\n",
+                        n_failed, mhl_root.display()));
+                }
+                match mhl_report::write_generation(&mhl_root, mhl_elem, "transfer", &mhl_entries,
+                                                   mhl_comment, location, settings, now_utc) {
+                    Ok(p)  => log(tx, &format!("◈  MHL : {}\n", p.display())),
+                    Err(e) => log(tx, &format!("✖  MHL error ({}): {}\n", mhl_root.display(), e)),
                 }
             }
         }
+
         if gen_csv {
             let csv_entries: Vec<(metadata::FileMeta, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
@@ -2402,6 +2353,9 @@ fn write_checksum(
     use std::io::Write;
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, ok)) in entries.iter().zip(hashes.iter()) {
+        // The card's own ascmhl/ history is not media; its chain file changes
+        // when the new generation is written, so a hash of it would go stale.
+        if mhl_report::is_history_path(rel) { continue; }
         if !ok {
             // Copy or verification failed on this destination: recording the
             // source hash here would vouch for a file that is missing or wrong.
@@ -2846,16 +2800,21 @@ mod tests {
         run_job_with(src, dsts, algo, false, || Reply::Continue)
     }
 
+    fn run_job_with(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo, subfolder: bool,
+                    conflict_reply: fn() -> Reply) -> (bool, String, String) {
+        run_job_full(src, dsts, algo, subfolder, false, conflict_reply)
+    }
+
     /// Same, with the copy-as-subfolder option and the reply given to the
     /// file-conflict prompt.
-    fn run_job_with(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo, subfolder: bool,
+    fn run_job_full(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo, subfolder: bool, mhl: bool,
                     conflict_reply: fn() -> Reply) -> (bool, String, String) {
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let pc = PauseCancel::new();
         let src = src.to_path_buf();
         let h = std::thread::spawn(move || {
-            run(src, dsts, algo, false, false, false, false, subfolder,
+            run(src, dsts, algo, false, false, false, mhl, subfolder,
                 String::new(), String::new(), String::new(),
                 String::new(), String::new(), String::new(),
                 Settings::default(), tx, reply_rx, pc)
@@ -2866,7 +2825,7 @@ mod tests {
                 Msg::Log(l) => logs.push_str(&l),
                 Msg::Done(ok, s) => break (ok, s),
                 Msg::Conflicts(_) => reply_tx.send(conflict_reply()).unwrap(),
-                Msg::NonEmptyDest(_) | Msg::MhlConflict { .. } => {
+                Msg::NonEmptyDest(_) => {
                     reply_tx.send(Reply::Continue).unwrap();
                 }
                 Msg::Progress(..) => {}
@@ -3025,6 +2984,42 @@ mod tests {
         let bad_sums = read_checksum(&bad, "xxh64");
         assert_eq!(bad_sums.lines().filter(|l| !l.starts_with('#')).count(), 4, "{bad_sums}");
         assert!(bad_sums.contains("# FAILED") && bad_sums.contains("sub/x.bin"), "{bad_sums}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // M6: the MHL history lives in the copied card folder and continues the
+    // card's own history; ascmhl/ files are never listed as media.
+    #[test]
+    fn mhl_history_travels_with_the_card() {
+        let root = tmp_dir("mhl");
+        let src = make_source(&root);
+        // The card already carries one generation (e.g. written by the camera
+        // or an earlier offload), recording a.bin with its real XXH64.
+        let a_hash = hash_file_path(&src.join("a.bin"), HashAlgo::Xxh64).unwrap();
+        mhl_report::write_generation(&src, "xxh64", "in-place",
+            &[mhl_report::MhlEntry { rel: "a.bin".into(), hash: a_hash, action: "original" }],
+            "", "", &Settings::default(), chrono::Utc::now() - chrono::Duration::hours(1)).unwrap();
+
+        let dst = root.join("dst");
+        let (ok, summary, logs) = run_job_full(&src, vec![dst.clone()], HashAlgo::Xxh64, true, true,
+                                               || Reply::Continue);
+        assert!(ok, "summary: {summary}\n{logs}");
+
+        let hist = dst.join("A001").join("ascmhl");
+        assert!(!dst.join("ascmhl").exists(), "history must not be at the drive root");
+        let (gen2, n) = mhl_report::scan_ascmhl_dir(&hist).expect("no generation");
+        assert_eq!(n, 2, "should continue the card history");
+        let xml = fs::read_to_string(&gen2).unwrap();
+        assert!(xml.contains(">a.bin</path>"), "{xml}");
+        assert!(xml.contains("action=\"verified\""), "a.bin was already recorded:\n{xml}");
+        assert!(xml.contains("action=\"original\""), "{xml}");
+        assert!(!xml.contains("\">ascmhl"), "history files listed as media:\n{xml}");
+        let chain = fs::read_to_string(hist.join("ascmhl_chain.xml")).unwrap();
+        assert!(chain.contains("sequencenr=\"2\""), "{chain}");
+
+        let sums = read_checksum(&dst, "xxh64");
+        assert!(!sums.contains("ascmhl"), "{sums}");
+        assert!(sums.contains("A001/sub/x.bin"), "{sums}");
         let _ = fs::remove_dir_all(&root);
     }
 }

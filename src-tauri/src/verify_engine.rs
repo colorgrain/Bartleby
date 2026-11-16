@@ -596,8 +596,6 @@ pub fn write_post_verify_mhl(
         None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "no MHL element for algo")),
     };
 
-    let meta = result.mhl_meta.as_ref().cloned().unwrap_or_default();
-
     // Destination root: parent of ascmhl/
     let dst = verified_mhl_path.parent()    // ascmhl/
         .and_then(|p| p.parent())           // dst/
@@ -609,107 +607,17 @@ pub fn write_post_verify_mhl(
         .map(|e| (e.rel_path.clone(), e.computed.clone(), e.status.clone()))
         .collect();
 
-    // Next generation = highest existing generation in {dst}/ascmhl/ + 1, across
-    // ALL hash lists regardless of source name. scan_ascmhl_dir does exactly this;
-    // it must not be the name-filtered find_dst_mhl_for_src (an empty name there
-    // matches nothing, so the new MHL could collide with an existing generation
-    // when post-verifying anything other than the latest one). Falls back to the
-    // verified MHL's own generation + 1 if the directory cannot be read.
-    let new_gen = mhl_report::scan_ascmhl_dir(&dst.join("ascmhl"))
-        .map(|(_, g)| g + 1)
-        .unwrap_or(meta.generation + 1);
-
-    // Write via mhl_report but override the process element afterward
-    // Simpler: build the XML directly for verify MHLs
-    use std::io::Write;
-    use chrono::{Utc, DateTime};
-
-    let now_utc:   DateTime<Utc>   = Utc::now();
-    let date_str   = now_utc.format("%Y-%m-%d").to_string();
-    let time_str   = now_utc.format("%H%M%SZ").to_string();
-    let finish_iso = now_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-    let dir      = dst.join("ascmhl");
-    std::fs::create_dir_all(&dir)?;
-    let src_name = verified_mhl_path.file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.split('_').nth(1))   // extract src_name from filename
-        .unwrap_or("unknown");
-    let filename = format!("{:04}_{}_{}_{}.mhl", new_gen, src_name, date_str, time_str);
-    let out_path = dir.join(&filename);
-    let mut f    = std::fs::File::create(&out_path)?;
-
-    let xe = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-                         .replace('"', "&quot;").replace('\'', "&apos;");
-
-    writeln!(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
-    writeln!(f, "<hashlist xmlns=\"urn:ASC:MHL:v2.0\" version=\"2.0\">")?;
-    writeln!(f, "  <creatorinfo>")?;
-    writeln!(f, "    <creationdate>{}</creationdate>", finish_iso)?;
-    writeln!(f, "    <hostname>{}</hostname>", xe(&crate::mhl_report::hostname()))?;
-    writeln!(f, "    <tool version=\"{}\">Bartleby</tool>", xe(crate::VERSION))?;
-    let company = settings.company.trim();
-    let name    = settings.contact_name.trim();
-    let email   = settings.email.trim();
-    let phone   = settings.phone.trim();
-    if !company.is_empty() {
-        writeln!(f, "    <author role=\"organization\">{}</author>", xe(company))?;
-    }
-    if !name.is_empty() || !email.is_empty() || !phone.is_empty() {
-        write!(f, "    <author")?;
-        if !email.is_empty() { write!(f, " email=\"{}\"", xe(email))?; }
-        if !phone.is_empty() { write!(f, " phone=\"{}\"", xe(phone))?; }
-        writeln!(f, ">{}</author>", xe(name))?;
-    }
-    writeln!(f, "  </creatorinfo>")?;
-    writeln!(f, "  <processinfo>")?;
-    // Spec-valid ProcessType values are in-place | transfer | flatten. A verify
-    // pass hashes files in place, so "in-place" is correct here (not "verify",
-    // which is not a valid value). The per-file action attribute carries the
-    // verified/failed outcome below.
-    writeln!(f, "    <process>in-place</process>")?;
-    writeln!(f, "  </processinfo>")?;
-    writeln!(f, "  <hashes>")?;
-    for (rel, hash, status) in &entries {
-        if hash.is_empty() { continue; }
-        let rel_native = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
-        let abs = dst.join(&rel_native);
-        let (size, mtime_iso) = if let Ok(m) = std::fs::metadata(&abs) {
-            let mtime = m.modified().ok()
-                .map(|t| { let dt: DateTime<Utc> = t.into(); dt.format("%Y-%m-%dT%H:%M:%SZ").to_string() })
-                .unwrap_or_default();
-            (m.len(), mtime)
-        } else { (0, String::new()) };
-        let action = if status == "ok" { "verified" } else { "failed" };
-        writeln!(f, "    <hash>")?;
-        write!(f, "      <path")?;
-        if size > 0              { write!(f, " size=\"{}\"", size)?; }
-        if !mtime_iso.is_empty() { write!(f, " lastmodificationdate=\"{}\"", mtime_iso)?; }
-        writeln!(f, ">{}</path>", xe(rel))?;
-        writeln!(f, "      <{} action=\"{}\">{}</{}>", mhl_elem, action, hash, mhl_elem)?;
-        writeln!(f, "    </hash>")?;
-    }
-    writeln!(f, "  </hashes>")?;
-    // Reference to the verified MHL: relative path from dst root, C4 hash required by spec.
-    let rel_ref = verified_mhl_path.strip_prefix(dst)
-        .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    if !rel_ref.is_empty() {
-        let c4 = crate::copy_engine::hash_file_path(verified_mhl_path, crate::copy_engine::HashAlgo::C4)
-            .unwrap_or_default();
-        if !c4.is_empty() {
-            writeln!(f, "  <references>")?;
-            writeln!(f, "    <hashlistreference>")?;
-            writeln!(f, "      <path>{}</path>", xe(&rel_ref))?;
-            writeln!(f, "      <c4>{}</c4>", c4)?;
-            writeln!(f, "    </hashlistreference>")?;
-            writeln!(f, "  </references>")?;
-        }
-    }
-    writeln!(f, "</hashlist>")?;
-
-    Ok(out_path)
+    // Same writer as the copy engine: next generation in {root}/ascmhl/, chain
+    // file updated. Spec-valid ProcessType values are in-place | transfer |
+    // flatten; a verify pass hashes files in place. The per-file action
+    // carries the verified / failed outcome.
+    let mhl_entries: Vec<mhl_report::MhlEntry> = entries.into_iter()
+        .map(|(rel, hash, status)| mhl_report::MhlEntry {
+            rel, hash, action: if status == "ok" { "verified" } else { "failed" },
+        })
+        .collect();
+    mhl_report::write_generation(dst, mhl_elem, "in-place", &mhl_entries,
+                                 "", "", settings, chrono::Utc::now())
 }
 
 // ── HTML report ───────────────────────────────────────────────────────────────

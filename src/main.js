@@ -1366,19 +1366,7 @@ function showPrompt(kind, items, conflictItems) {
         title.style.position = '';
         title.style.zIndex   = '';
 
-        if (kind === 'mhl_conflict') {
-            title.textContent = 'Existing MHL at destination';
-            message.textContent =
-                'A previous MHL was found at this destination:\n\n' +
-                items[1] + '\n\n' +
-                'Destination: ' + items[0] + '\n\n' +
-                'This usually means a previous copy was attempted here. ' +
-                '"Replace" removes the old MHL and writes a fresh one. ' +
-                '"Keep both" appends a new generation alongside it.';
-            addPromptBtn(btnRow, 'Skip MHL',  'cancel',   false, false, resolve);
-            addPromptBtn(btnRow, 'Keep both', 'skip',     false, false, resolve);
-            addPromptBtn(btnRow, 'Replace',   'continue', true,  false, resolve);
-        } else if (kind === 'non_empty') {
+        if (kind === 'non_empty') {
             title.textContent = 'Non-empty destination';
             message.textContent =
                 'The following destination(s) already contain files:\n\n' +

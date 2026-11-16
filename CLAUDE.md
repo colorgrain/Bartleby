@@ -103,7 +103,7 @@ Tokio worker  → start_copy command handler (returns immediately)
 
 ### Interactive prompts during copy
 
-When the copy engine encounters a non-empty destination, file conflicts, or an existing MHL for the same source, it sends `Msg::NonEmptyDest`, `Msg::Conflicts` or `Msg::MhlConflict` and blocks on `reply_rx.recv()`. The forwarding thread emits `"copy-prompt"` to JS, which shows a modal. The user's response calls `invoke("prompt_reply")`, which sends on `AppState.reply_tx` to unblock the engine.
+When the copy engine encounters a non-empty destination or file conflicts, it sends `Msg::NonEmptyDest` or `Msg::Conflicts` and blocks on `reply_rx.recv()`. The forwarding thread emits `"copy-prompt"` to JS, which shows a modal. The user's response calls `invoke("prompt_reply")`, which sends on `AppState.reply_tx` to unblock the engine.
 
 ### Verifier window
 
