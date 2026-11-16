@@ -56,8 +56,9 @@ filePathRow.addEventListener('drop', function(e) {
     filePathRow.classList.remove('drag-over');
 });
 
-// Tauri v2 native drag-drop event provides absolute paths
-listen('tauri://drag-drop', function(event) {
+// Tauri v2 native drag-drop event provides absolute paths. Listen on THIS
+// webview only: a global listen() also receives drops made on the main window.
+window.__TAURI__.webview.getCurrentWebview().listen('tauri://drag-drop', function(event) {
     filePathRow.classList.remove('drag-over');
     var paths = event.payload && event.payload.paths;
     if (paths && paths.length > 0) {
@@ -84,6 +85,11 @@ function browseFile() {
 // ── Set the active file ───────────────────────────────────────────────────────
 
 function setFile(path) {
+    // Loading another file would wipe the table of a running verification.
+    if (verifyRunning) {
+        showError('A verification is running — stop it before loading another file.');
+        return;
+    }
     currentFile = path;
     document.getElementById('file-path-input').value = path;
     clearAll();
@@ -114,7 +120,11 @@ function startVerification(filePath) {
     });
 }
 
+// True between start_verification and verify-done / verify-cancelled.
+var verifyRunning = false;
+
 function setVerifyActive(active) {
+    verifyRunning = active;
     document.getElementById('verify-action-btn').classList.toggle('hidden', active);
     document.getElementById('verify-pause-btn').classList.toggle('hidden', !active);
     document.getElementById('verify-stop-btn').classList.toggle('hidden', !active);
@@ -169,7 +179,7 @@ listen('verify-progress', function(event) {
 // Per-file result: update just the result columns of the matching row
 listen('verify-entry', function(event) {
     var e   = event.payload;
-    var row = document.querySelector('#results-tbody tr[data-idx="' + e.index + '"]');
+    var row = resultRows[e.index];
     if (!row) return;
 
     var rowCls = {ok:'row-ok', mismatch:'row-fail', missing:'row-miss'}[e.status] || 'row-fail';
@@ -220,7 +230,11 @@ function setProgress(fraction, label) {
 
 // ── Render from pre-parsed file list ─────────────────────────────────────────
 
+// <tr> of each entry, by index (filled by renderFileList).
+var resultRows = [];
+
 function clearAll() {
+    resultRows = [];
     lastResult = null;
     currentIsMhl = false;
     document.getElementById('summary-section').style.display  = 'none';
@@ -338,6 +352,9 @@ function renderPendingTable(r) {
         rows += '</tr>';
     });
     tbody.innerHTML = rows;
+    // Index rows once: a querySelector per verify-entry event would make
+    // large MHLs (tens of thousands of files) quadratic.
+    resultRows = Array.prototype.slice.call(tbody.rows);
 
     document.getElementById('results-section').style.display = 'block';
 }

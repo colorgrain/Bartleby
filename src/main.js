@@ -173,6 +173,9 @@ var cancelBtn     = document.getElementById('cancel-btn');
 var copyIsPaused  = false;
 var userCancelledQueue = false;
 var currentJobIndex    = -1;
+// Card element of the running job. Captured when the job starts, so progress
+// and status never land on another card if the list changes.
+var currentJobCard     = null;
 var copyJobStartTime   = null;
 var menuBtn            = document.getElementById('menu-btn');
 var settingsOverlay    = document.getElementById('settings-overlay');
@@ -197,6 +200,7 @@ var defaultGenMhl   = false;
 var copyInProgress = false;
 function setCopyInProgress(active) {
     copyInProgress = active;
+    setJobsLocked(active);
     copyIsPaused = false;
     copyBtn.classList.toggle('hidden', active);
     pauseBtn.classList.toggle('hidden', !active);
@@ -205,6 +209,53 @@ function setCopyInProgress(active) {
     cancelBtn.disabled = false;
     pauseBtn.innerHTML = '<svg width="18" height="18"><use href="#ico-pause"/></svg>';
     pauseBtn.title     = 'Pause transfer';
+}
+
+// Jobs are captured when the queue starts: editing, adding or removing a job
+// during the copy would be ignored by the engine, or shift progress / status
+// onto the wrong card. Every control of the job list is disabled meanwhile
+// (only the ones this function disabled are re-enabled afterwards).
+function setJobsLocked(locked) {
+    jobsContainer.classList.toggle('jobs-locked', locked);
+    var ctrls = Array.prototype.slice.call(
+        jobsContainer.querySelectorAll('input, button, select, textarea'));
+    ctrls.push(addJobBtn);
+    ctrls.forEach(function(el) {
+        if (locked) {
+            if (!el.disabled) { el.disabled = true; el.setAttribute('data-copy-locked', '1'); }
+        } else if (el.getAttribute('data-copy-locked')) {
+            el.disabled = false;
+            el.removeAttribute('data-copy-locked');
+        }
+    });
+}
+
+// ── Log panel ─────────────────────────────────────────────────────────────────
+// `textContent +=` rewrites the whole log for every line (quadratic on jobs of
+// thousands of files). Lines are kept in an array (for save_log) and appended
+// to the panel as text nodes, batched once per animation frame.
+var logLines = [];
+var logPending = '';
+var logFlushQueued = false;
+function appendLog(text) {
+    logLines.push(text);
+    logPending += text;
+    if (!logFlushQueued) {
+        logFlushQueued = true;
+        requestAnimationFrame(flushLog);
+    }
+}
+function flushLog() {
+    logFlushQueued = false;
+    if (!logPending) return;
+    logView.appendChild(document.createTextNode(logPending));
+    logPending = '';
+    logView.scrollTop = logView.scrollHeight;
+}
+function clearLog() {
+    logLines = [];
+    logPending = '';
+    logView.textContent = '';
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -1038,8 +1089,7 @@ async function registerListeners() {
     unlisteners = [];
 
     unlisteners.push(await listen('copy-progress', function(event) {
-        var cards = jobsContainer.querySelectorAll('.job-group');
-        var activeCard = cards[currentJobIndex];
+        var activeCard = currentJobCard;
         if (activeCard) {
             var fraction = event.payload.fraction;
             var fill  = activeCard.querySelector('.job-progress-fill');
@@ -1062,8 +1112,7 @@ async function registerListeners() {
     }));
 
     unlisteners.push(await listen('copy-log', function(event) {
-        logView.textContent += event.payload.line;
-        logView.scrollTop = logView.scrollHeight;
+        appendLog(event.payload.line);
     }));
 
     unlisteners.push(await listen('copy-prompt', async function(event) {
@@ -1189,7 +1238,7 @@ async function launchCopy() {
     currentJobIndex = -1;
     statusLabel.textContent = '';
     statusLabel.className   = '';
-    logView.textContent     = '';
+    clearLog();
 
     // Reset progress bars and status for the jobs we will run.
     runSet.forEach(function(idx) {
@@ -1219,12 +1268,13 @@ async function launchCopy() {
     for (var s = 0; s < runSet.length; s++) {
         var i   = runSet[s];
         var job = jobs[i];
-        var jobCards  = jobsContainer.querySelectorAll('.job-group');
-        var jobProgEl = jobCards[i] ? jobCards[i].querySelector('.job-progress') : null;
+        var jobCard   = cards[i];   // captured at queue start, see setJobsLocked
+        var jobProgEl = jobCard ? jobCard.querySelector('.job-progress') : null;
 
         copyJobStartTime = null;
         currentJobIndex = i;
-        setJobStatus(jobCards[i], 'running');
+        currentJobCard  = jobCard;
+        setJobStatus(jobCard, 'running');
 
         if (jobProgEl) {
             jobProgEl.classList.remove('hidden');
@@ -1237,13 +1287,12 @@ async function launchCopy() {
 
         if (multi) {
             currentJobPrefix = 'Job ' + (s + 1) + '/' + runSet.length;
-            logView.textContent += '\n── ' + currentJobPrefix + ' — ' + job.src + '\n';
-            logView.scrollTop = logView.scrollHeight;
+            appendLog('\n── ' + currentJobPrefix + ' — ' + job.src + '\n');
         }
 
         var result = await runJob(job);
 
-        setJobStatus(jobCards[i], result.ok ? 'done' : 'failed');
+        setJobStatus(jobCard, result.ok ? 'done' : 'failed');
         if (jobProgEl) {
             var fill = jobProgEl.querySelector('.job-progress-fill');
             fill.style.width = '100%';
@@ -1258,7 +1307,7 @@ async function launchCopy() {
         lastSummary = result.summary;
 
         if (multi) {
-            logView.textContent += (result.ok ? '✓ ' : '✗ ') + result.summary + '\n';
+            appendLog((result.ok ? '✓ ' : '✗ ') + result.summary + '\n');
             logView.scrollTop = logView.scrollHeight;
         }
 
@@ -1274,12 +1323,13 @@ async function launchCopy() {
         ? (allOk ? 'All ' + runSet.length + ' jobs completed successfully.' : 'Queue finished with errors — check log.')
         : lastSummary;
     statusLabel.className = allOk ? 'success' : 'error';
+    currentJobCard = null;
     setCopyInProgress(false);
 
     // Auto-save log
     try {
-        var logPath = await invoke('save_log', { content: logView.textContent });
-        logView.textContent += '\nLog saved: ' + logPath + '\n';
+        var logPath = await invoke('save_log', { content: logLines.join('') });
+        appendLog('\nLog saved: ' + logPath + '\n');
         logView.scrollTop = logView.scrollHeight;
     } catch(e) {
         console.warn('save_log failed:', e);
@@ -1541,12 +1591,19 @@ function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
 // ── Drag & drop ───────────────────────────────────────────────────────────────
 (async function setupDragDrop() {
     try {
-        await window.__TAURI__.event.listen('tauri://drag-drop', function(event) {
+        // Listen on THIS webview only: a global listen() also receives drops
+        // made on the Verifier window.
+        await window.__TAURI__.webview.getCurrentWebview().listen('tauri://drag-drop', function(event) {
             var paths = event.payload.paths;
             if (!paths || paths.length === 0) return;
+            // Jobs cannot be edited while a copy runs (see setJobsLocked).
+            if (copyInProgress) return;
 
             var droppedPath = paths[0];
-            var dropY = event.payload.position ? event.payload.position.y : 0;
+            // The drop position is in physical pixels; the layout is in CSS
+            // pixels (they differ on HiDPI / scaled displays).
+            var dpr   = window.devicePixelRatio || 1;
+            var dropY = event.payload.position ? event.payload.position.y / dpr : 0;
 
             var jobCards  = Array.from(jobsContainer.querySelectorAll('.job-group'));
             var targetCard = null;
@@ -1568,7 +1625,7 @@ function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
                 var srcSection = srcInputEl.closest('.job-src-section');
                 if (srcSection) {
                     var sr = srcSection.getBoundingClientRect();
-                    var dropX = event.payload.position ? event.payload.position.x : 0;
+                    var dropX = event.payload.position ? event.payload.position.x / dpr : 0;
                     inSource = dropX >= sr.left && dropX <= sr.right;
                 }
             }
@@ -1591,8 +1648,6 @@ function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
                 }
             }
         });
-
-        await window.__TAURI__.event.listen('tauri://drag-cancelled', function() {});
 
     } catch(e) {
         console.warn('Drag & drop not available:', e);
