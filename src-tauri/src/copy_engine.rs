@@ -841,8 +841,13 @@ pub fn run(
     // Source size of each entry of `copied` (same index). `file_sizes` is indexed
     // on `files`, which diverges from `copied` as soon as one file fails.
     let mut copied_sizes: Vec<u64> = Vec::new();
-    // Relative paths of files that could not be copied to every destination.
+    // Per entry of `copied`: one flag per destination, true when the file is
+    // complete there. A file that failed on one destination but succeeded on
+    // another stays in `copied`, so the good destinations still list it.
+    let mut copied_dst_ok: Vec<Vec<bool>> = Vec::new();
+    // "relative path → destination" for every failed file × destination pair.
     let mut copy_failed: Vec<String> = Vec::new();
+    // Number of files with at least one failed destination.
     let mut copy_errors = 0usize;
     // Destination-wide flush failures (syncfs / FlushFileBuffers): data may not
     // be on disk even though every write() succeeded.
@@ -877,31 +882,31 @@ pub fn run(
             // All destinations already have this file — add to `copied` for verification/reports.
             copied.push((src_path.clone(), rel_str.clone()));
             copied_sizes.push(fsize);
+            copied_dst_ok.push(vec![true; destinations.len()]);
             bytes_done += fsize * n_dst;
             bytes_done_arc.store(bytes_done, Ordering::Relaxed);
             continue;
         }
 
-        let dst_paths: Vec<PathBuf> = dst_entries.iter().map(|(_, p)| p.clone()).collect();
-        let dst_indices: Vec<usize> = dst_entries.iter().map(|(i, _)| *i).collect();
+        // Status of this file on each destination (true = complete there).
+        // Destinations skipped above (identical file already present) are ok.
+        let mut dst_ok: Vec<bool> = vec![true; destinations.len()];
 
         // Create subdirectories in active destinations only.
-        let mut dir_ok = true;
-        for dst_path in &dst_paths {
+        for (i, dst_path) in &dst_entries {
             if let Some(parent) = dst_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
                     log(&tx, &format!("  ✖  mkdir {}: {}\n", parent.display(), e));
-                    dir_ok = false;
+                    dst_ok[*i] = false;
                 }
             }
         }
-        if !dir_ok { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
 
         // Rename conflicting destination files before overwriting (skip-and-keep mode).
         // If the rename fails, that destination is left untouched for this file
-        // (the user asked to keep the existing file) and the file counts as failed.
-        let mut rename_failed: Vec<usize> = Vec::new();
+        // (the user asked to keep the existing file) and counts as failed.
         for (i, dst_path) in dst_entries.iter() {
+            if !dst_ok[*i] { continue; }
             if rename_dest_pairs.contains(&(rel_str.clone(), *i)) && dst_path.exists() {
                 let conflict_path = find_conflict_rename(dst_path);
                 match fs::rename(dst_path, &conflict_path) {
@@ -912,14 +917,14 @@ pub fn run(
                         log(&tx, &format!(
                             "  ✖  could not rename existing {}: {} — kept, not overwritten\n",
                             dst_path.display(), e));
-                        rename_failed.push(*i);
+                        dst_ok[*i] = false;
                     }
                 }
             }
         }
-        let (dst_paths, dst_indices): (Vec<PathBuf>, Vec<usize>) = dst_paths.into_iter()
-            .zip(dst_indices)
-            .filter(|(_, i)| !rename_failed.contains(i))
+        let (dst_paths, dst_indices): (Vec<PathBuf>, Vec<usize>) = dst_entries.iter()
+            .filter(|(i, _)| dst_ok[*i])
+            .map(|(i, p)| (p.clone(), *i))
             .unzip();
 
         // Copy to active destinations in parallel.
@@ -932,7 +937,6 @@ pub fn run(
             })
             .collect();
 
-        let mut any_error = false;
         for (i, res) in copy_results.iter().enumerate() {
             if let Err(e) = res {
                 if e.kind() == io::ErrorKind::Interrupted {
@@ -941,11 +945,8 @@ pub fn run(
                     return;
                 }
                 log(&tx, &format!("  ✖  → {}: {}\n", destinations[dst_indices[i]].display(), e));
-                any_error = true;
+                dst_ok[dst_indices[i]] = false;
             }
-        }
-        if any_error || !rename_failed.is_empty() {
-            copy_errors += 1; copy_failed.push(rel_str.clone()); continue;
         }
 
         // macOS: fsync each destination file immediately after copy.
@@ -957,25 +958,38 @@ pub fn run(
         // serialising copy→flush→copy→flush and dropping throughput ~13×.
         #[cfg(target_os = "macos")]
         {
-            let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
-                .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
+            let sync_results: Vec<(usize, io::Result<()>)> = dst_paths.par_iter().zip(dst_indices.par_iter())
+                .filter(|(_, i)| dst_ok[**i])
+                .map(|(dst_path, i)| (*i, fs::OpenOptions::new().write(true).open(dst_path)
+                    .and_then(|f| f.sync_all())))
                 .collect();
-            let mut sync_error = false;
-            for (i, res) in sync_results.iter().enumerate() {
+            for (i, res) in &sync_results {
                 if let Err(e) = res {
-                    log(&tx, &format!("  ✖  sync {}: {}\n",
-                        destinations[dst_indices[i]].display(), e));
-                    sync_error = true;
+                    log(&tx, &format!("  ✖  sync {}: {}\n", destinations[*i].display(), e));
+                    dst_ok[*i] = false;
                 }
             }
-            if sync_error { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
         }
 
         bytes_done += fsize * n_dst;
         bytes_done_arc.store(bytes_done, Ordering::Relaxed);
-        copied.push((src_path.clone(), rel_str.clone()));
-        copied_sizes.push(fsize);
-        log(&tx, &format!("  ✓  {}\n", rel_str));
+
+        let failed_here: Vec<usize> = (0..destinations.len()).filter(|i| !dst_ok[*i]).collect();
+        for i in &failed_here {
+            copy_failed.push(format!("{}  →  {}", rel_str, destinations[*i].display()));
+        }
+        if !failed_here.is_empty() { copy_errors += 1; }
+        if dst_ok.iter().any(|&ok| ok) {
+            if failed_here.is_empty() {
+                log(&tx, &format!("  ✓  {}\n", rel_str));
+            } else {
+                log(&tx, &format!("  △  {} — copied to {}/{} destination(s)\n",
+                    rel_str, destinations.len() - failed_here.len(), destinations.len()));
+            }
+            copied.push((src_path.clone(), rel_str.clone()));
+            copied_sizes.push(fsize);
+            copied_dst_ok.push(dst_ok);
+        }
     }
 
     // ── Linux: single syncfs() per destination filesystem ────────────────────
@@ -1081,8 +1095,8 @@ pub fn run(
 
     // ── Copy-only path ────────────────────────────────────────────────────────
     if !verify {
-        let no_hashes: Vec<(FileHashes, bool)> =
-            copied.iter().map(|_| (FileHashes::default(), true)).collect();
+        let no_hashes: Vec<(FileHashes, Vec<bool>)> =
+            copied_dst_ok.iter().map(|ok| (FileHashes::default(), ok.clone())).collect();
         generate_reports(&tx, &destinations, &src_name, copy_as_subfolder, &src, total_bytes,
                          &meta_entries, &no_hashes,
                          hash_algo, gen_csv, gen_pdf, gen_html, gen_mhl, false,
@@ -1098,8 +1112,9 @@ pub fn run(
             log(&tx, &format!("\n{}\n", summary));
             let _ = tx.send(Msg::Done(true, summary));
         } else {
-            let summary = format!("△  {} error(s) — {}/{} file(s) copied — no verification",
-                total_errors, copied.len(), files.len());
+            let complete = copied_dst_ok.iter().filter(|v| v.iter().all(|&ok| ok)).count();
+            let summary = format!("△  {} error(s) — {}/{} file(s) copied to every destination — no verification",
+                total_errors, complete, files.len());
             log(&tx, &format!("\n{}\n", summary));
             let _ = tx.send(Msg::Done(false, summary));
         }
@@ -1122,12 +1137,21 @@ pub fn run(
     is_verifying.store(true, Ordering::Relaxed);
 
     let n_files = copied.len();
-    let mut results: Vec<(FileHashes, bool)> =
-        vec![(FileHashes::default(), true); n_files];
+    // Per file: source hash + one flag per destination (starts from the Phase 1
+    // status; a destination that was not copied stays false and is not read).
+    let mut results: Vec<(FileHashes, Vec<bool>)> = copied_dst_ok.iter()
+        .map(|ok| (FileHashes::default(), ok.clone()))
+        .collect();
+    // Number of files that failed verification on at least one destination.
     let mut verify_errors = 0usize;
     // One warning per path (source + each destination) when the hash had to
     // fall back to a buffered read.
     let mut buffered_warned = vec![false; 1 + destinations.len()];
+
+    let dst_file_path = |dst: &Path, rel_str: &str| -> PathBuf {
+        let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
+        if copy_as_subfolder { dst.join(&src_name).join(&rel_native) } else { dst.join(&rel_native) }
+    };
 
     if hash_algo == HashAlgo::Size {
         // ── Path A: fast file-size comparison ────────────────────────────────
@@ -1143,22 +1167,19 @@ pub fn run(
 
             let mut mismatch = false;
             for (i, dst) in destinations.iter().enumerate() {
-                let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
-                let dst_path = if copy_as_subfolder {
-                    dst.join(&src_name).join(&rel_native)
-                } else {
-                    dst.join(&rel_native)
-                };
-                match fs::metadata(&dst_path) {
+                if !results[file_idx].1[i] { continue; } // not copied there
+                match fs::metadata(dst_file_path(dst, rel_str)) {
                     Ok(m) if m.len() != src_size => {
                         log(&tx, &format!(
                             "  ✖  SIZE MISMATCH — {}\n     src: {} B  dst[{}]: {} B\n",
                             rel_str, src_size, i + 1, m.len()));
+                        results[file_idx].1[i] = false;
                         mismatch = true;
                     }
                     Err(e) => {
                         log(&tx, &format!(
                             "  ✖  stat error {} (dst[{}]): {}\n", rel_str, i + 1, e));
+                        results[file_idx].1[i] = false;
                         mismatch = true;
                     }
                     _ => {}
@@ -1166,8 +1187,7 @@ pub fn run(
             }
             if mismatch {
                 verify_errors += 1;
-                results[file_idx].1 = false;
-            } else {
+            } else if results[file_idx].1.iter().all(|&ok| ok) {
                 log(&tx, &format!("  ✓  {}  [{} B]\n", rel_str, src_size));
             }
         }
@@ -1175,124 +1195,103 @@ pub fn run(
         // ── Path B: hash from physical storage ───────────────────────────────
         //
         // Reads use O_DIRECT on Linux, F_NOCACHE on macOS, FILE_FLAG_NO_BUFFERING
-        // on Windows. This ensures we hash what is physically on disk, not cached RAM.
-        //
-        // For each file: source + all destinations are hashed in parallel.
-        // MD5 and XXH3 are computed simultaneously in a single read pass.
+        // on Windows, so we hash what is physically on disk, not cached RAM.
+        // For each file: the source and every destination it was copied to are
+        // hashed in parallel.
         for (file_idx, (src_path, rel_str)) in copied.iter().enumerate() {
             if let Err(_) = pc.wait_if_paused() {
                 log(&tx, "✖  Cancelled.\n");
                 let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
                 return;
             }
-            let fsize = fs::metadata(src_path).map(|m| m.len()).unwrap_or(0);
+            let fsize = copied_sizes[file_idx];
 
             in_flight.store(0, Ordering::Relaxed);
             *action.lock().unwrap() = format!("Verifying {}/{} — {}", file_idx + 1, n_files, rel_str);
 
-            // Build the list of paths to hash: [source, destination1, destination2, …]
+            // Paths to hash: [source, destinations the file was copied to].
+            // `slots[k]` = index in `destinations` of all_paths[k + 1].
+            let slots: Vec<usize> = (0..destinations.len())
+                .filter(|i| results[file_idx].1[*i]).collect();
             let mut all_paths: Vec<PathBuf> = vec![src_path.clone()];
-            for dst in &destinations {
-                let rel_native = rel_str.replace('/', std::path::MAIN_SEPARATOR_STR);
-                let path = if copy_as_subfolder {
-                    dst.join(&src_name).join(&rel_native)
-                } else {
-                    dst.join(&rel_native)
-                };
-                all_paths.push(path);
-            }
+            for &i in &slots { all_paths.push(dst_file_path(&destinations[i], rel_str)); }
+            // Device counter / FUSE flag / warning slot of all_paths[k]:
+            // 0 = source, i + 1 = destination i.
+            let dev_of = |k: usize| if k == 0 { 0 } else { slots[k - 1] + 1 };
 
-            // ── Linux: evict FUSE-backed pages from the OS cache before hashing ─
-            //
-            // For non-FUSE paths (ext4, btrfs, XFS …), `hash_direct()` uses O_DIRECT
-            // which bypasses the page cache entirely — eviction is unnecessary.
-            //
-            // For FUSE paths (ntfs-3g, fuse-exfat …), O_DIRECT returns EINVAL, so
-            // `hash_direct()` falls back to standard buffered I/O. Without eviction,
-            // that buffered read would hash the in-RAM page cache copy written during
-            // Phase 1, rather than verifying what is physically on disk.
-            //
-            // `posix_fadvise(FADV_DONTNEED)` asks the kernel to release the cached
-            // pages for this file. After Phase 1's syncfs(), all pages are clean
-            // (written to disk), so the kernel can evict them immediately. The next
-            // read call goes to the FUSE driver → physical disk, restoring the
-            // disk-to-disk integrity guarantee.
-            //
-            // all_paths layout: [0] = source, [1..] = destinations (same order as
-            // `destinations`), so fuse_dests[i-1] maps to all_paths[i] for i >= 1.
+            // Linux, FUSE paths (ntfs-3g, fuse-exfat…): O_DIRECT is refused and
+            // hash_direct() falls back to a buffered read; evicting the pages
+            // written in Phase 1 makes that read go to the device.
             #[cfg(target_os = "linux")]
             {
-                for (i, path) in all_paths.iter().enumerate() {
-                    let path_is_fuse = if i == 0 { fuse_src } else { fuse_dests[i - 1] };
-                    if path_is_fuse {
-                        fadvise_dontneed(path);
-                    }
+                for (k, path) in all_paths.iter().enumerate() {
+                    let path_is_fuse = if k == 0 { fuse_src } else { fuse_dests[slots[k - 1]] };
+                    if path_is_fuse { fadvise_dontneed(path); }
                 }
             }
 
             let hash_results: Vec<io::Result<(FileHashes, bool)>> = all_paths.par_iter().enumerate()
-                .map(|(i, path)| {
-                    // all_paths layout: [0] = source, [1..] = destinations, which
-                    // matches the dev_bytes indexing exactly.
-                    let tally = ByteTally { total: &in_flight, device: &dev_bytes[i] };
+                .map(|(k, path)| {
+                    let tally = ByteTally { total: &in_flight, device: &dev_bytes[dev_of(k)] };
                     hash_direct(path, hash_algo, &pc, &tally)
                 })
                 .collect();
 
-            let mut read_error = false;
-            for (i, res) in hash_results.iter().enumerate() {
-                if let Err(e) = res {
-                    if e.kind() == io::ErrorKind::Interrupted {
-                        log(&tx, "✖  Cancelled.\n");
-                        let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
-                        return;
+            let mut hashes: Vec<Option<FileHashes>> = Vec::with_capacity(hash_results.len());
+            for (k, r) in hash_results.into_iter().enumerate() {
+                let label = if k == 0 { "source".to_string() }
+                            else { destinations[slots[k - 1]].display().to_string() };
+                match r {
+                    Ok((h, buffered)) => {
+                        if buffered && !buffered_warned[dev_of(k)] {
+                            buffered_warned[dev_of(k)] = true;
+                            log(&tx, &format!(
+                                "  △  {}: direct I/O unavailable — verifying with a buffered read (page cache dropped first on Linux)\n",
+                                label));
+                        }
+                        hashes.push(Some(h));
                     }
-                    let label = if i == 0 { "source".to_string() }
-                                else { destinations[i-1].display().to_string() };
-                    log(&tx, &format!("  ✖  read error {} ({}): {}\n", rel_str, label, e));
-                    read_error = true;
-                }
-            }
-            if read_error {
-                verify_errors += 1;
-                results[file_idx].1 = false;
-                bytes_done += fsize * (1 + n_dst);
-                bytes_done_arc.store(bytes_done, Ordering::Relaxed);
-                continue;
-            }
-
-            let mut hashes: Vec<FileHashes> = Vec::with_capacity(hash_results.len());
-            for (i, r) in hash_results.into_iter().enumerate() {
-                let (h, buffered) = r.expect("errors handled above");
-                if buffered && !buffered_warned[i] {
-                    buffered_warned[i] = true;
-                    let label = if i == 0 { "source".to_string() }
-                                else { destinations[i-1].display().to_string() };
-                    log(&tx, &format!(
-                        "  △  {}: direct I/O unavailable — verifying with a buffered read (page cache dropped first on Linux)\n",
-                        label));
-                }
-                hashes.push(h);
-            }
-            let src_hash = &hashes[0];
-
-            let mut mismatch = false;
-            for (i, dst_hash) in hashes[1..].iter().enumerate() {
-                if !src_hash.matches(dst_hash) {
-                    log(&tx, &format!(
-                        "  ✖  MISMATCH — {}\n     src: {}\n     dst[{}]: {}\n",
-                        rel_str, src_hash.short(), i + 1, dst_hash.short()));
-                    mismatch = true;
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::Interrupted {
+                            log(&tx, "✖  Cancelled.\n");
+                            let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
+                            return;
+                        }
+                        log(&tx, &format!("  ✖  read error {} ({}): {}\n", rel_str, label, e));
+                        hashes.push(None);
+                    }
                 }
             }
 
-            if mismatch {
-                verify_errors += 1;
-                results[file_idx] = (src_hash.clone(), false);
-            } else {
-                log(&tx, &format!("  ✓  {}  [{}]\n", rel_str, src_hash.short()));
-                results[file_idx] = (src_hash.clone(), true);
+            let mut failed = false;
+            match &hashes[0] {
+                None => {
+                    // Source unreadable: nothing can be verified for this file.
+                    for &i in &slots { results[file_idx].1[i] = false; }
+                    failed = !slots.is_empty();
+                }
+                Some(src_hash) => {
+                    for (k, dst_hash) in hashes[1..].iter().enumerate() {
+                        let i = slots[k];
+                        match dst_hash {
+                            Some(h) if src_hash.matches(h) => {}
+                            Some(h) => {
+                                log(&tx, &format!(
+                                    "  ✖  MISMATCH — {}\n     src: {}\n     dst[{}]: {}\n",
+                                    rel_str, src_hash.short(), i + 1, h.short()));
+                                results[file_idx].1[i] = false;
+                                failed = true;
+                            }
+                            None => { results[file_idx].1[i] = false; failed = true; }
+                        }
+                    }
+                    results[file_idx].0 = src_hash.clone();
+                    if !failed && results[file_idx].1.iter().all(|&ok| ok) {
+                        log(&tx, &format!("  ✓  {}  [{}]\n", rel_str, src_hash.short()));
+                    }
+                }
             }
+            if failed { verify_errors += 1; }
 
             bytes_done += fsize * (1 + n_dst);
             bytes_done_arc.store(bytes_done, Ordering::Relaxed);
@@ -1313,11 +1312,15 @@ pub fn run(
         log(&tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
         log(&tx, &format!("⚠  {} file(s) failed verification:\n", verify_errors));
         for (i, (_, rel)) in copied.iter().enumerate() {
-            if !results[i].1 { log(&tx, &format!("   ✖  {}\n", rel)); }
+            for (d, ok) in results[i].1.iter().enumerate() {
+                // Copy failures are listed separately below.
+                if !ok && copied_dst_ok[i][d] {
+                    log(&tx, &format!("   ✖  {}  →  {}\n", rel, destinations[d].display()));
+                }
+            }
         }
         log(&tx, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     }
-
     log_failed_copies(&tx, &copy_failed, flush_errors);
 
     let total_errors = copy_errors + flush_errors + verify_errors;
@@ -1333,8 +1336,9 @@ pub fn run(
         log(&tx, &format!("\n{}\n", summary));
         let _ = tx.send(Msg::Done(true, summary));
     } else {
-        let ok = copied.len().saturating_sub(verify_errors);
-        let summary = format!("△  {} error(s) — {}/{} file(s) OK",
+        // Files that are complete and verified on every destination.
+        let ok = results.iter().filter(|(_, v)| v.iter().all(|&b| b)).count();
+        let summary = format!("△  {} error(s) — {}/{} file(s) OK on every destination",
             total_errors, ok, files.len());
         log(&tx, &format!("\n{}\n", summary));
         let _ = tx.send(Msg::Done(false, summary));
@@ -1414,7 +1418,7 @@ fn log_failed_copies(tx: &Sender<Msg>, copy_failed: &[String], flush_errors: usi
     if copy_failed.is_empty() && flush_errors == 0 { return; }
     log(tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     if !copy_failed.is_empty() {
-        log(tx, &format!("⚠  {} file(s) could not be copied:\n", copy_failed.len()));
+        log(tx, &format!("⚠  could not be copied ({} file × destination):\n", copy_failed.len()));
         for rel in copy_failed { log(tx, &format!("   ✖  {}\n", rel)); }
     }
     if flush_errors > 0 {
@@ -2149,7 +2153,7 @@ fn generate_reports(
     src:          &Path,
     total_bytes:  u64,
     meta_entries: &[(String, metadata::FileMeta)],
-    hashes:       &[(FileHashes, bool)],
+    hashes:       &[(FileHashes, Vec<bool>)],
     hash_algo:    HashAlgo,
     gen_csv:      bool,
     gen_pdf:      bool,
@@ -2185,7 +2189,23 @@ fn generate_reports(
         None
     };
 
-    for dst in destinations {
+    for (dst_idx, dst) in destinations.iter().enumerate() {
+        // This destination's view: source hash + whether the file is complete
+        // (and, when verified, matching) HERE. A file that failed on this
+        // destination is never recorded with a hash in its checksum file or MHL.
+        let hashes: Vec<(FileHashes, bool)> = hashes.iter()
+            .map(|(h, ok)| (h.clone(), ok[dst_idx]))
+            .collect();
+        let hashes = &hashes[..];
+        // Report status column: verified → Some(ok); not verified → None,
+        // except a failure on this destination, which is always shown.
+        let status = |ok: bool| if has_verify || !ok { Some(ok) } else { None };
+        let n_failed_here = hashes.iter().filter(|(_, ok)| !ok).count();
+        if n_failed_here > 0 {
+            log(tx, &format!("△  {}: {} file(s) failed here — listed as FAILED, without checksum\n",
+                dst.display(), n_failed_here));
+        }
+
         // report_name = structural name driving path_prefix inside checksums.
         //   copy_as_subfolder=true  → src_name  (the subfolder created inside dst)
         //   copy_as_subfolder=false → dst folder name (files sit directly in dst)
@@ -2246,6 +2266,7 @@ fn generate_reports(
             if let Some(mhl_elem) = hash_algo.mhl_element() {
                 let mhl_entries: Vec<(String, String)> =
                     meta_entries.iter().zip(hashes.iter())
+                        .filter(|(_, (_, ok))| *ok)
                         .map(|((rel, _), (fh, _))| {
                             (format!("{}{}", path_prefix, rel),
                              fh.hash.clone().unwrap_or_default())
@@ -2305,8 +2326,7 @@ fn generate_reports(
             let csv_entries: Vec<(metadata::FileMeta, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((_, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(),
-                         if has_verify { Some(*ok) } else { None })
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), status(*ok))
                     })
                     .collect();
             match metadata::write_csv(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
@@ -2320,8 +2340,7 @@ fn generate_reports(
             let pdf_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((rel, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
-                         if has_verify { Some(*ok) } else { None })
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(), status(*ok))
                     })
                     .collect();
             log(tx, "◎  Generating PDF report…\n");
@@ -2336,8 +2355,7 @@ fn generate_reports(
             let html_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((rel, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
-                         if has_verify { Some(*ok) } else { None })
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(), status(*ok))
                     })
                     .collect();
             log(tx, "◎  Generating HTML report…\n");
@@ -2383,7 +2401,13 @@ fn write_checksum(
 ) -> io::Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(path)?;
-    for ((rel, _), (fh, _)) in entries.iter().zip(hashes.iter()) {
+    for ((rel, _), (fh, ok)) in entries.iter().zip(hashes.iter()) {
+        if !ok {
+            // Copy or verification failed on this destination: recording the
+            // source hash here would vouch for a file that is missing or wrong.
+            writeln!(f, "# FAILED (copy or verification failed on this destination): {}{}", prefix, rel)?;
+            continue;
+        }
         match &fh.hash {
             Some(hash) => writeln!(f, "{}  {}{}", hash, prefix, rel)?,
             // No digest could be computed (read error during verification).
@@ -2968,6 +2992,39 @@ mod tests {
         assert_eq!(fs::read(dst.join("a.bin")).unwrap(), b"precious existing file",
                    "existing file was overwritten\n{logs}");
         assert!(!ok, "expected failure, got: {summary}\n{logs}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Content of the single checksum file with extension `ext` in `dir`.
+    fn read_checksum(dir: &Path, ext: &str) -> String {
+        let f = fs::read_dir(dir).unwrap().flatten()
+            .find(|e| e.path().extension().map_or(false, |x| x == ext))
+            .unwrap_or_else(|| panic!("no .{ext} in {}", dir.display()));
+        fs::read_to_string(f.path()).unwrap()
+    }
+
+    // M4 / M5: a failure on one destination must not remove the file from the
+    // other destination's records, and the failed destination must not record
+    // a hash for a file it does not hold.
+    #[test]
+    fn failure_on_one_destination_keeps_others_complete() {
+        let root = tmp_dir("m4");
+        let src = make_source(&root);
+        let good = root.join("dst_good");
+        let bad = broken_dest(&root);
+        let (ok, summary, logs) = run_job(&src, vec![good.clone(), bad.clone()], HashAlgo::Xxh64);
+        assert!(!ok, "expected failure, got: {summary}\n{logs}");
+        assert!(summary.contains("4/5"), "summary: {summary}");
+        assert_eq!(fs::read(src.join("sub/x.bin")).unwrap(),
+                   fs::read(good.join("sub/x.bin")).unwrap());
+
+        let good_sums = read_checksum(&good, "xxh64");
+        assert_eq!(good_sums.lines().filter(|l| !l.starts_with('#')).count(), 5, "{good_sums}");
+        assert!(good_sums.contains("  sub/x.bin"), "{good_sums}");
+
+        let bad_sums = read_checksum(&bad, "xxh64");
+        assert_eq!(bad_sums.lines().filter(|l| !l.starts_with('#')).count(), 4, "{bad_sums}");
+        assert!(bad_sums.contains("# FAILED") && bad_sums.contains("sub/x.bin"), "{bad_sums}");
         let _ = fs::remove_dir_all(&root);
     }
 }
