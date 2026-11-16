@@ -67,40 +67,6 @@ use std::path::{Path, PathBuf};
 
 use std::process::Command;
 
-// ── Windows console suppression ───────────────────────────────────────────────
-//
-// On Windows, spawning child processes (ffmpeg, python3) creates a visible
-// cmd.exe console window that flashes on screen for a fraction of a second.
-// `CREATE_NO_WINDOW` (0x08000000) suppresses this via the Windows CreateProcess API.
-// The conditional `use` is only compiled on Windows — the trait does not exist
-// on Linux/macOS and would cause a compile error if included unconditionally.
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-/// Suppresses the console window that Windows creates when spawning child processes.
-///
-/// ## Problem
-/// On Windows, each `Command::new("ffmpeg")` or `Command::new("python3")` call
-/// opens a cmd.exe console window that briefly flashes on screen. During PDF
-/// generation with many files, this causes a storm of flickering windows.
-///
-/// ## Solution
-/// The `CREATE_NO_WINDOW` flag (0x08000000) passed to the Windows `CreateProcess`
-/// API instructs the OS to start the process without any associated console window.
-/// The process runs normally — only the visible window is suppressed.
-///
-/// ## Platform behaviour
-/// - **Windows**: calls `.creation_flags(0x08000000)` via `CommandExt`.
-/// - **Linux / macOS**: no-op — Unix processes have no console window concept.
-///
-/// The function takes `&mut Command` and returns `&mut Command`, so it can be
-/// inserted into a builder chain without disrupting the fluent API style.
-fn no_window(cmd: &mut Command) -> &mut Command {
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW Win32 API flag
-    cmd
-}
-
 fn ffmpeg_cmd() -> Command {
     crate::sidecar::ffmpeg_cmd()
 }
@@ -964,13 +930,26 @@ fn text_width_mm(text: &str, font_size_pt: f32, bold: bool) -> f32 {
 
 /// Truncates a path string to `max_chars` by keeping the tail, prefixed with "…".
 fn truncate_path_tail(path: &str, max_chars: usize) -> String {
-    if path.chars().count() <= max_chars { return path.to_string(); }
-    let tail_start = path.len().saturating_sub(
-        path.char_indices().nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(path.len()),
-    );
-    format!("…{}", &path[tail_start..])
+    let n = path.chars().count();
+    if n <= max_chars { return path.to_string(); }
+    // Keep the last `max_chars` characters. Counting in chars (not bytes) so
+    // the cut never falls inside a multi-byte UTF-8 character (accents…).
+    let tail: String = path.chars().skip(n - max_chars).collect();
+    format!("…{}", tail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_path_tail;
+
+    #[test]
+    fn truncate_path_tail_handles_multibyte_paths() {
+        let p = format!("/Volumes/Tournage été/{}", "é".repeat(300));
+        let t = truncate_path_tail(&p, 50);
+        assert_eq!(t.chars().count(), 51); // "…" + 50
+        assert!(t.ends_with("éé"));
+        assert_eq!(truncate_path_tail("/court", 50), "/court");
+    }
 }
 
 /// Draws the dark blue column header band with white labels, and advances `cursor`.
@@ -1496,7 +1475,7 @@ fn video_frame(path: &Path) -> Option<RgbImage> {
     // Temporary file for the extracted JPEG frame.
     // `std::env::temp_dir()` : the OS temp directory (/tmp on Linux).
     // `.join(…)` : append a filename, giving e.g. `/tmp/_bartleby_vthumb.jpg`.
-    let tmp = std::env::temp_dir().join("_bartleby_vthumb.jpg");
+    let tmp = crate::sidecar::temp_path("_bartleby_vthumb", "jpg");
 
     // Frame extraction (with fallbacks for invalid colour tags and clips
     // shorter than 1 s) lives in `sidecar::extract_video_thumbnail`.
@@ -1537,7 +1516,7 @@ fn video_frame(path: &Path) -> Option<RgbImage> {
 ///
 /// Returns `None` if `ffmpeg` is not installed or the file cannot be decoded.
 fn audio_wave(path: &Path) -> Option<RgbImage> {
-    let tmp = std::env::temp_dir().join("_bartleby_wave.png");
+    let tmp = crate::sidecar::temp_path("_bartleby_wave", "png");
 
     // Suppress console window on Windows, then run ffmpeg.
     let mut wave_cmd = ffmpeg_cmd();
@@ -1547,13 +1526,12 @@ fn audio_wave(path: &Path) -> Option<RgbImage> {
         .arg("-filter_complex")
         .arg("showwavespic=s=224x144:colors=#4dffd8|#2a6abf:scale=sqrt")
         .arg("-frames:v").arg("1")
-        .arg(&tmp)
-        // Suppress ffmpeg's verbose output — we only need the exit status.
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let status = no_window(&mut wave_cmd).status().ok()?; // None if ffmpeg not installed
-
-    if !status.success() { return None; }
+        .arg(&tmp);
+    // Killed after WAVEFORM_TIMEOUT so a file that makes ffmpeg hang cannot
+    // freeze report generation.
+    let ok = crate::sidecar::run_with_timeout(&mut wave_cmd, crate::sidecar::WAVEFORM_TIMEOUT)
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !ok { let _ = std::fs::remove_file(&tmp); return None; }
 
     let rgb = ::image::open(&tmp).ok().map(|i| rgba_to_rgb_white(i.into_rgba8()));
     let _   = std::fs::remove_file(&tmp);

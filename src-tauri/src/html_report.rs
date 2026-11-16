@@ -46,15 +46,6 @@ const AUDIO_EXTS: &[&str] = &[
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn no_window(cmd: &mut Command) -> &mut Command {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    cmd
-}
-
 fn ffmpeg_cmd() -> Command {
     crate::sidecar::ffmpeg_cmd()
 }
@@ -113,26 +104,25 @@ fn image_thumb_uri(path: &Path) -> Option<String> {
 }
 
 fn video_thumb_uri(path: &Path) -> Option<String> {
-    let tmp = std::env::temp_dir().join("_bartleby_html_vthumb.jpg");
+    let tmp = crate::sidecar::temp_path("_bartleby_html_vthumb", "jpg");
     crate::sidecar::extract_video_thumbnail(path, &tmp, "black@0", "rgba").ok()?;
-    let rgba = ::image::open(&tmp).ok().map(|i| i.into_rgba8())?;
+    let rgba = ::image::open(&tmp).ok().map(|i| i.into_rgba8());
     let _ = std::fs::remove_file(&tmp);
-    rgba_to_png_uri(rgba)
+    rgba_to_png_uri(rgba?)
 }
 
 fn audio_wave_uri(path: &Path) -> Option<String> {
-    let tmp = std::env::temp_dir().join("_bartleby_html_wave.png");
+    let tmp = crate::sidecar::temp_path("_bartleby_html_wave", "png");
     let mut cmd = ffmpeg_cmd();
     cmd.arg("-y")
         .arg("-i").arg(path)
         .arg("-filter_complex")
         .arg("showwavespic=s=224x144:colors=#4dffd8|#2a6abf:scale=sqrt")
         .arg("-frames:v").arg("1")
-        .arg(&tmp)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let status = no_window(&mut cmd).status().ok()?;
-    if !status.success() { return None; }
+        .arg(&tmp);
+    let ok = crate::sidecar::run_with_timeout(&mut cmd, crate::sidecar::WAVEFORM_TIMEOUT)
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !ok { let _ = std::fs::remove_file(&tmp); return None; }
     let rgba = ::image::open(&tmp).ok().map(|i| i.into_rgba8())?;
     let _ = std::fs::remove_file(&tmp);
     rgba_to_png_uri(rgba)

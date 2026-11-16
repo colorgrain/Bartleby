@@ -39,66 +39,12 @@
 //! On Windows, `std::process::Command::new("mediainfo")` spawns a new process.
 //! By default, Windows creates a visible console window (cmd.exe) for each
 //! spawned process, which flashes briefly on screen during every mediainfo call.
-//! The `no_window()` helper function applies the `CREATE_NO_WINDOW` flag
-//! (0x08000000) via the Windows-specific `CommandExt` trait to suppress this.
-//! On Linux and macOS, `no_window()` is a no-op.
+//! `sidecar::run_with_timeout()` applies the `CREATE_NO_WINDOW` flag to
+//! suppress it, and kills a mediainfo call that hangs.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::settings::Settings;
 use chrono::Local;
-
-// ── Windows console suppression ───────────────────────────────────────────────
-//
-// On Windows, spawning a child process (mediainfo, ffmpeg, python3) creates a
-// visible cmd.exe console window that flashes on screen for a fraction of a
-// second. This is distracting and looks broken to users.
-//
-// The fix: pass the CREATE_NO_WINDOW flag (value 0x08000000) to the Windows
-// CreateProcess API via the CommandExt trait from std::os::windows::process.
-//
-// `#[cfg(target_os = "windows")]` is a conditional compilation attribute:
-// the `use` statement is only compiled into the binary when building for Windows.
-// On Linux and macOS, this import is absent — the trait does not exist on those
-// platforms and would cause a compile error if included unconditionally.
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-/// Suppresses the console window that Windows creates when spawning child processes.
-///
-/// ## The problem
-/// On Windows, every `Command::new("mediainfo")` call spawns a cmd.exe console
-/// window that flashes briefly on screen. With dozens of files being processed in
-/// parallel (via rayon), this causes a visually distracting storm of flickering
-/// windows during the metadata extraction phase.
-///
-/// ## The solution
-/// The Windows `CreateProcess` API accepts a `dwCreationFlags` parameter.
-/// `CREATE_NO_WINDOW` (0x08000000) instructs Windows to create the process
-/// without any associated console window. The process runs normally in the
-/// background — only the visible window is suppressed.
-///
-/// ## Platform behaviour
-/// - **Windows**: calls `.creation_flags(0x08000000)` on the Command builder.
-///   `creation_flags` is defined by `std::os::windows::process::CommandExt`,
-///   a Windows-only extension trait — hence the conditional `use` above.
-/// - **Linux / macOS**: this function is a no-op. Processes on Unix have no
-///   associated console window concept at the OS level.
-///
-/// ## Usage pattern
-/// ```rust
-/// let output = no_window(Command::new("mediainfo").arg("--version")).output();
-/// ```
-/// The function takes a `&mut Command` (mutable reference) and returns the same
-/// reference, allowing it to be inserted into a builder chain without breaking
-/// the fluent API style.
-fn no_window(cmd: &mut Command) -> &mut Command {
-    // `#[cfg(target_os = "windows")]` inside a function body: the line is only
-    // compiled on Windows. On Linux/macOS, the function body is empty (no-op).
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW Win32 API flag
-    cmd
-}
 
 // ── Data structure ────────────────────────────────────────────────────────────
 
@@ -306,7 +252,7 @@ pub fn extract(path: &Path) -> FileMeta {
 fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
     let mut cmd = crate::sidecar::mediainfo_cmd();
     cmd.arg(format!("--Inform={}", inform)).arg(path);
-    let out = no_window(&mut cmd).output().ok()?;
+    let out = crate::sidecar::run_with_timeout(&mut cmd, crate::sidecar::MEDIAINFO_TIMEOUT).ok()?;
 
     // `String::from_utf8_lossy` : converts &[u8] → Cow<str>, replacing any
     // invalid UTF-8 sequences with '?'. Safe even if mediainfo returns
@@ -573,7 +519,7 @@ fn query_camera(path: &Path, ext: &str, meta: &mut FileMeta) {
 fn run_json(path: &Path) -> Option<serde_json::Value> {
     let mut cmd = crate::sidecar::mediainfo_cmd();
     cmd.arg("--Output=JSON").arg(path);
-    let out = no_window(&mut cmd).output().ok()?;
+    let out = crate::sidecar::run_with_timeout(&mut cmd, crate::sidecar::MEDIAINFO_TIMEOUT).ok()?;
     serde_json::from_slice(&out.stdout).ok()
 }
 

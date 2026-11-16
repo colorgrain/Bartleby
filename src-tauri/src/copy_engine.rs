@@ -2240,53 +2240,8 @@ fn generate_reports(
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
             }
         }
-        if gen_csv {
-            let csv_entries: Vec<(metadata::FileMeta, String, Option<bool>)> =
-                meta_entries.iter().zip(hashes.iter())
-                    .map(|((_, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(),
-                         if has_verify { Some(*ok) } else { None })
-                    })
-                    .collect();
-            match metadata::write_csv(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
-                                      &csv_entries, settings, col_label, comment, location) {
-                Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
-                    report_dir.join(if rpt_ts.is_empty() { format!("{}.csv", report_label) } else { format!("{}_{}.csv", report_label, rpt_ts) }).display())),
-                Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
-            }
-        }
-        if gen_pdf {
-            let pdf_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
-                meta_entries.iter().zip(hashes.iter())
-                    .map(|((rel, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
-                         if has_verify { Some(*ok) } else { None })
-                    })
-                    .collect();
-            log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
-                                        &pdf_entries, settings, col_label, comment, location) {
-                Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    report_dir.join(if rpt_ts.is_empty() { format!("{}.pdf", report_label) } else { format!("{}_{}.pdf", report_label, rpt_ts) }).display())),
-                Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
-            }
-        }
-        if gen_html {
-            let html_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
-                meta_entries.iter().zip(hashes.iter())
-                    .map(|((rel, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
-                         if has_verify { Some(*ok) } else { None })
-                    })
-                    .collect();
-            log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
-                                          &html_entries, settings, col_label, comment, location) {
-                Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    report_dir.join(if rpt_ts.is_empty() { format!("{}.html", report_label) } else { format!("{}_{}.html", report_label, rpt_ts) }).display())),
-                Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
-            }
-        }
+        // Checksum and MHL first: they are the integrity records. A slow or
+        // failing PDF/HTML report must never prevent them from being written.
         if gen_mhl {
             if let Some(mhl_elem) = hash_algo.mhl_element() {
                 let mhl_entries: Vec<(String, String)> =
@@ -2346,6 +2301,53 @@ fn generate_reports(
                 }
             }
         }
+        if gen_csv {
+            let csv_entries: Vec<(metadata::FileMeta, String, Option<bool>)> =
+                meta_entries.iter().zip(hashes.iter())
+                    .map(|((_, meta), (fh, ok))| {
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(),
+                         if has_verify { Some(*ok) } else { None })
+                    })
+                    .collect();
+            match metadata::write_csv(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
+                                      &csv_entries, settings, col_label, comment, location) {
+                Ok(_)  => log(tx, &format!("◈  CSV : {}\n",
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.csv", report_label) } else { format!("{}_{}.csv", report_label, rpt_ts) }).display())),
+                Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
+            }
+        }
+        if gen_pdf {
+            let pdf_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
+                meta_entries.iter().zip(hashes.iter())
+                    .map(|((rel, meta), (fh, ok))| {
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
+                         if has_verify { Some(*ok) } else { None })
+                    })
+                    .collect();
+            log(tx, "◎  Generating PDF report…\n");
+            match pdf_report::write_pdf(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
+                                        &pdf_entries, settings, col_label, comment, location) {
+                Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.pdf", report_label) } else { format!("{}_{}.pdf", report_label, rpt_ts) }).display())),
+                Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
+            }
+        }
+        if gen_html {
+            let html_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
+                meta_entries.iter().zip(hashes.iter())
+                    .map(|((rel, meta), (fh, ok))| {
+                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(),
+                         if has_verify { Some(*ok) } else { None })
+                    })
+                    .collect();
+            log(tx, "◎  Generating HTML report…\n");
+            match html_report::write_html(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
+                                          &html_entries, settings, col_label, comment, location) {
+                Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
+                    report_dir.join(if rpt_ts.is_empty() { format!("{}.html", report_label) } else { format!("{}_{}.html", report_label, rpt_ts) }).display())),
+                Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
+            }
+        }
     }
 }
 
@@ -2392,7 +2394,8 @@ fn write_checksum(
             None => writeln!(f, "# FAILED (no checksum computed): {}{}", prefix, rel)?,
         }
     }
-    Ok(())
+    // Phase 3 files are written after the Phase 1 syncfs: flush explicitly.
+    f.sync_all()
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────

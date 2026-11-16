@@ -1,4 +1,64 @@
-use std::process::Command;
+use std::io;
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Time limits for external tools. A corrupt or exotic file can make ffmpeg or
+/// mediainfo hang; without a limit the whole job would freeze at "Generating
+/// reports…" with no way to cancel it.
+pub const THUMB_TIMEOUT:     Duration = Duration::from_secs(30);
+pub const WAVEFORM_TIMEOUT:  Duration = Duration::from_secs(120);
+pub const MEDIAINFO_TIMEOUT: Duration = Duration::from_secs(60);
+const ICON_TIMEOUT:          Duration = Duration::from_secs(15);
+
+/// Runs `cmd` like `Command::output()`, but kills it after `timeout`
+/// (`ErrorKind::TimedOut`). stdout / stderr are drained by helper threads so a
+/// chatty process cannot block on a full pipe. No console window on Windows.
+pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let drain = |pipe: Option<Box<dyn io::Read + Send>>| std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe { let _ = p.read_to_end(&mut buf); }
+        buf
+    });
+    let out_t = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn io::Read + Send>));
+    let err_t = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn io::Read + Send>));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait()? { break st; }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_t.join();
+            let _ = err_t.join();
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                format!("timed out after {} s", timeout.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(Output {
+        status,
+        stdout: out_t.join().unwrap_or_default(),
+        stderr: err_t.join().unwrap_or_default(),
+    })
+}
+
+/// Unique temporary file path (`{prefix}_{pid}_{n}.{ext}`). A fixed name could
+/// be shared by two Bartleby instances, or hold a stale image from an earlier
+/// clip and be shown as the thumbnail of another one.
+pub fn temp_path(prefix: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let p = std::env::temp_dir().join(format!(
+        "{}_{}_{}.{}", prefix, std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed), ext));
+    let _ = std::fs::remove_file(&p);
+    p
+}
 
 /// Looks for `bundled_name` next to the running executable (the Tauri sidecar
 /// location). Falls back to `fallback_name` resolved via PATH if absent.
@@ -73,6 +133,9 @@ pub fn extract_video_thumbnail(
     ];
     let mut last_err = String::new();
     for (seek, vf) in attempts {
+        // Never trust a file left by an earlier attempt or clip: ffmpeg can
+        // exit 0 without writing anything (e.g. -ss past the end).
+        let _ = std::fs::remove_file(out);
         let mut cmd = ffmpeg_cmd();
         cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
         if seek { cmd.arg("-ss").arg("00:00:01"); }
@@ -83,12 +146,15 @@ pub fn extract_video_thumbnail(
             .arg("-pix_fmt").arg(pix_fmt)
             .arg("-q:v").arg("3")
             .arg(out);
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        let output = cmd.output().map_err(|e| e.to_string())?; // ffmpeg missing: stop
+        let output = match run_with_timeout(&mut cmd, THUMB_TIMEOUT) {
+            Ok(o) => o,
+            // A hang is not fixed by the fallbacks: give up on this clip.
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                let _ = std::fs::remove_file(out);
+                return Err(e.to_string());
+            }
+            Err(e) => return Err(e.to_string()), // ffmpeg missing: stop
+        };
         let written = std::fs::metadata(out).map(|m| m.len() > 0).unwrap_or(false);
         if output.status.success() && written {
             return Ok(());
@@ -124,8 +190,6 @@ pub fn mime_icon(mime: &str) -> Option<image::RgbaImage> {
 
 #[cfg(target_os = "linux")]
 fn lookup_mime_icon(mime: &str) -> Option<image::RgbaImage> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
     const SCRIPT: &str = r#"import gi, sys
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gio, Gtk, GdkPixbuf
@@ -140,12 +204,10 @@ if not pb: sys.exit(1)
 pb = pb.scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)
 pb.savev(sys.argv[2], 'png', [], [])
 "#;
-    let tmp = std::env::temp_dir().join(format!(
-        "_bartleby_icon_{}_{}.png", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-    let _ = std::fs::remove_file(&tmp);
-    let ok = Command::new("python3")
-        .arg("-c").arg(SCRIPT).arg(mime).arg(&tmp)
-        .output()
+    let tmp = temp_path("_bartleby_icon", "png");
+    let ok = run_with_timeout(
+            Command::new("python3").arg("-c").arg(SCRIPT).arg(mime).arg(&tmp),
+            ICON_TIMEOUT)
         .map(|o| o.status.success())
         .unwrap_or(false);
     let img = if ok { image::open(&tmp).ok().map(|i| i.into_rgba8()) } else { None };
@@ -172,5 +234,27 @@ mod tests {
             "x'+str(open('{}', 'w').write('x'))+'", marker.display());
         let _ = super::mime_icon(&evil2);
         assert!(!marker.exists(), "crafted input was executed");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn hung_process_is_killed() {
+        let t = Instant::now();
+        let r = run_with_timeout(Command::new("sleep").arg("10"), Duration::from_millis(300));
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn output_is_captured() {
+        let o = run_with_timeout(Command::new("sh").arg("-c").arg("echo out; echo err >&2"),
+                                 Duration::from_secs(10)).unwrap();
+        assert!(o.status.success());
+        assert_eq!(o.stdout, b"out\n");
+        assert_eq!(o.stderr, b"err\n");
     }
 }

@@ -238,6 +238,7 @@ pub fn write_mhl(
     }
 
     writeln!(f, "</hashlist>")?;
+    f.sync_all()?;
     Ok(path)
 }
 
