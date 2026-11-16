@@ -3022,4 +3022,19 @@ mod tests {
         assert!(sums.contains("A001/sub/x.bin"), "{sums}");
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// Manual fixture for checking MHL output with the reference `ascmhl`
+    /// tool: copies $BARTLEBY_MHL_SRC into $BARTLEBY_MHL_DST as a subfolder,
+    /// with an MHL in $BARTLEBY_MHL_ALGO (default xxh64).
+    /// `cargo test mhl_fixture -- --ignored`
+    #[test]
+    #[ignore]
+    fn mhl_fixture() {
+        let src = PathBuf::from(std::env::var("BARTLEBY_MHL_SRC").expect("BARTLEBY_MHL_SRC"));
+        let dst = PathBuf::from(std::env::var("BARTLEBY_MHL_DST").expect("BARTLEBY_MHL_DST"));
+        let algo = HashAlgo::from_str(&std::env::var("BARTLEBY_MHL_ALGO").unwrap_or("xxh64".into()));
+        let (ok, summary, logs) = run_job_full(&src, vec![dst], algo, true, true, || Reply::Continue);
+        println!("{logs}");
+        assert!(ok, "{summary}");
+    }
 }

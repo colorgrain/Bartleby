@@ -57,7 +57,7 @@ src-tauri/src/          ← Rust backend
   main.rs               ← Tauri commands, AppState, thread orchestration, window setup
   copy_engine.rs        ← File transfer engine (3-phase: copy → verify → reports)
   verify_engine.rs      ← Parses .md5/.sha1/.xxh*/.c4/.mhl files and re-hashes media
-  mhl_report.rs         ← ASC MHL v2.0 writer (generational chain in {dst}/ascmhl/)
+  mhl_report.rs         ← ASC MHL v2.0 writer: generations + ascmhl_chain.xml in {root}/ascmhl/
   metadata.rs           ← mediainfo CLI wrapper + CSV generation
   camera_meta.rs        ← Vendor camera metadata mediainfo misses: MXF gamut/log labels, Sony XML sidecar, R3D header
   pdf_report.rs         ← printpdf PDF visual report generator
@@ -107,7 +107,13 @@ When the copy engine encounters a non-empty destination or file conflicts, it se
 
 ### Verifier window
 
-Created hidden at startup (label `verifier`, `verifier.html`) and shown on demand by `open_verifier_window`; closing hides it rather than destroying it. Commands: `parse_verification_file`, `start_verification`, `pause/resume/cancel_verification`, `save_verify_html`, `generate_post_verify_mhl` (writes a next-generation MHL with `<process>verify</process>`).
+Created hidden at startup (label `verifier`, `verifier.html`) and shown on demand by `open_verifier_window`; closing hides it rather than destroying it. Commands: `parse_verification_file`, `start_verification`, `pause/resume/cancel_verification`, `save_verify_html`, `generate_post_verify_mhl` (writes a next-generation MHL with `<process>in-place</process>` and `verified`/`failed` actions).
+
+### ASC MHL history (`mhl_report.rs`)
+
+The MHL root is the copied card folder (`{dst}/{card}` with "copy as subfolder", otherwise `{dst}`). Its `ascmhl/` holds `NNNN_{rootname}_{date}_{time}Z.mhl` generations (strictly increasing per folder) and `ascmhl_chain.xml` (C4 of every generation). A card's own `ascmhl/` is copied in Phase 1 and continued: files already recorded get `verified` (or `failed`), new ones `original`. History is append-only — generations are never deleted. `ascmhl/` files are never listed in an MHL or a checksum file (`is_history_path`).
+
+Output is validated with the reference tool (`pip install ascmhl`): `ascmhl-debug xsd-schema-check` (XSDs from github.com/ascmitc/mhl/xsd) and `ascmhl create` on a copy. The ignored test `copy_engine::tests::mhl_fixture` produces a copy to check: `BARTLEBY_MHL_SRC=… BARTLEBY_MHL_DST=… [BARTLEBY_MHL_ALGO=md5] cargo test mhl_fixture -- --ignored`.
 
 ### Sidecars (`sidecar.rs`)
 
