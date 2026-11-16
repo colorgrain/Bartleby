@@ -228,25 +228,11 @@ async function loadSettings() {
         var chkOpenEl = document.getElementById('chk-open');
         if (chkOpenEl) chkOpenEl.checked = currentSettings.open_dest || false;
 
-        // Apply saved skin.
-        applySkin(currentSettings.skin || 'mint-y-aqua', false);
-
-        // Apply saved theme.
-        var saved = currentSettings.theme || 'default';
-        if (saved === 'default') {
-            try {
-                var isDark = await invoke('is_system_dark_mode');
-                document.body.className = isDark ? 'theme-dark' : 'theme-light';
-                invoke('set_window_theme', { theme: 'default' }).catch(function() {});
-                document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
-                    btn.classList.toggle('appearance-btn-active', btn.dataset.theme === 'default');
-                });
-            } catch(e) {
-                document.body.className = 'theme-default';
-            }
-        } else {
-            applyTheme(saved, false);
-        }
+        // Apply saved window style + colour theme.
+        currentSettings.skin = BartlebyAppearance.normalizeSkin(currentSettings.skin);
+        if (!currentSettings.custom_themes) currentSettings.custom_themes = [];
+        await BartlebyAppearance.apply(currentSettings);
+        refreshAppearanceTab();
 
         var logoEl = document.getElementById('s-logo');
         if (logoEl) logoEl.value = currentSettings.logo_path || '';
@@ -264,44 +250,180 @@ async function persistSettings() {
     }
 }
 
-// ── Theme / Skin ──────────────────────────────────────────────────────────────
+// ── Appearance: window style + colour theme ───────────────────────────────────
+//
+// Rendering lives in appearance.js (shared with the verifier window). This
+// section only wires the Settings → Appearance controls:
+//   #ap-skin   window style (adwaita | breeze | macos | windows) → settings.skin
+//   #ap-theme  Follow system | Light | Dark | custom themes → settings.theme
+//   #ap-bg / #ap-fg / #ap-text / #ap-accent  live colour preview, kept until "Save as…"
+//                                 or "Discard changes"
 
-function applyTheme(theme, save) {
-    if (theme === 'default') {
-        // On Linux, CSS prefers-color-scheme is unreliable in WebKitGTK;
-        // query Rust (gsettings / GTK_THEME) for the actual system preference.
-        invoke('is_system_dark_mode').then(function(isDark) {
-            document.body.className = isDark ? 'theme-dark' : 'theme-light';
-            invoke('set_window_theme', { theme: 'default' }).catch(function() {});
-        }).catch(function() {
-            document.body.className = 'theme-default'; // CSS @media fallback
+var apPreview = null;   // {bg, fg, text, accent} while the pickers hold unsaved colours
+var AP_COLORS = ['bg', 'fg', 'text', 'accent'];   // picker ids: #ap-<key>
+
+function customThemes() {
+    return (currentSettings && currentSettings.custom_themes) || [];
+}
+
+// Tells the other windows (verifier) to re-read the appearance settings.
+function broadcastAppearance() {
+    try { window.__TAURI__.event.emit('appearance-changed', {}); } catch(e) {}
+}
+
+function buildThemeOptions() {
+    var sel = document.getElementById('ap-theme');
+    sel.innerHTML = '';
+    [['default', 'Follow system'], ['light', 'Light'], ['dark', 'Dark']].forEach(function(o) {
+        var opt = document.createElement('option');
+        opt.value = o[0]; opt.textContent = o[1];
+        sel.appendChild(opt);
+    });
+    var list = customThemes();
+    if (list.length) {
+        var group = document.createElement('optgroup');
+        group.label = 'Custom';
+        list.forEach(function(t) {
+            var opt = document.createElement('option');
+            opt.value = 'custom:' + t.name; opt.textContent = t.name;
+            group.appendChild(opt);
         });
-    } else {
-        document.body.className = 'theme-' + theme;
-        invoke('set_window_theme', { theme: theme === 'dark' ? 'dark' : 'light' }).catch(function() {});
+        sel.appendChild(group);
     }
-    if (currentSettings) currentSettings.theme = theme;
-    document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
-        btn.classList.toggle('appearance-btn-active', btn.dataset.theme === theme);
-    });
-    if (save) persistSettings();
 }
 
-function applySkin(skin, save) {
-    var link = document.getElementById('theme-link');
-    if (link) link.href = 'themes/' + skin + '.css';
-    if (currentSettings) currentSettings.skin = skin;
-    document.querySelectorAll('.appearance-btn[data-skin]').forEach(function(btn) {
-        btn.classList.toggle('appearance-btn-active', btn.dataset.skin === skin);
-    });
-    if (save) persistSettings();
+function syncPickers() {
+    var c = apPreview || BartlebyAppearance.currentColors();
+    AP_COLORS.forEach(function(k) { document.getElementById('ap-' + k).value = c[k]; });
 }
+
+function setPreviewState(dirty) {
+    document.getElementById('ap-reset').classList.toggle('hidden', !dirty);
+    document.getElementById('ap-dirty').classList.toggle('hidden', !dirty);
+}
+
+function refreshAppearanceTab() {
+    if (!currentSettings) return;
+    document.getElementById('ap-skin').value = currentSettings.skin;
+    buildThemeOptions();
+    var sel = document.getElementById('ap-theme');
+    sel.value = currentSettings.theme || 'default';
+    if (sel.value !== (currentSettings.theme || 'default')) sel.value = 'default'; // deleted custom theme
+    document.getElementById('ap-delete').classList.toggle('hidden', sel.value.indexOf('custom:') !== 0);
+    syncPickers();
+    setPreviewState(apPreview !== null);
+}
+
+// Re-applies the saved appearance, then re-applies any unsaved colour preview.
+async function reapplyAppearance() {
+    await BartlebyAppearance.apply(currentSettings);
+    if (apPreview) BartlebyAppearance.applyColors(apPreview);
+    refreshAppearanceTab();
+}
+
+async function saveAppearance() {
+    apPreview = null;
+    await reapplyAppearance();
+    await persistSettings();
+    broadcastAppearance();
+}
+
+document.getElementById('ap-skin').addEventListener('change', async function(e) {
+    currentSettings.skin = e.target.value;
+    await reapplyAppearance();   // keeps an unsaved colour preview
+    await persistSettings();
+    broadcastAppearance();
+});
+
+document.getElementById('ap-theme').addEventListener('change', function(e) {
+    currentSettings.theme = e.target.value;
+    saveAppearance();            // picking a theme discards the unsaved preview
+});
+
+AP_COLORS.forEach(function(key) {
+    document.getElementById('ap-' + key).addEventListener('input', function() {
+        apPreview = {};
+        AP_COLORS.forEach(function(k) { apPreview[k] = document.getElementById('ap-' + k).value; });
+        BartlebyAppearance.applyColors(apPreview);
+        setPreviewState(true);
+    });
+});
+
+document.getElementById('ap-reset').addEventListener('click', function() {
+    apPreview = null;
+    reapplyAppearance();
+});
+
+document.getElementById('ap-delete').addEventListener('click', async function() {
+    var theme = currentSettings.theme || '';
+    if (theme.indexOf('custom:') !== 0) return;
+    var name = theme.slice(7);
+    var ok = await confirmDialog('Delete theme', 'Delete the colour theme "' + name + '"?', 'Delete', 'Cancel', true);
+    if (!ok) return;
+    currentSettings.custom_themes = customThemes().filter(function(t) { return t.name !== name; });
+    currentSettings.theme = 'default';
+    saveAppearance();
+});
+
+function showNameRow(show) {
+    document.getElementById('ap-name-row').classList.toggle('hidden', !show);
+    if (show) {
+        var input = document.getElementById('ap-name');
+        var theme = currentSettings.theme || '';
+        input.value = theme.indexOf('custom:') === 0 ? theme.slice(7) : '';
+        input.focus();
+        input.select();
+    }
+}
+
+document.getElementById('ap-save-as').addEventListener('click', function() { showNameRow(true); });
+document.getElementById('ap-name-cancel').addEventListener('click', function() { showNameRow(false); });
+document.getElementById('ap-name').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter')  document.getElementById('ap-name-ok').click();
+    if (e.key === 'Escape') { e.stopPropagation(); showNameRow(false); }
+});
+
+document.getElementById('ap-name-ok').addEventListener('click', async function() {
+    var name = document.getElementById('ap-name').value.trim();
+    if (!name) { document.getElementById('ap-name').focus(); return; }
+    var list = customThemes();
+    var existing = list.filter(function(t) { return t.name === name; })[0];
+    if (existing) {
+        var ok = await confirmDialog('Replace theme', 'A theme named "' + name + '" already exists. Replace it?', 'Replace', 'Cancel', false);
+        if (!ok) return;
+    }
+    var c = apPreview || BartlebyAppearance.currentColors();
+    var entry = { name: name, bg: c.bg, fg: c.fg, text: c.text, accent: c.accent };
+    if (existing) list[list.indexOf(existing)] = entry; else list.push(entry);
+    currentSettings.custom_themes = list;
+    currentSettings.theme = 'custom:' + name;
+    showNameRow(false);
+    saveAppearance();
+});
+
+// An unsaved colour preview is discarded whenever the settings window closes
+// (it has many close paths, so watch its `hidden` class instead).
+new MutationObserver(function() {
+    if (settingsOverlay.classList.contains('hidden')) {
+        showNameRow(false);
+        if (apPreview) { apPreview = null; reapplyAppearance(); }
+    }
+}).observe(settingsOverlay, { attributes: true, attributeFilter: ['class'] });
+
+// Main window title bar: drag region, window buttons, rounded frame.
+// Closing goes through window.close() → Rust CloseRequested → the
+// "app-close-requested" guard below, which warns if a copy is running.
+BartlebyAppearance.initChrome({
+    titlebar:   document.getElementById('titlebar'),
+    titleAfter: document.getElementById('side-toggle-btn'),
+    title:      'Bartleby'
+});
 
 // ── Settings modal ────────────────────────────────────────────────────────────
 
 // Hamburger → open settings (Appearance tab active by default).
 menuBtn.addEventListener('click', function() {
-    if (currentSettings) { populateReportFields(); populateStructureFields(); }
+    if (currentSettings) { populateReportFields(); populateStructureFields(); refreshAppearanceTab(); }
     settingsOverlay.classList.remove('hidden');
 });
 
@@ -320,15 +442,76 @@ document.querySelectorAll('.settings-tab-btn').forEach(function(btn) {
     });
 });
 
-// Appearance tab — theme buttons.
-document.querySelectorAll('.appearance-btn[data-theme]').forEach(function(btn) {
-    btn.addEventListener('click', function() { applyTheme(btn.dataset.theme, true); });
-});
+// "Active columns" help button: explains how metadata is read and what may be
+// missing. Shown on hover, pinned open on click; closed by any click outside it
+// (which also covers closing the settings or switching tab) or by Escape.
+// The popover is position:fixed and placed here, because the tab card scrolls
+// and would clip an absolutely positioned bubble.
+(function() {
+    var btn = document.getElementById('cols-help-btn');
+    var pop = document.getElementById('cols-help-popover');
+    if (!btn || !pop) return;
+    var pinned = false;
 
-// Appearance tab — skin buttons.
-document.querySelectorAll('.appearance-btn[data-skin]').forEach(function(btn) {
-    btn.addEventListener('click', function() { applySkin(btn.dataset.skin, true); });
-});
+    // Never covers the button (a covered button fires mouseleave at once and
+    // the popover would flicker): opens below if it fits, else above if it
+    // fits, else on the roomier side with a reduced height (it scrolls).
+    function place() {
+        var margin = 16, gap = 6;
+        var r = btn.getBoundingClientRect();
+        pop.style.maxHeight = '';                 // measure at CSS max height
+        var w = pop.offsetWidth;
+        var h = pop.offsetHeight;
+        var below = window.innerHeight - r.bottom - gap - margin;
+        var above = r.top - gap - margin;
+        var top;
+        if (h <= below)      { top = r.bottom + gap; }
+        else if (h <= above) { top = r.top - gap - h; }
+        else if (below >= above) {
+            pop.style.maxHeight = below + 'px';
+            top = r.bottom + gap;
+        } else {
+            pop.style.maxHeight = above + 'px';
+            top = r.top - gap - pop.offsetHeight;
+        }
+        var left = Math.max(margin, Math.min(r.right - w, window.innerWidth - w - margin));
+        pop.style.left = left + 'px';
+        pop.style.top  = top + 'px';
+    }
+    function show() {
+        pop.classList.remove('hidden');
+        place();
+    }
+    function hide() {
+        pinned = false;
+        pop.classList.add('hidden');
+        btn.setAttribute('aria-expanded', 'false');
+    }
+
+    btn.addEventListener('mouseenter', show);
+    btn.addEventListener('focus', show);
+    btn.addEventListener('mouseleave', function() { if (!pinned) pop.classList.add('hidden'); });
+    btn.addEventListener('blur', function() { if (!pinned) pop.classList.add('hidden'); });
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        pinned = !pinned;
+        btn.setAttribute('aria-expanded', pinned ? 'true' : 'false');
+        if (pinned) show(); else hide();
+    });
+    // Capture phase: runs before any other click handler (backdrop, close
+    // buttons, tabs), so the popover never outlives the settings panel.
+    document.addEventListener('click', function(e) {
+        if (pop.classList.contains('hidden')) return;
+        if (pop.contains(e.target) || btn.contains(e.target)) return;
+        hide();
+    }, true);
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && !pop.classList.contains('hidden')) { e.stopPropagation(); hide(); }
+    }, true);
+    window.addEventListener('resize', function() { if (!pop.classList.contains('hidden')) place(); });
+    var card = btn.closest('.tab-scroll-card');
+    if (card) card.addEventListener('scroll', function() { if (!pop.classList.contains('hidden')) place(); });
+})();
 
 // Close buttons (Appearance + About tabs have a "Close" button).
 document.querySelectorAll('.settings-close-btn').forEach(function(btn) {

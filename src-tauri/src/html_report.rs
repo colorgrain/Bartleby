@@ -114,21 +114,7 @@ fn image_thumb_uri(path: &Path) -> Option<String> {
 
 fn video_thumb_uri(path: &Path) -> Option<String> {
     let tmp = std::env::temp_dir().join("_bartleby_html_vthumb.jpg");
-    let mut cmd = ffmpeg_cmd();
-    cmd.arg("-y")
-        .arg("-ss").arg("00:00:01")
-        .arg("-i").arg(path)
-        .arg("-map").arg("0:v:0")
-        .arg("-vframes").arg("1")
-        .arg("-vf").arg(
-            "scale=224:144:force_original_aspect_ratio=decrease,\
-             pad=224:144:(ow-iw)/2:(oh-ih)/2:color=black@0"
-        )
-        .arg("-pix_fmt").arg("rgba")
-        .arg("-q:v").arg("3")
-        .arg(&tmp);
-    let out = no_window(&mut cmd).output().ok()?;
-    if !out.status.success() { return None; }
+    crate::sidecar::extract_video_thumbnail(path, &tmp, "black@0", "rgba").ok()?;
     let rgba = ::image::open(&tmp).ok().map(|i| i.into_rgba8())?;
     let _ = std::fs::remove_file(&tmp);
     rgba_to_png_uri(rgba)
@@ -424,7 +410,11 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
     if settings.col_duration    { write!(out, "<th>Duration</th>\n")?; }
     if settings.col_bit_depth   { write!(out, "<th>Bit Depth</th>\n")?; }
     if settings.col_chroma      { write!(out, "<th>Chroma</th>\n")?; }
-    if settings.col_color_space { write!(out, "<th>Color Space</th>\n")?; }
+    if settings.col_color_space { write!(out, "<th>Gamut</th>\n")?; }
+    if settings.col_transfer    { write!(out, "<th>Gamma / Log</th>\n")?; }
+    if settings.col_camera      { write!(out, "<th>Camera</th>\n")?; }
+    if settings.col_iso         { write!(out, "<th>ISO</th>\n")?; }
+    if settings.col_white_balance { write!(out, "<th>WB</th>\n")?; }
     if settings.col_sample_rate { write!(out, "<th>Sample Rate</th>\n")?; }
     if has_hash                 { write!(out, "<th>{}</th>\n", hash_col)?; }
     write!(out, "</tr></thead>\n<tbody>\n")?;
@@ -434,6 +424,8 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
         has_verify, settings.col_name, settings.col_type, settings.col_size,
         settings.col_resolution, settings.col_codec, settings.col_duration,
         settings.col_bit_depth, settings.col_chroma, settings.col_color_space,
+        settings.col_transfer, settings.col_camera, settings.col_iso,
+        settings.col_white_balance,
         settings.col_sample_rate, has_hash,
     ].iter().filter(|&&b| b).count().max(1);
 
@@ -509,6 +501,10 @@ td.status.ok{{color:#2a8a3e}} td.status.fail{{color:#cc2200}}
         if settings.col_bit_depth   { write!(out, "<td>{}</td>\n", he(&meta.bit_depth))?; }
         if settings.col_chroma      { write!(out, "<td>{}</td>\n", he(&meta.chroma))?; }
         if settings.col_color_space { write!(out, "<td>{}</td>\n", he(&meta.color_space))?; }
+        if settings.col_transfer    { write!(out, "<td>{}</td>\n", he(&meta.transfer))?; }
+        if settings.col_camera      { write!(out, "<td>{}</td>\n", he(&meta.camera))?; }
+        if settings.col_iso         { write!(out, "<td>{}</td>\n", he(&meta.iso))?; }
+        if settings.col_white_balance { write!(out, "<td>{}</td>\n", he(&meta.white_balance))?; }
         if settings.col_sample_rate { write!(out, "<td>{}</td>\n", he(&meta.sample_rate))?; }
 
         if has_hash {

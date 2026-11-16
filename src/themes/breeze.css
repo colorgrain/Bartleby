@@ -1,0 +1,94 @@
+/*
+  themes/breeze.css — Bartleby window style: KDE Plasma (Breeze)
+  ══════════════════════════════════════════════════════════════════════════════
+  Palette from the Plasma 6 Breeze / Breeze Dark colour schemes
+  (window #eff0f1 / #202326, header #dee0e2 / #2a2e32, highlight #3daee9).
+  Window buttons (chevron glyphs, circle on hover, red close) and 6 px corners
+  are in style.css under body[data-os="breeze"].
+
+  Three colour contexts:
+    :root                                        → light (Breeze)
+    body.theme-dark                              → dark (Breeze Dark)
+    @media (prefers-color-scheme: dark) body.theme-default → CSS fallback before JS runs
+*/
+
+:root {
+  --bg:              #eff0f1;   /* Window background */
+  --surface:         #fcfcfc;   /* modals, popovers */
+  --card-bg:         #fcfcfc;   /* View background: side panels, log, cards */
+  --card-border:     #c4c6c8;
+  --text:            #232629;
+  --text-dim:        #707d8a;
+  --accent:          #3daee9;
+  --accent-fg:       #ffffff;
+  --accent-hover:    #2c94cb;
+  --accent-text:     #2980b9;
+  --titlebar-bg:     #dee0e2;   /* Header colour */
+  --titlebar-txt:    #232629;
+  --titlebar-border: #c4c6c8;
+  --titlebar-shadow: none;
+  --input-bg:        #fcfcfc;
+  --input-border:    #b9bbbd;
+  --input-focus:     #3daee9;
+  --separator:       rgba(35, 38, 41, 0.15);
+  --scrollbar:       rgba(35, 38, 41, 0.25);
+  --success:         #27ae60;
+  --error:           #da4453;
+  --shadow:          rgba(0, 0, 0, 0.10);
+  --radius:          5px;
+  --radius-sm:       3px;
+  --spacing:         16px;
+  --gap:             10px;
+}
+
+body.theme-dark {
+  --bg:              #202326;
+  --surface:         #292c30;
+  --card-bg:         #292c30;
+  --card-border:     #3c4045;
+  --text:            #fcfcfc;
+  --text-dim:        #a1a9b1;
+  --accent:          #3daee9;
+  --accent-fg:       #ffffff;
+  --accent-hover:    #2c94cb;
+  --accent-text:     #5cbcee;
+  --titlebar-bg:     #2a2e32;
+  --titlebar-txt:    #fcfcfc;
+  --titlebar-border: #141618;
+  --titlebar-shadow: none;
+  --input-bg:        #141618;
+  --input-border:    #4d5258;
+  --input-focus:     #3daee9;
+  --separator:       rgba(252, 252, 252, 0.12);
+  --scrollbar:       rgba(252, 252, 252, 0.22);
+  --success:         #27ae60;
+  --error:           #da4453;
+  --shadow:          rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  body.theme-default {
+    --bg:              #202326;
+    --surface:         #292c30;
+    --card-bg:         #292c30;
+    --card-border:     #3c4045;
+    --text:            #fcfcfc;
+    --text-dim:        #a1a9b1;
+    --accent:          #3daee9;
+    --accent-fg:       #ffffff;
+    --accent-hover:    #2c94cb;
+    --accent-text:     #5cbcee;
+    --titlebar-bg:     #2a2e32;
+    --titlebar-txt:    #fcfcfc;
+    --titlebar-border: #141618;
+    --titlebar-shadow: none;
+    --input-bg:        #141618;
+    --input-border:    #4d5258;
+    --input-focus:     #3daee9;
+    --separator:       rgba(252, 252, 252, 0.12);
+    --scrollbar:       rgba(252, 252, 252, 0.22);
+    --success:         #27ae60;
+    --error:           #da4453;
+    --shadow:          rgba(0, 0, 0, 0.45);
+  }
+}

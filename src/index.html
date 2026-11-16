@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bartleby</title>
   <link rel="stylesheet" href="style.css" />
-  <link id="theme-link" rel="stylesheet" href="themes/mint-y-aqua.css" />
+  <link id="theme-link" rel="stylesheet" href="themes/adwaita.css" />
 </head>
 <body class="theme-default">
 <div id="app-shell">
@@ -233,19 +233,39 @@
       <div class="settings-panel" id="stab-appearance">
         <div class="tab-scroll-card">
 
-          <div class="modal-section-label">Theme</div>
-          <div class="appearance-btn-group">
-            <button class="appearance-btn" data-theme="default">Follow system</button>
-            <button class="appearance-btn" data-theme="light">Light</button>
-            <button class="appearance-btn" data-theme="dark">Dark</button>
+          <div class="modal-section-label">Window style</div>
+          <div class="appearance-row">
+            <select id="ap-skin" class="modal-input job-hash-select">
+              <option value="adwaita">Linux — GNOME (libadwaita)</option>
+              <option value="breeze">Linux — KDE (Breeze)</option>
+              <option value="macos">macOS</option>
+              <option value="windows">Windows</option>
+            </select>
+            <span class="appearance-hint">Title bar, window buttons and corners</span>
           </div>
 
-          <div class="modal-section-label">Skin</div>
-          <div class="appearance-btn-group">
-            <button class="appearance-btn" data-skin="mint-y-aqua">Mint-Y Aqua (Linux)</button>
-            <button class="appearance-btn" data-skin="adwaita">Adwaita (GNOME)</button>
-            <button class="appearance-btn" data-skin="macos">macOS</button>
-            <button class="appearance-btn" data-skin="windows11">Windows 11</button>
+          <div class="modal-section-label">Colour theme</div>
+          <div class="appearance-row">
+            <select id="ap-theme" class="modal-input job-hash-select"></select>
+            <button id="ap-delete" class="logo-btn hidden" title="Delete this custom theme">Delete</button>
+          </div>
+
+          <div class="modal-section-label">Colours</div>
+          <div class="color-row">
+            <label class="color-label"><span>Background</span><input type="color" id="ap-bg" /></label>
+            <label class="color-label" title="Side panels, log panel, cards and dialogs"><span>Foreground</span><input type="color" id="ap-fg" /></label>
+            <label class="color-label"><span>Text</span><input type="color" id="ap-text" /></label>
+            <label class="color-label"><span>Accent</span><input type="color" id="ap-accent" /></label>
+          </div>
+          <div class="appearance-row">
+            <button id="ap-save-as" class="logo-btn">Save as…</button>
+            <button id="ap-reset" class="logo-btn hidden">Discard changes</button>
+            <span id="ap-dirty" class="appearance-hint hidden">Preview — not saved</span>
+          </div>
+          <div id="ap-name-row" class="appearance-row hidden">
+            <input id="ap-name" class="modal-input" type="text" maxlength="40" placeholder="Theme name" />
+            <button id="ap-name-ok" class="action-btn suggested">Save</button>
+            <button id="ap-name-cancel" class="action-btn">Cancel</button>
           </div>
 
         </div>
@@ -279,7 +299,30 @@
             </div>
           </div>
 
-          <div class="modal-section-label">Active columns</div>
+          <div class="section-label-row">
+            <div class="modal-section-label">Active columns</div>
+            <button type="button" class="help-btn" id="cols-help-btn" aria-label="How metadata is read" aria-expanded="false" aria-controls="cols-help-popover">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            </button>
+          </div>
+          <div class="help-popover hidden" id="cols-help-popover" role="tooltip">
+            <h4>How metadata is read</h4>
+            <p>Bartleby reads each file with the bundled <b>MediaInfo</b>, then with the camera metadata embedded by the manufacturer:
+              MXF colour labels, Sony XML sidecar (<em>…M01.XML</em>), ARRI camera metadata, SMPTE RDD&nbsp;18 acquisition data,
+              Atomos / Apple keys and the RED R3D header.</p>
+            <p><b>Nothing is guessed.</b> A value appears only if it was found in the file. An empty cell means it was not recorded or
+              could not be read. <em>UL&nbsp;0E…</em> is a manufacturer code Bartleby does not know yet. ProRes bit depth comes from Apple's specification.</p>
+            <h4>What may be missing</h4>
+            <ul>
+              <li><b>RAW formats.</b> ProRes RAW stores no gamut or log curve (they are chosen when debayering). RED and Blackmagic RAW colour settings are not decoded.</li>
+              <li><b>Consumer and hybrid cameras</b> often tag log footage as BT.709. The report shows what the file declares, not what was shot.</li>
+              <li><b>ISO, white balance, camera</b> depend on what each camera or external recorder writes.</li>
+              <li><b>Sidecar files.</b> Copy whole cards: a clip copied without its XML loses the information it holds.</li>
+            </ul>
+            <h4>Advanced users</h4>
+            <p>Complete the report with the information from the shoot, as given by the camera department, in the job's <b>Report note</b>
+              (<b>T</b> button on the job): gamut / log, LUT or look, EI, white balance, shutter, lenses and filters, frame rate, camera report remarks.</p>
+          </div>
           <div class="card modal-card col-grid">
             <label class="toggle-label"><input type="checkbox" data-col="col_name"><span class="toggle-track"><span class="toggle-thumb"></span></span>Name</label>
             <label class="toggle-label"><input type="checkbox" data-col="col_type"><span class="toggle-track"><span class="toggle-thumb"></span></span>Type</label>
@@ -289,7 +332,11 @@
             <label class="toggle-label"><input type="checkbox" data-col="col_duration"><span class="toggle-track"><span class="toggle-thumb"></span></span>Duration</label>
             <label class="toggle-label"><input type="checkbox" data-col="col_bit_depth"><span class="toggle-track"><span class="toggle-thumb"></span></span>Bit Depth</label>
             <label class="toggle-label"><input type="checkbox" data-col="col_chroma"><span class="toggle-track"><span class="toggle-thumb"></span></span>Chroma</label>
-            <label class="toggle-label"><input type="checkbox" data-col="col_color_space"><span class="toggle-track"><span class="toggle-thumb"></span></span>Color Space</label>
+            <label class="toggle-label"><input type="checkbox" data-col="col_color_space"><span class="toggle-track"><span class="toggle-thumb"></span></span>Gamut</label>
+            <label class="toggle-label"><input type="checkbox" data-col="col_transfer"><span class="toggle-track"><span class="toggle-thumb"></span></span>Gamma / Log</label>
+            <label class="toggle-label"><input type="checkbox" data-col="col_camera"><span class="toggle-track"><span class="toggle-thumb"></span></span>Camera</label>
+            <label class="toggle-label"><input type="checkbox" data-col="col_iso"><span class="toggle-track"><span class="toggle-thumb"></span></span>ISO</label>
+            <label class="toggle-label"><input type="checkbox" data-col="col_white_balance"><span class="toggle-track"><span class="toggle-thumb"></span></span>White Balance</label>
             <label class="toggle-label"><input type="checkbox" data-col="col_sample_rate"><span class="toggle-track"><span class="toggle-thumb"></span></span>Sample Rate</label>
             <label class="toggle-label"><input type="checkbox" data-col="col_md5"><span class="toggle-track"><span class="toggle-thumb"></span></span>MD5</label>
           </div>
@@ -473,6 +520,7 @@
 <!-- Template-field autocomplete popup (singleton, positioned by JS) -->
 <div id="tmpl-ac" class="tmpl-ac hidden"></div>
 
+<script src="appearance.js"></script>
 <script src="main.js"></script>
 </div><!-- /#app-shell -->
 </body>

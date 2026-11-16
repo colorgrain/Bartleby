@@ -9,34 +9,34 @@ var currentFile   = null;   // absolute path to the loaded checksum / MHL file
 var lastResult    = null;   // VerifyResult from the last completed verification
 var currentIsMhl  = false;  // whether the loaded file is an MHL
 
-// ── Theme / skin ──────────────────────────────────────────────────────────────
-// This window is created hidden at app startup and revealed by the Rust
-// `open_verifier_window` command, which also applies the native window theme.
-// Here we only style the webview *content* (skin + light/dark body class).
+// ── Window chrome + appearance ────────────────────────────────────────────────
+// Same drawn title bar as the main window (appearance.js). The close button
+// HIDES the window instead of closing it: the verifier is created once at
+// startup and reused (see the setup hook in main.rs), and going through the
+// native close request did not reliably close it on Linux.
+
+BartlebyAppearance.initChrome({
+    titlebar: document.getElementById('titlebar'),
+    title:    'Bartleby — Verification',
+    onClose:  function() {
+        window.__TAURI__.window.getCurrentWindow().hide().catch(function(e) {
+            console.error('hide verifier:', e);
+        });
+    }
+});
 
 function applyStoredAppearance() {
     invoke('get_settings').then(function(s) {
-        var skin = s.skin || 'mint-y-aqua';
-        document.getElementById('theme-link').href = 'themes/' + skin + '.css';
-
-        var theme = s.theme || 'default';
-        if (theme === 'default') {
-            invoke('is_system_dark_mode').then(function(isDark) {
-                document.body.className = isDark ? 'theme-dark' : 'theme-light';
-            }).catch(function() {
-                document.body.className = 'theme-light';
-            });
-        } else {
-            document.body.className = 'theme-' + theme;
-        }
+        BartlebyAppearance.apply(s);
     }).catch(function() {});
 }
 
 applyStoredAppearance();
 
-// Re-apply each time the window is shown — the theme may have changed in the
-// main window while this window was hidden.
+// Re-apply when the window is shown, and live when the theme is changed in
+// the main window's settings while this window is open.
 listen('verifier-shown', function() { applyStoredAppearance(); }).catch(function() {});
+listen('appearance-changed', function() { applyStoredAppearance(); }).catch(function() {});
 
 // ── Drag-and-drop on the input row ───────────────────────────────────────────
 

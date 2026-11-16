@@ -147,8 +147,22 @@ pub struct FileMeta {
     /// Chroma subsampling ratio (video only). Example: `"4:2:0"`, `"4:2:2"`.
     pub chroma:       String,
 
-    /// Colour space / colour primaries. Example: `"BT.709"`, `"BT.2020"`, `"sRGB"`.
+    /// Gamut (colour primaries). Example: `"BT.709"`, `"S-Gamut3.Cine"`, `"AWG4"`.
+    /// Shown in the "Gamut" column (setting `col_color_space`).
     pub color_space:  String,
+
+    /// Transfer function / log curve. Example: `"BT.709"`, `"PQ"`, `"S-Log3"`, `"LogC4"`.
+    pub transfer:     String,
+
+    /// Camera (and recorder, for external recorders). Example: `"ARRI ALEXA 35"`,
+    /// `"Sony (Atomos Shogun7)"`.
+    pub camera:       String,
+
+    /// ISO / exposure index as recorded by the camera. Example: `"800"`.
+    pub iso:          String,
+
+    /// White balance as recorded by the camera. Example: `"5600K"`.
+    pub white_balance: String,
 
     /// Audio sample rate. Example: `"48 kHz"`, `"96 kHz"`.
     pub sample_rate:  String,
@@ -173,6 +187,8 @@ const IMAGE_EXTS: &[&str] = &[
     "dng",              // Adobe Digital Negative (open RAW container)
     "orf",              // Olympus RAW Format
     "rw2",              // Panasonic RAW
+    "raf",              // Fujifilm RAW
+    "dpx", "exr",       // VFX / scan image sequences
 ];
 
 /// Video formats including broadcast and cinema containers.
@@ -183,6 +199,9 @@ const VIDEO_EXTS: &[&str] = &[
     "3gp", "ogv",
     "r3d",               // RED Cinema proprietary RAW video
     "braw",              // Blackmagic RAW (BMPCC cameras)
+    "crm",               // Canon Cinema RAW Light
+    "nev",               // Nikon N-RAW
+    "ari", "arx",        // ARRIRAW frame / ARRIRAW HDE
 ];
 
 /// Audio-only formats including lossless and professional formats.
@@ -293,8 +312,14 @@ fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
     // invalid UTF-8 sequences with '?'. Safe even if mediainfo returns
     // non-UTF-8 bytes (very rare in practice).
     // `.trim()` : removes leading/trailing whitespace and newlines.
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { return None; } // stream section absent from this file
+    // Templates end with `\n` so that a file with several tracks of the same
+    // kind (two video tracks, eight mono audio tracks…) yields one line per
+    // track instead of all tracks glued together. Only the first track is used.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let s = stdout.lines().map(str::trim).find(|l| !l.is_empty())?.to_string();
+    // A line made only of separators means the section exists but every
+    // requested field is empty.
+    if s.chars().all(|c| c == '|') { return None; }
 
     // `.split('|')` : splits the string on the pipe delimiter.
     // `.map(|f| f.trim().to_string())` : strips whitespace from each field.
@@ -317,7 +342,7 @@ fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
 /// - `.unwrap_or("")` : default if field is absent
 fn query_image(path: &Path, meta: &mut FileMeta) {
     if let Some(fields) = run_inform(path,
-        "Image;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%")
+        "Image;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%\\n")
     {
         let w  = clean_number(fields.get(0).map(|s| s.as_str()).unwrap_or(""));
         let h  = clean_number(fields.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -327,14 +352,14 @@ fn query_image(path: &Path, meta: &mut FileMeta) {
         if !w.is_empty() && !h.is_empty() {
             meta.resolution  = format!("{}x{}", w, h);
             meta.codec       = friendly_codec(&f);
-            if !b.is_empty()  { meta.bit_depth   = b; }
+            if !b.is_empty()  { meta.bit_depth   = format!("{} bit", first_number(&b)); }
             if !cs.is_empty() { meta.color_space = cs; }
             return; // Image section provided valid data — no need for fallback
         }
     }
     // Fallback: Video section for RAW / HEIC / multi-page TIFF
     if let Some(fields) = run_inform(path,
-        "Video;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%")
+        "Video;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%\\n")
     {
         let w  = clean_number(fields.get(0).map(|s| s.as_str()).unwrap_or(""));
         let h  = clean_number(fields.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -344,7 +369,7 @@ fn query_image(path: &Path, meta: &mut FileMeta) {
         if !w.is_empty() && !h.is_empty() {
             meta.resolution  = format!("{}x{}", w, h);
             meta.codec       = friendly_codec(&f);
-            if !b.is_empty()  { meta.bit_depth   = b; }
+            if !b.is_empty()  { meta.bit_depth   = format!("{} bit", first_number(&b)); }
             if !cs.is_empty() { meta.color_space = cs; }
         }
     }
@@ -425,26 +450,254 @@ fn normalise_chroma(raw: &str) -> String {
 /// Duration comes from the `General` section (container level), because the Video
 /// section duration can differ from actual playback duration when audio is longer
 /// or shorter than the video track.
+///
+/// ## Codec naming
+/// The bare `%Format%` is too coarse for professional formats ("ProRes" for
+/// every ProRes flavour, "VC-3" for DNxHD/DNxHR, "MPEG Video" for XDCAM), so
+/// `video_codec_name()` combines it with the profile, the commercial name and
+/// the codec FourCC — see that function.
+///
+/// ## Gaps filled from the codec specification
+/// mediainfo does not parse ProRes frame headers deeply enough to report a
+/// bit depth, and it cannot decode ProRes RAW at all (no bit depth, chroma or
+/// colour space). Where the value is fixed by the format specification, it is
+/// filled in by `spec_bit_depth()`; RAW formats get explicit "RAW" markers in
+/// the chroma / colour-space columns instead of blank cells, because Bayer
+/// sensor data has no chroma subsampling and no encoded colour space.
 fn query_video(path: &Path, meta: &mut FileMeta) {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
     if let Some(fields) = run_inform(path,
-        "Video;%Width%|%Height%|%Format%|%BitDepth%|%ChromaSubsampling%|%ColorSpace%")
+        "Video;%Width%|%Height%|%Format%|%Format_Profile%|%Format_Commercial_IfAny%|%CodecID%|%BitDepth%|%ChromaSubsampling%|%ColorSpace%|%colour_primaries%|%transfer_characteristics%\\n")
     {
-        let w  = clean_number(fields.get(0).map(|s| s.as_str()).unwrap_or(""));
-        let h  = clean_number(fields.get(1).map(|s| s.as_str()).unwrap_or(""));
-        let f  = fields.get(2).cloned().unwrap_or_default();
-        let b  = fields.get(3).cloned().unwrap_or_default();
-        let ch = fields.get(4).cloned().unwrap_or_default();
-        let cs = fields.get(5).cloned().unwrap_or_default();
+        let field = |i: usize| fields.get(i).map(|s| s.as_str()).unwrap_or("");
+        let w        = clean_number(field(0));
+        let h        = clean_number(field(1));
+        let format   = field(2);
+        let profile  = field(3);
+        let comm     = field(4);
+        let codec_id = field(5);
+        let b        = field(6);
+        let ch       = field(7);
+        let cs       = field(8);
+        let prim     = field(9);
+        let transfer = field(10);
+
+        let codec = video_codec_name(format, profile, comm, codec_id);
+        let raw   = is_raw_video(&codec, codec_id, &ext);
+
         // Non-empty checks avoid writing empty strings to the struct fields
         if !w.is_empty() && !h.is_empty() { meta.resolution = format!("{}x{}", w, h); }
-        if !f.is_empty()                  { meta.codec       = friendly_codec(&f); }
-        if !b.is_empty()                  { meta.bit_depth   = format!("{} bit", b); }
-        if !ch.is_empty()                 { meta.chroma      = normalise_chroma(&ch); }
-        if !cs.is_empty()                 { meta.color_space = cs; }
+        if !b.is_empty() {
+            meta.bit_depth = format!("{} bit", first_number(b));
+        } else if let Some(depth) = spec_bit_depth(&codec, profile) {
+            meta.bit_depth = format!("{} bit", depth);
+        }
+        if !ch.is_empty()  { meta.chroma = normalise_chroma(ch); }
+        else if raw        { meta.chroma = "RAW".into(); }
+        let _ = cs; // "YUV" / "RGB" is a pixel encoding, not a gamut — not reported
+        meta.color_space = mediainfo_colour_value(prim);
+        meta.transfer    = mediainfo_colour_value(transfer);
+        meta.codec = codec;
     }
     // Duration from the General section (container level)
     if let Some(fields) = run_inform(path, "General;%Duration%") {
         if let Some(d) = fields.get(0) { meta.duration = format_duration(d); }
+    }
+    query_camera(path, &ext, meta);
+}
+
+/// Formats a colour value from mediainfo. Vendor-private MXF labels come out
+/// of mediainfo as 16 hex digits ("0E06040101010605"); they are prefixed with
+/// "UL" so they read as a code, not as a name. `query_camera()` replaces the
+/// labels it can identify.
+fn mediainfo_colour_value(v: &str) -> String {
+    let v = v.trim();
+    if v.len() == 16 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+        format!("UL {}", v.to_uppercase())
+    } else {
+        v.to_string()
+    }
+}
+
+/// Fills gamut, log curve, camera, ISO and white balance from camera metadata.
+///
+/// Sources are applied from least to most trusted, each one overriding the
+/// previous values it provides (see `camera_meta` for the rationale):
+/// 1. mediainfo JSON — ARRI camera metadata, RDD 18 acquisition metadata,
+///    QuickTime `mdta` keys (Atomos / Apple ProRes RAW).
+/// 2. MXF picture-descriptor labels (vendor-private gamut / transfer).
+/// 3. Sony XML sidecar.
+/// 4. R3D header (mediainfo reads nothing from R3D files).
+///
+/// The RDD 18 `ColorPrimaries` / `TransferCharacteristics` items are ignored:
+/// on the Sony FS5 sample they say BT.709 while the clip is S-Gamut3.Cine / S-Log3.
+fn query_camera(path: &Path, ext: &str, meta: &mut FileMeta) {
+    if let Some(json) = run_json(path) {
+        apply_mediainfo_json(&json, meta);
+    }
+    if ext == "mxf" {
+        let m = crate::camera_meta::read_mxf(path);
+        if !m.gamut.is_empty()    { meta.color_space = m.gamut; }
+        if !m.transfer.is_empty() { meta.transfer    = m.transfer; }
+        if let Some(m) = crate::camera_meta::read_sony_xml(path) {
+            if !m.gamut.is_empty()    { meta.color_space = m.gamut; }
+            if !m.transfer.is_empty() { meta.transfer    = m.transfer; }
+            if !m.camera.is_empty()   { meta.camera      = m.camera; }
+        }
+    }
+    if ext == "r3d" {
+        if let Some(m) = crate::camera_meta::read_r3d(path) {
+            if !m.camera.is_empty()        { meta.camera        = m.camera; }
+            if !m.iso.is_empty()           { meta.iso           = m.iso; }
+            if !m.white_balance.is_empty() { meta.white_balance = m.white_balance; }
+            if !m.codec.is_empty()         { meta.codec         = m.codec; }
+            if meta.resolution.is_empty()  { meta.resolution    = m.resolution; }
+        }
+        if meta.chroma.is_empty() { meta.chroma = "RAW".into(); }
+    }
+    // ProRes RAW stores sensor data with no gamut / log tag: the log
+    // conversion is chosen at debayer time (FCP "RAW to Log", Resolve RAW
+    // settings). Verified on an Atomos Shogun 7 + FS5 sample: neither the
+    // sample description nor the frame header carry one.
+    if meta.codec.starts_with("ProRes RAW") {
+        if meta.color_space.is_empty() { meta.color_space = "Not recorded".into(); }
+        if meta.transfer.is_empty()    { meta.transfer    = "Not recorded".into(); }
+    }
+}
+
+/// Runs `mediainfo --Output=JSON` and parses the result.
+fn run_json(path: &Path) -> Option<serde_json::Value> {
+    let mut cmd = crate::sidecar::mediainfo_cmd();
+    cmd.arg("--Output=JSON").arg(path);
+    let out = no_window(&mut cmd).output().ok()?;
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Camera vendors whose MXF `Encoded_Application` names the camera itself
+/// ("Canon" / "EOS C80", "ARRI" / "ALEXA 35"). Sony writes its recording
+/// library ("Mem") there and post software writes its own name, so neither is used.
+const CAMERA_APP_VENDORS: &[&str] = &["Canon", "ARRI", "Panasonic"];
+
+fn apply_mediainfo_json(json: &serde_json::Value, meta: &mut FileMeta) {
+    let Some(tracks) = json["media"]["track"].as_array() else { return; };
+    let s = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or("").trim().to_string();
+
+    for t in tracks {
+        let kind  = t["@type"].as_str().unwrap_or("");
+        let extra = &t["extra"];
+        match (kind, t["Format"].as_str().unwrap_or("")) {
+            ("General", _) => {
+                let company = s(t, "Encoded_Application_CompanyName");
+                if CAMERA_APP_VENDORS.iter().any(|v| v.eq_ignore_ascii_case(&company)) {
+                    meta.camera = crate::camera_meta::join_make_model(
+                        &company, &s(t, "Encoded_Application_Name"));
+                }
+                // QuickTime keys written by Atomos recorders (and Apple ProRes RAW tools).
+                let make     = s(extra, "com_apple_proapps_manufacturer");
+                let rec_make = s(extra, "com_apple_proapps_image_TIFF_Make");
+                let rec_mod  = s(extra, "com_apple_proapps_image_TIFF_Model");
+                let recorder = crate::camera_meta::join_make_model(&rec_make, &rec_mod);
+                if !make.is_empty() {
+                    meta.camera = if recorder.is_empty() || recorder.eq_ignore_ascii_case(&make) {
+                        make
+                    } else {
+                        format!("{} ({})", make, recorder)
+                    };
+                }
+                let iso = s(extra, "org_smpte_rdd18_camera_isosensitivity");
+                if !iso.is_empty() { meta.iso = iso; }
+                let wb = s(extra, "org_smpte_rdd18_camera_whitebalance");
+                if !wb.is_empty() { meta.white_balance = format_kelvin(&wb); }
+            }
+            ("Other", "Acquisition Metadata") => {
+                let mut iso = s(extra, "ISOSensitivity_FirstFrame");
+                if iso.is_empty() { iso = s(extra, "ExposureIndexofPhotoMeter_FirstFrame"); }
+                if !iso.is_empty() { meta.iso = iso; }
+                let wb = s(extra, "WhiteBalance_FirstFrame");
+                if !wb.is_empty() { meta.white_balance = format_kelvin(&wb); }
+            }
+            ("Other", "ARRI Camera Metadata") => {
+                let model = s(extra, "CameraModel");
+                if !model.is_empty() { meta.camera = model; }
+                // Colour space the camera's own LUT expects as input = the
+                // encoding of the recorded image (confirmed on ALEXA 35 ProRes,
+                // where it matches the MXF descriptor labels).
+                let p = s(extra, "Lut3D_0_SourceColorSpace_Primaries");
+                if !p.is_empty() { meta.color_space = p; }
+                let c = s(extra, "Lut3D_0_SourceColorSpace_TransferCurve");
+                if !c.is_empty() { meta.transfer = c; }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// "5500" / "5500K" / "5500 K" → "5500K".
+fn format_kelvin(v: &str) -> String {
+    let n = first_number(v);
+    if n.is_empty() { v.to_string() } else { format!("{}K", n) }
+}
+
+/// Builds the codec label shown in reports from several mediainfo fields.
+///
+/// - ProRes RAW is identified by its FourCC (`aprn` = ProRes RAW,
+///   `aprh` = ProRes RAW HQ): depending on the mediainfo version, `%Format%`
+///   only says "ProRes" for these files.
+/// - ProRes gets its profile appended: "ProRes 422 HQ", "ProRes 4444 XQ"…
+/// - When mediainfo knows a commercial name ("DNxHR HQX", "XDCAM HD422",
+///   "AVC-Intra 100", "XAVC"…) it is more meaningful than the format and wins.
+/// - Otherwise the format goes through `friendly_codec()` ("AVC" → "H.264").
+fn video_codec_name(format: &str, profile: &str, commercial: &str, codec_id: &str) -> String {
+    match codec_id.trim().to_lowercase().as_str() {
+        "aprn" => return "ProRes RAW".into(),
+        "aprh" => return "ProRes RAW HQ".into(),
+        _ => {}
+    }
+    let up = format.to_uppercase();
+    if up.starts_with("PRORES") {
+        // "ProRes" or, on newer mediainfo versions, possibly "ProRes RAW".
+        let base = format!("ProRes{}", &format["ProRes".len()..]);
+        let p = profile.trim();
+        if p.is_empty() || base.to_uppercase().contains(&p.to_uppercase()) {
+            return base;
+        }
+        return format!("{} {}", base, p);
+    }
+    let c = commercial.trim();
+    if !c.is_empty() && !c.eq_ignore_ascii_case(format) {
+        return c.to_string();
+    }
+    if up == "VC-3" { return "DNxHD".into(); }
+    friendly_codec(format)
+}
+
+/// True for camera RAW video codecs (Bayer sensor data, no YUV/RGB encoding).
+fn is_raw_video(codec: &str, codec_id: &str, ext: &str) -> bool {
+    let c = codec.to_uppercase();
+    c.contains("RAW")            // ProRes RAW, ARRIRAW, Blackmagic RAW, Cinema RAW Light…
+        || c.contains("X-OCN")   // Sony Venice / Burano
+        || c.contains("REDCODE") || c == "R3D"
+        || matches!(codec_id.trim().to_lowercase().as_str(), "aprn" | "aprh")
+        || matches!(ext, "r3d" | "braw" | "crm" | "nev" | "ari" | "arx")
+}
+
+/// Bit depth fixed by the codec specification, for codecs where mediainfo
+/// leaves `%BitDepth%` empty.
+///
+/// - ProRes RAW / RAW HQ: 12-bit log-encoded sensor data (Apple white paper).
+/// - ProRes 4444 / 4444 XQ: 12-bit.
+/// - ProRes 422 family (Proxy, LT, 422, HQ): 10-bit.
+fn spec_bit_depth(codec: &str, profile: &str) -> Option<u32> {
+    let c = codec.to_uppercase();
+    if !c.starts_with("PRORES") { return None; }
+    if c.contains("RAW") || c.contains("4444") || profile.contains("4444") {
+        Some(12)
+    } else {
+        Some(10)
     }
 }
 
@@ -452,12 +705,12 @@ fn query_video(path: &Path, meta: &mut FileMeta) {
 ///
 /// All fields come from the `Audio` section except duration (from `General`).
 fn query_audio(path: &Path, meta: &mut FileMeta) {
-    if let Some(fields) = run_inform(path, "Audio;%Format%|%BitDepth%|%SamplingRate%") {
+    if let Some(fields) = run_inform(path, "Audio;%Format%|%BitDepth%|%SamplingRate%\\n") {
         let f  = fields.get(0).cloned().unwrap_or_default();
         let b  = fields.get(1).cloned().unwrap_or_default();
         let sr = fields.get(2).cloned().unwrap_or_default();
         if !f.is_empty()  { meta.codec       = friendly_codec(&f); }
-        if !b.is_empty()  { meta.bit_depth   = format!("{} bit", b); }
+        if !b.is_empty()  { meta.bit_depth   = format!("{} bit", first_number(&b)); }
         if !sr.is_empty() { meta.sample_rate = format_sample_rate(&sr); }
     }
     if let Some(fields) = run_inform(path, "General;%Duration%") {
@@ -565,7 +818,11 @@ pub fn write_csv(
     if settings.col_duration    { headers.push("Duration"); }
     if settings.col_bit_depth   { headers.push("Bit Depth"); }
     if settings.col_chroma      { headers.push("Chroma Subsampling"); }
-    if settings.col_color_space { headers.push("Color Space"); }
+    if settings.col_color_space { headers.push("Gamut"); }
+    if settings.col_transfer    { headers.push("Gamma / Log"); }
+    if settings.col_camera      { headers.push("Camera"); }
+    if settings.col_iso         { headers.push("ISO"); }
+    if settings.col_white_balance { headers.push("White Balance"); }
     if settings.col_sample_rate { headers.push("Sample Rate"); }
     if has_status               { headers.push("Status"); }
     if has_hash                 { headers.push(hash_col); }
@@ -578,11 +835,15 @@ pub fn write_csv(
         if settings.col_type        { cols.push(meta.file_type.clone()); }
         if settings.col_size        { cols.push(meta.size_human.clone()); }
         if settings.col_resolution  { cols.push(meta.resolution.clone()); }
-        if settings.col_codec       { cols.push(meta.codec.clone()); }
+        if settings.col_codec       { cols.push(csv_escape(&meta.codec)); }
         if settings.col_duration    { cols.push(meta.duration.clone()); }
         if settings.col_bit_depth   { cols.push(meta.bit_depth.clone()); }
         if settings.col_chroma      { cols.push(meta.chroma.clone()); }
-        if settings.col_color_space { cols.push(meta.color_space.clone()); }
+        if settings.col_color_space { cols.push(csv_escape(&meta.color_space)); }
+        if settings.col_transfer    { cols.push(csv_escape(&meta.transfer)); }
+        if settings.col_camera      { cols.push(csv_escape(&meta.camera)); }
+        if settings.col_iso         { cols.push(csv_escape(&meta.iso)); }
+        if settings.col_white_balance { cols.push(csv_escape(&meta.white_balance)); }
         if settings.col_sample_rate { cols.push(meta.sample_rate.clone()); }
         if has_status {
             cols.push(match ok {
@@ -664,6 +925,16 @@ fn write_custom_header_csv(
 /// `.collect()` : gathers the remaining characters back into a String.
 fn clean_number(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
+}
+
+/// Returns the first run of digits in `s`: `"10"` → `"10"`, `"16 / 24"` → `"16"`.
+/// Used for bit depths, where mediainfo may list several values separated by
+/// " / " (one per sub-stream) that `clean_number` would glue together.
+fn first_number(s: &str) -> String {
+    s.chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect()
 }
 
 /// Formats a byte count as a human-readable string using decimal SI prefixes
@@ -806,5 +1077,52 @@ fn csv_escape(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prores_raw_detected_from_fourcc() {
+        assert_eq!(video_codec_name("ProRes", "", "", "aprn"), "ProRes RAW");
+        assert_eq!(video_codec_name("ProRes", "", "", "aprh"), "ProRes RAW HQ");
+        assert_eq!(video_codec_name("ProRes", "RAW HQ", "", ""), "ProRes RAW HQ");
+        assert!(is_raw_video("ProRes RAW", "aprn", "mov"));
+        assert_eq!(spec_bit_depth("ProRes RAW HQ", ""), Some(12));
+    }
+
+    #[test]
+    fn prores_profiles_and_bit_depth() {
+        assert_eq!(video_codec_name("ProRes", "4444", "", "ap4h"), "ProRes 4444");
+        assert_eq!(video_codec_name("ProRes", "422 HQ", "", "apch"), "ProRes 422 HQ");
+        assert_eq!(spec_bit_depth("ProRes 4444 XQ", "4444 XQ"), Some(12));
+        assert_eq!(spec_bit_depth("ProRes 422 HQ", "422 HQ"), Some(10));
+        assert_eq!(spec_bit_depth("H.264", ""), None);
+        assert!(!is_raw_video("ProRes 4444", "ap4h", "mov"));
+    }
+
+    #[test]
+    fn commercial_names() {
+        assert_eq!(video_codec_name("VC-3", "RI@LB", "DNxHR LB", "AVdh"), "DNxHR LB");
+        assert_eq!(video_codec_name("VC-3", "", "", ""), "DNxHD");
+        assert_eq!(video_codec_name("MPEG Video", "4:2:2@High", "XDCAM HD422", ""), "XDCAM HD422");
+        assert_eq!(video_codec_name("AVC", "High@L5.1", "", "avc1"), "H.264");
+    }
+
+    #[test]
+    fn colour_values_and_kelvin() {
+        assert_eq!(mediainfo_colour_value("BT.709"), "BT.709");
+        assert_eq!(mediainfo_colour_value("0E15000102000000"), "UL 0E15000102000000");
+        assert_eq!(format_kelvin("5500"), "5500K");
+        assert_eq!(format_kelvin("5500K"), "5500K");
+    }
+
+    #[test]
+    fn first_number_takes_first_value() {
+        assert_eq!(first_number("16 / 24"), "16");
+        assert_eq!(first_number("10"), "10");
+        assert_eq!(first_number(""), "");
     }
 }

@@ -121,10 +121,6 @@ use tauri::{State, Emitter, Manager, Theme};
 
 use tauri::WebviewWindow;
 
-// On Linux, gdk/gtk are used in set_window_theme to write _GTK_THEME_VARIANT
-// directly on each GDK window so Muffin/Mutter picks up the decoration variant.
-#[cfg(target_os = "linux")]
-use gdk;
 // The Tauri v2 window handle. Renamed from `tauri::Window` in v1.
 // It is `Clone` (backed by an `Arc` internally), so it can be sent to other
 // threads safely. Used here to call `.emit()` from the forwarding thread.
@@ -137,6 +133,7 @@ use gdk;
 //
 // The four modules of Bartleby's backend:
 mod copy_engine;   // Phase 1 (streaming copy) + Phase 2 (hash verify) + Phase 3 (reports)
+mod camera_meta;   // Vendor camera metadata: MXF colour labels, Sony XML sidecar, R3D header
 mod metadata;      // mediainfo-based technical metadata extraction + CSV writing
 mod pdf_report;    // A4 landscape PDF report generation (thumbnails, table, header)
 mod html_report;   // Self-contained HTML report generation (thumbnails, table, header)
@@ -278,12 +275,6 @@ struct AppState {
 /// the event loop is a fatal, unrecoverable error — there is nothing sensible to
 /// do except crash with a clear message.
 fn main() {
-    // ── Linux: set GTK_THEME before Tauri initialises GTK ────────────────────
-    // Must happen before tauri::Builder::default() which calls gtk_init().
-    // Silently ignored if settings file is missing or unparseable.
-    #[cfg(target_os = "linux")]
-    apply_gtk_theme_from_settings();
-
     tauri::Builder::default()
         // Register the dialog plugin (enables window.__TAURI__.dialog in JavaScript).
         // Without this, folder picker dialogs cannot be opened from JS.
@@ -358,6 +349,11 @@ fn main() {
             .inner_size(980.0, 700.0)
             .min_inner_size(700.0, 500.0)
             .resizable(true)
+            // Same as the main window (tauri.conf.json): no OS decorations, the
+            // title bar and rounded corners are drawn by appearance.js.
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
             .visible(false)
             .center()
             .build()
@@ -1280,82 +1276,21 @@ fn is_system_dark_mode() -> bool {
     }
 }
 
-/// Applies a light/dark variant to one window's native decorations
-/// (title bar and border).
+/// Applies a light/dark variant to one window.
 ///
-/// `mode` is `"dark"` / `"light"` to force a variant (overriding the OS), or
-/// any other value (`"default"`) to follow the OS.
+/// Bartleby's windows are undecorated — the title bar is drawn in HTML by
+/// `src/appearance.js` — so this no longer styles any native title bar. It still
+/// matters for what the OS draws on our behalf: native file dialogs, the WebView
+/// `prefers-color-scheme`, form controls and scrollbars.
 ///
-/// - `win.set_theme()` forces — or, with `None`, releases — the variant and
-///   the WebView colour scheme; on Windows alone this is unreliable for the
-///   native title bar.
-/// - Windows: `DWMWA_USE_IMMERSIVE_DARK_MODE` is applied directly so the
-///   title bar always obeys the chosen theme.
-/// - Linux: window managers (Muffin, Mutter, KWin) read the X11 property
-///   `_GTK_THEME_VARIANT` to pick the decoration variant; it is written
-///   directly via `gdk::property_change()` on the GTK main thread.
+/// `mode` is `"dark"` / `"light"` to force a variant, anything else (`"default"`)
+/// to follow the OS.
 fn apply_window_decoration_theme(win: &tauri::WebviewWindow, mode: &str) {
     let _ = win.set_theme(match mode {
         "dark"  => Some(Theme::Dark),
         "light" => Some(Theme::Light),
         _       => None, // follow the OS
     });
-
-    #[cfg(target_os = "windows")]
-    {
-        let dark = match mode {
-            "dark"  => true,
-            "light" => false,
-            _       => is_system_dark_mode(),
-        };
-        set_titlebar_dark(win, dark);
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let dark = match mode {
-            "dark"  => true,
-            "light" => false,
-            _       => is_system_dark_mode(),
-        };
-        let win2 = win.clone();
-        let _ = win.app_handle().run_on_main_thread(move || {
-            let theme_atom = gdk::Atom::intern("_GTK_THEME_VARIANT");
-            let utf8_atom  = gdk::Atom::intern("UTF8_STRING");
-            let variant: &[u8] = if dark { b"dark" } else { b"light" };
-            if let Ok(gtk_win) = win2.gtk_window() {
-                if let Some(gdk_win) = gtk::prelude::WidgetExt::window(&gtk_win) {
-                    gdk::property_change(
-                        &gdk_win,
-                        &theme_atom,
-                        &utf8_atom,
-                        8,
-                        gdk::PropMode::Replace,
-                        gdk::ChangeData::UChars(variant),
-                    );
-                }
-            }
-        });
-    }
-}
-
-/// Windows: force the native title bar to the dark or light immersive variant.
-/// This bypasses the OS theme, which is what the user expects when an explicit
-/// "Dark"/"Light" theme is chosen.
-#[cfg(target_os = "windows")]
-fn set_titlebar_dark(win: &tauri::WebviewWindow, dark: bool) {
-    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
-    if let Ok(hwnd) = win.hwnd() {
-        let value: i32 = if dark { 1 } else { 0 };
-        unsafe {
-            DwmSetWindowAttribute(
-                hwnd.0 as _,
-                DWMWA_USE_IMMERSIVE_DARK_MODE as _,
-                &value as *const i32 as *const _,
-                std::mem::size_of::<i32>() as u32,
-            );
-        }
-    }
 }
 
 /// Sets the light/dark mode for every visible window.
@@ -1980,73 +1915,4 @@ fn generate_post_verify_mhl(
     )
     .map(|p| p.display().to_string())
     .map_err(|e| e.to_string())
-}
-
-// ── Linux: GTK theme bootstrap ────────────────────────────────────────────────
-
-/// Reads the saved theme/skin from settings.json and sets GTK_THEME so the
-/// native window border matches the app theme from the very first frame.
-///
-/// GTK_THEME is consumed by gtk_init(), which Tauri calls inside
-/// tauri::Builder::default(). This function must therefore run before that call.
-/// Setting GTK_THEME after Tauri is already initialised has no effect on the
-/// window border.
-///
-/// Any failure (file absent on first launch, parse error, missing HOME) is
-/// silently ignored so Bartleby always starts normally.
-#[cfg(target_os = "linux")]
-fn apply_gtk_theme_from_settings() {
-    let settings_path = match dirs::config_dir() {
-        Some(d) => d.join("bartleby").join("settings.json"),
-        None    => return,
-    };
-
-    let content = match std::fs::read_to_string(&settings_path) {
-        Ok(c)  => c,
-        Err(_) => return,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ThemeHint {
-        #[serde(default)]
-        theme: String,
-        #[serde(default)]
-        skin: String,
-    }
-
-    let hint: ThemeHint = match serde_json::from_str(&content) {
-        Ok(h)  => h,
-        Err(_) => return,
-    };
-
-    let gtk_theme = resolve_gtk_theme(&hint.theme, &hint.skin);
-    if !gtk_theme.is_empty() {
-        // Called before tauri::Builder::default() spawns any threads, so
-        // set_var is safe here despite being documented as unsafe in
-        // multithreaded contexts.
-        std::env::set_var("GTK_THEME", gtk_theme);
-    }
-}
-
-/// Maps (skin, theme) to a GTK theme name string.
-///
-/// Returns "" for theme="default" — in that case GTK_THEME is not set and
-/// the OS decides the window border theme, which is exactly what "Follow system"
-/// should do.
-///
-/// macOS and Windows skins have no native GTK equivalent; Adwaita is used as
-/// the most neutral fallback available on all GTK3 systems.
-#[cfg(target_os = "linux")]
-fn resolve_gtk_theme(theme: &str, skin: &str) -> &'static str {
-    match (skin, theme) {
-        ("mint-y-aqua", "dark")  => "Mint-Y-Dark-Aqua",
-        ("mint-y-aqua", "light") => "Mint-Y-Aqua",
-        ("adwaita",     "dark")  => "Adwaita-dark",
-        ("adwaita",     "light") => "Adwaita",
-        ("macos",       "dark")  => "Adwaita-dark",
-        ("macos",       "light") => "Adwaita",
-        ("windows11",   "dark")  => "Adwaita-dark",
-        ("windows11",   "light") => "Adwaita",
-        _                        => "",
-    }
 }

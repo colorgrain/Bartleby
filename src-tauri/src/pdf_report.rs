@@ -1111,7 +1111,11 @@ fn active_col_names<'a>(s: &Settings, hash_col: &'a str) -> Vec<&'a str> {
     if s.col_duration    { v.push("Duration"); }
     if s.col_bit_depth   { v.push("Bit Depth"); }
     if s.col_chroma      { v.push("Chroma"); }
-    if s.col_color_space { v.push("Color Space"); }
+    if s.col_color_space { v.push("Gamut"); }
+    if s.col_transfer    { v.push("Gamma/Log"); }
+    if s.col_camera      { v.push("Camera"); }
+    if s.col_iso         { v.push("ISO"); }
+    if s.col_white_balance { v.push("WB"); }
     if s.col_sample_rate { v.push("Sample Rate"); }
     if !hash_col.is_empty() { v.push(hash_col); }
     v
@@ -1141,6 +1145,10 @@ fn active_cols(
     if s.col_bit_depth   { v.push(meta.bit_depth.clone()); }
     if s.col_chroma      { v.push(meta.chroma.clone()); }
     if s.col_color_space { v.push(meta.color_space.clone()); }
+    if s.col_transfer    { v.push(meta.transfer.clone()); }
+    if s.col_camera      { v.push(meta.camera.clone()); }
+    if s.col_iso         { v.push(meta.iso.clone()); }
+    if s.col_white_balance { v.push(meta.white_balance.clone()); }
     if s.col_sample_rate { v.push(meta.sample_rate.clone()); }
     if !hash_col.is_empty() { v.push(hash.to_string()); }
     v
@@ -1171,10 +1179,25 @@ fn col_widths(s: &Settings, hash_col: &str) -> Vec<f32> {
     if s.col_duration    { v.push(15.0_f32); }
     if s.col_bit_depth   { v.push(14.0_f32); }
     if s.col_chroma      { v.push(15.0_f32); }
-    if s.col_color_space { v.push(18.0_f32); }
+    if s.col_color_space { v.push(19.0_f32); }
+    if s.col_transfer    { v.push(16.0_f32); }
+    if s.col_camera      { v.push(26.0_f32); }
+    if s.col_iso         { v.push(10.0_f32); }
+    if s.col_white_balance { v.push(11.0_f32); }
     if s.col_sample_rate { v.push(17.0_f32); }
     // Hash column: 52 mm fits a 32-char MD5/XXH128 hash; C4 (90 chars) is clipped.
     if !hash_col.is_empty() { v.push(52.0_f32); }
+
+    // Scale every column down proportionally when the enabled set is wider
+    // than the page. Available width = page minus margins, thumbnail column,
+    // the 2 mm gap after it and the 10 mm status column (reserved even when
+    // unused so that headers and rows always agree).
+    let avail = (W - M) - (M + TW + 2.0) - 10.0;
+    let total: f32 = v.iter().sum();
+    if total > avail {
+        let k = avail / total;
+        for w in v.iter_mut() { *w *= k; }
+    }
     v
 }
 
@@ -1475,42 +1498,12 @@ fn video_frame(path: &Path) -> Option<RgbImage> {
     // `.join(…)` : append a filename, giving e.g. `/tmp/_bartleby_vthumb.jpg`.
     let tmp = std::env::temp_dir().join("_bartleby_vthumb.jpg");
 
-    // `Command::new("ffmpeg")` : build an ffmpeg command.
-    // Each `.arg(…)` appends one argument. Do NOT concatenate into a single string
-    // with spaces — `Command` passes arguments as a Vec to the OS, bypassing the shell.
-    // Shell string parsing (splitting on spaces) is not performed. This means filenames
-    // with spaces work correctly without escaping.
-    // Build the ffmpeg command, passing it through no_window() to suppress
-    // the cmd.exe console window flash on Windows (no-op on Linux/macOS).
-    // no_window() takes &mut Command and returns &mut Command, so it fits
-    // naturally into the builder chain.
-    let mut ffmpeg_cmd = ffmpeg_cmd();
-    ffmpeg_cmd
-        .arg("-y")                    // overwrite output without prompt
-        .arg("-ss").arg("00:00:01")   // seek to 1 second before decoding
-        .arg("-i").arg(path)          // input file (OsStr — handles any filename)
-        .arg("-map").arg("0:v:0")     // first video stream of first input
-        .arg("-vframes").arg("1")     // extract exactly one frame
-        .arg("-vf").arg(
-            "scale=224:144:force_original_aspect_ratio=decrease,\
-             pad=224:144:(ow-iw)/2:(oh-ih)/2:color=black"
-            // scale: fit within 224×144 preserving aspect ratio
-            // pad: fill remaining area with black to reach exactly 224×144
-        )
-        .arg("-pix_fmt").arg("rgb24") // force 8-bit RGB output (decodable by `image` crate)
-        .arg("-q:v").arg("3")         // JPEG quality (1–31, lower = better)
-        .arg(&tmp);                   // output path
-    let output = no_window(&mut ffmpeg_cmd).output().ok()?; // None if ffmpeg not installed
-
-    if !output.status.success() {
-        // ffmpeg exited with a non-zero code (e.g. corrupt file, seek failed).
+    // Frame extraction (with fallbacks for invalid colour tags and clips
+    // shorter than 1 s) lives in `sidecar::extract_video_thumbnail`.
+    if let Err(e) = crate::sidecar::extract_video_thumbnail(path, &tmp, "black", "rgb24") {
         // `eprintln!` writes to stderr — visible in the terminal during `npm run dev`.
         eprintln!("[Bartleby] ffmpeg video_frame failed for: {}", path.display());
-        eprintln!("[Bartleby] ffmpeg stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-                .lines()              // split into lines
-                .last()               // take the last line (most informative)
-                .unwrap_or("(empty)"));
+        eprintln!("[Bartleby] ffmpeg stderr: {}", e);
         return None;
     }
 

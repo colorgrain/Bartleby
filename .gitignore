@@ -31,3 +31,7 @@ desktop.ini
 # Download instructions: see README or scripts/download_sidecars.sh
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
+
+# Sidecar release staging — binaries waiting to be uploaded to a
+# `sidecars-ffmpeg-X-mediainfo-Y` GitHub release (too large for git).
+sidecars-release/

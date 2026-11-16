@@ -148,7 +148,9 @@ tauri-build = { version = "2", features = [] }
 #
 # The Tauri crate provides the #[tauri::command] proc-macro, State<T>,
 # WebviewWindow, Emitter trait, Builder, etc. used throughout src/main.rs.
-tauri = { version = "2", features = [] }
+# "macos-private-api": required for transparent windows on macOS, which the
+#   undecorated windows need to draw their own rounded corners.
+tauri = { version = "2", features = ["macos-private-api"] }
 
 # tauri-plugin-dialog: the folder/file picker dialog plugin.
 #
@@ -411,8 +413,6 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = "0.10"
-gtk = "0.18"
-gdk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }

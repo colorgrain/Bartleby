@@ -458,29 +458,6 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   padding:         10px 16px;
 }
 
-/* Appearance tab — theme/skin picker buttons */
-.appearance-btn-group {
-  display:   flex;
-  flex-wrap: wrap;
-  gap:       8px;
-}
-.appearance-btn {
-  padding:       6px 14px;
-  border-radius: var(--radius-sm);
-  font-size:     13px;
-  background:    rgba(128,128,128,0.08);
-  border:        1px solid var(--input-border);
-  color:         var(--text);
-}
-.appearance-btn:hover        { background: rgba(128,128,128,0.18); }
-.appearance-btn-active {
-  background:   var(--accent);
-  color:        var(--accent-fg);
-  border-color: var(--accent-hover);
-  font-weight:  600;
-}
-
-
 /* ── Destination rows ─────────────────────────────────────────────────────── */
 .dest-item { display: flex; flex-direction: column; gap: 6px; }
 .dest-row  { display: flex; gap: 8px; align-items: center; }
@@ -1511,3 +1488,173 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   word-break:    break-all;
 }
 .struct-preview .tok-bad { color: var(--error); font-weight: 700; }
+
+/* ══ Window chrome (drawn by appearance.js) ═══════════════════════════════════
+   The windows are undecorated + transparent: the page itself draws the
+   rounded frame, title bar, window buttons and resize edges. body[data-os]
+   selects the style: adwaita | breeze | macos | windows.                     */
+
+html, body { background: transparent; }
+
+body                  { --win-radius: 12px; --win-border: rgba(0, 0, 0, 0.22); }
+body[data-os="breeze"] { --win-radius: 6px; }
+body[data-os="macos"] { --win-radius: 10px; }
+body[data-os="windows"] { --win-radius: 8px; }
+body.theme-dark       { --win-border: rgba(255, 255, 255, 0.12); }
+
+#app-shell {
+  border-radius: var(--win-radius);
+  border:        1px solid var(--win-border);
+}
+.overlay { border-radius: var(--win-radius); }
+
+/* Maximized: no rounded corners, no frame border, no resize edges. */
+body.win-maximized { --win-radius: 0px; }
+body.win-maximized #app-shell { border: none; }
+body.win-maximized .win-resize { display: none; }
+
+/* Title bar */
+.win-titlebar { user-select: none; -webkit-user-select: none; cursor: default; }
+.win-title {
+  flex:          1;
+  align-self:    stretch;
+  display:       flex;
+  align-items:   center;
+  justify-content: center;
+  min-width:     40px;
+  font-size:     13px;
+  font-weight:   600;
+  color:         var(--titlebar-txt);
+  white-space:   nowrap;
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+}
+body[data-os="windows"] .win-title { justify-content: flex-start; font-weight: 400; font-size: 12px; padding-left: 8px; }
+
+.win-controls { display: flex; align-items: center; flex-shrink: 0; }
+.win-btn {
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  border:          none;
+  padding:         0;
+  background:      transparent;
+  color:           var(--titlebar-txt);
+  cursor:          default;
+}
+.win-btn svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; }
+
+/* GNOME / libadwaita: round grey buttons on the right */
+body[data-os="adwaita"] .win-controls { gap: 10px; margin-left: 12px; margin-right: 2px; }
+body[data-os="adwaita"] .win-btn {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(128, 128, 128, 0.16);
+}
+body[data-os="adwaita"] .win-btn:hover  { background: rgba(128, 128, 128, 0.30); }
+body[data-os="adwaita"] .win-btn:active { background: rgba(128, 128, 128, 0.42); }
+body[data-os="adwaita"] .win-btn svg { stroke-width: 1.5; }
+
+/* KDE Plasma / Breeze: bare glyphs, circle on hover, red close */
+body[data-os="breeze"] .win-controls { gap: 6px; margin-left: 10px; margin-right: 0; }
+body[data-os="breeze"] .win-btn { width: 22px; height: 22px; border-radius: 50%; }
+body[data-os="breeze"] .win-btn svg { width: 10px; height: 10px; stroke-width: 1.4; }
+body[data-os="breeze"] .win-btn:hover  { background: rgba(128, 128, 128, 0.25); }
+body[data-os="breeze"] .win-btn:active { background: rgba(128, 128, 128, 0.40); }
+body[data-os="breeze"] .win-close:hover  { background: #da4453; color: #ffffff; }
+body[data-os="breeze"] .win-close:active { background: #c0392b; color: #ffffff; }
+
+/* macOS: traffic lights on the left, glyphs on hover */
+body[data-os="macos"] .win-controls { gap: 8px; margin-right: 14px; margin-left: 4px; }
+body[data-os="macos"] .win-btn {
+  width: 12px; height: 12px; border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+  color: rgba(0, 0, 0, 0.55);
+}
+body[data-os="macos"] .win-close { background: #ff5f57; }
+body[data-os="macos"] .win-min   { background: #febc2e; }
+body[data-os="macos"] .win-max   { background: #28c840; }
+body[data-os="macos"] .win-btn svg { width: 8px; height: 8px; stroke-width: 1.6; opacity: 0; }
+body[data-os="macos"] .win-controls:hover .win-btn svg { opacity: 1; }
+body[data-os="macos"] .win-btn:active { filter: brightness(0.85); }
+
+/* Windows 11: flat caption buttons flush with the top-right corner */
+body[data-os="windows"] #titlebar { padding-right: 0; }
+body[data-os="windows"] .win-controls { align-self: stretch; margin-left: 8px; }
+body[data-os="windows"] .win-btn { width: 46px; height: 100%; border-radius: 0; }
+body[data-os="windows"] .win-btn:hover  { background: rgba(128, 128, 128, 0.18); }
+body[data-os="windows"] .win-btn:active { background: rgba(128, 128, 128, 0.28); }
+body[data-os="windows"] .win-close:hover  { background: #c42b1c; color: #ffffff; }
+body[data-os="windows"] .win-close:active { background: #c84031; color: #ffffff; }
+body[data-os="windows"] .win-controls .win-btn:last-child { border-top-right-radius: var(--win-radius); }
+
+/* Resize edges — invisible strips around the window */
+.win-resize { position: fixed; z-index: 10000; }
+.win-resize-n  { top: 0;    left: 10px;  right: 10px; height: 5px; cursor: n-resize; }
+.win-resize-s  { bottom: 0; left: 10px;  right: 10px; height: 5px; cursor: s-resize; }
+.win-resize-e  { right: 0;  top: 10px;   bottom: 10px; width: 5px; cursor: e-resize; }
+.win-resize-w  { left: 0;   top: 10px;   bottom: 10px; width: 5px; cursor: w-resize; }
+.win-resize-ne { top: 0;    right: 0;    width: 10px; height: 10px; cursor: ne-resize; }
+.win-resize-nw { top: 0;    left: 0;     width: 10px; height: 10px; cursor: nw-resize; }
+.win-resize-se { bottom: 0; right: 0;    width: 10px; height: 10px; cursor: se-resize; }
+.win-resize-sw { bottom: 0; left: 0;     width: 10px; height: 10px; cursor: sw-resize; }
+
+/* ── Appearance tab ───────────────────────────────────────────────────────── */
+.appearance-row {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+  flex-wrap:   wrap;
+}
+.appearance-row .modal-input { width: auto; min-width: 220px; }
+.appearance-hint { font-size: 12px; color: var(--text-dim); }
+
+/* ── Settings help button & popover ("Active columns" → How metadata is read) ─
+   The popover is position:fixed (placed by JS) because the settings tab card
+   scrolls and would clip an absolutely positioned bubble. */
+.section-label-row {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+}
+.help-btn {
+  background:    none;
+  border:        none;
+  padding:       2px;
+  cursor:        pointer;
+  color:         var(--text-dim);
+  border-radius: 50%;
+  display:       flex;
+  line-height:   0;
+  transition:    color 0.15s;
+}
+.help-btn:hover,
+.help-btn[aria-expanded="true"] { color: var(--accent, var(--text)); }
+.help-btn:focus-visible { outline: 2px solid var(--input-focus); outline-offset: 1px; }
+
+.help-popover {
+  position:      fixed;
+  z-index:       600;            /* above .overlay (500) */
+  width:         360px;
+  max-width:     calc(100vw - 32px);
+  max-height:    min(calc(100vh - 32px), 620px);
+  overflow-y:    auto;
+  background:    var(--surface);
+  border:        1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding:       12px 14px;
+  font-size:     11.5px;
+  line-height:   1.45;
+  color:         var(--text);
+  box-shadow:    0 6px 20px var(--shadow);
+  text-align:    left;
+}
+.help-popover.hidden { display: none; }
+.help-popover h4 {
+  margin: 10px 0 4px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+}
+.help-popover h4:first-child { margin-top: 0; }
+.help-popover p  { margin: 0 0 6px; }
+.help-popover ul { margin: 0 0 6px; padding-left: 16px; }
+.help-popover li { margin-bottom: 4px; }

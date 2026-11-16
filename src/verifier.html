@@ -5,14 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bartleby — Verification</title>
   <link rel="stylesheet" href="style.css" />
-  <link id="theme-link" rel="stylesheet" href="themes/mint-y-aqua.css" />
+  <link id="theme-link" rel="stylesheet" href="themes/adwaita.css" />
   <style>
     /* ── Verifier-specific styles ─────────────────────────────────────────── */
     /* position:fixed bypasses the html→body→#app-shell height chain entirely —
        WebKit2GTK on Linux doesn't reliably propagate height:100%, and vh units
        can introduce an offset. inset:0 pins the shell directly to the viewport. */
     #app-shell { position:fixed; inset:0; display:flex; flex-direction:column; overflow:hidden; }
-    body { background: var(--bg); }
     #verifier-body { flex:1; overflow-y:auto; padding:16px 20px; }
 
     /* File input row */
@@ -118,6 +117,9 @@
 
 <div id="app-shell">
 
+  <!-- Title bar — drag region + window buttons added by appearance.js -->
+  <header id="titlebar"></header>
+
   <!-- Body -->
   <div id="verifier-body">
 
@@ -178,6 +180,7 @@
 
   </div><!-- /#verifier-body -->
 </div><!-- /#app-shell -->
+<script src="appearance.js"></script>
 <script src="verifier.js"></script>
 </body>
 </html>

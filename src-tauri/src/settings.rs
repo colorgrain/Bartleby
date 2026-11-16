@@ -72,6 +72,25 @@ pub struct FolderVar {
     pub values: Vec<String>,
 }
 
+/// A user-saved colour theme (Settings → Appearance → "Save as…").
+///
+/// Only the four base colours are stored; every other CSS token (borders,
+/// dimmed text, inputs, hover states…) is derived from them in
+/// `src/appearance.js`. Colours are `#rrggbb` strings.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+pub struct CustomTheme {
+    pub name:   String,
+    /// Window background.
+    pub bg:     String,
+    /// Foreground surfaces: side panels, log panel, cards, dialogs.
+    pub fg:     String,
+    /// Text colour. Empty in themes saved by the first version, where `fg`
+    /// held the text colour — appearance.js migrates those on load.
+    pub text:   String,
+    pub accent: String,
+}
+
 // ── Main struct ───────────────────────────────────────────────────────────────
 
 /// All user-configurable preferences, serialisable to/from JSON.
@@ -187,8 +206,21 @@ pub struct Settings {
     /// Example: `"4:2:0"`, `"4:2:2"`, `"4:4:4"`.
     pub col_chroma: bool,
 
-    /// Colour space / gamut. Example: `"BT.709"`, `"BT.2020"`, `"sRGB"`.
+    /// Gamut (colour primaries). Example: `"BT.709"`, `"S-Gamut3.Cine"`, `"AWG4"`.
+    /// The field keeps its historical name so existing settings files still apply.
     pub col_color_space: bool,
+
+    /// Transfer function / log curve. Example: `"BT.709"`, `"PQ"`, `"S-Log3"`, `"LogC4"`.
+    pub col_transfer: bool,
+
+    /// Camera model (and external recorder). Example: `"ARRI ALEXA 35"`.
+    pub col_camera: bool,
+
+    /// ISO / exposure index recorded by the camera. Example: `"800"`.
+    pub col_iso: bool,
+
+    /// White balance recorded by the camera. Example: `"5600K"`.
+    pub col_white_balance: bool,
 
     /// Audio sample rate. Example: `"48 kHz"`, `"96 kHz"`.
     pub col_sample_rate: bool,
@@ -230,48 +262,32 @@ pub struct Settings {
 
     // ── Appearance ────────────────────────────────────────────────────────────
 
-    /// Light/dark mode selection. Possible values:
-    /// - `"default"` — follow the operating system colour scheme.
-    ///   On Linux Mint / Cinnamon, detected via the Tauri `is_system_dark_mode`
-    ///   command (because the `prefers-color-scheme` CSS media query is unreliable
-    ///   inside Tauri's WebKit WebView on Linux).
-    /// - `"light"` — always use the light variant of the active skin.
-    /// - `"dark"`  — always use the dark variant of the active skin.
-    ///
-    /// Controls `body.className` in JavaScript:
-    ///   "default" → class="theme-default"  (CSS @media (prefers-color-scheme) fallback)
-    ///   "light"   → class="theme-light"    (uses :root variables from the skin file)
-    ///   "dark"    → class="theme-dark"     (uses body.theme-dark block from the skin file)
-    ///
-    /// This field is ORTHOGONAL to `skin`: changing the mode does not change
-    /// which CSS file is loaded, only which block within that file is active.
+    /// Colour mode. Possible values:
+    /// - `"default"` — follow the operating system colour scheme (detected by
+    ///   the `is_system_dark_mode` command, because `prefers-color-scheme` is
+    ///   unreliable inside WebKitGTK).
+    /// - `"light"` / `"dark"` — force the light / dark palette of the active skin.
+    /// - `"custom:<name>"` — use the saved `CustomTheme` with that name
+    ///   (see `custom_themes`).
     pub theme: String,
 
-    /// Active visual skin — determines which CSS colour palette file is loaded.
+    /// Window style — which OS look the app draws for itself. Bartleby's windows
+    /// are undecorated (`decorations: false`): the title bar, window buttons and
+    /// rounded corners are drawn in HTML by `src/appearance.js`, and this field
+    /// picks which style. Each value maps to `src/themes/{skin}.css`:
+    /// - `"adwaita"` — GNOME / libadwaita: round grey buttons on the right, neutral greys.
+    /// - `"breeze"`  — KDE Plasma / Breeze: chevron buttons, red close on hover.
+    /// - `"macos"`   — traffic lights on the left.
+    /// - `"windows"` — Windows 11 caption buttons on the right.
     ///
-    /// Each skin is a self-contained CSS file at `src/themes/{skin}.css` that
-    /// defines all CSS custom properties (--bg, --accent, --radius, etc.).
-    ///
-    /// JavaScript loads the active skin by swapping the <link id="theme-link"> href:
-    ///   `document.getElementById('theme-link').href = 'themes/' + skin + '.css';`
-    ///
-    /// Possible values (each maps to a file in src/themes/):
-    /// - `"mint-y-aqua"` — Linux Mint / Cinnamon (Mint-Y Aqua GTK palette). DEFAULT.
-    /// - `"macos"`       — macOS Sequoia / Sonoma (Apple NSColor palette, SF Pro font).
-    /// - `"windows11"`   — Windows 11 Fluent Design (WinUI 3 palette, Segoe UI font).
-    /// - `"adwaita"`     — GNOME Adwaita / libadwaita (GTK4 palette, Cantarell font).
-    ///
-    /// ### Orthogonality with `theme`
-    /// `skin`  = WHICH colour palette (which CSS file is loaded)
-    /// `theme` = light/dark MODE within that palette (which CSS block is active)
-    /// Any skin × any mode is valid: 4 skins × 3 modes = 12 possible visual states.
-    ///
-    /// ### Backward compatibility
-    /// This field was added after the initial release. Old settings.json files that
-    /// do not contain a "skin" key are handled transparently by `#[serde(default)]`
-    /// on the struct: missing fields are filled with Default::default() values
-    /// ("mint-y-aqua") rather than causing a parse error. Fully transparent upgrade.
+    /// Values from older versions (`linux`, `mint-y-aqua`, `windows11`) are
+    /// migrated by `Settings::load()`.
     pub skin: String,
+
+    /// Colour themes saved by the user. Selected by setting `theme` to
+    /// `"custom:<name>"`.
+    #[serde(default)]
+    pub custom_themes: Vec<CustomTheme>,
 
     // ── Folder-structure templates ────────────────────────────────────────────
     //
@@ -335,7 +351,7 @@ pub struct Settings {
 /// - All report outputs (`.CSV`, `.PDF`, `.HTML`, `.MHL`) are enabled by default.
 /// - `open_dest = false`: avoids opening unexpected file manager windows on copy completion.
 /// - Default theme: `"default"` (follow the OS light/dark setting).
-/// - Default skin: `"mint-y-aqua"` (Linux Mint native; neutral on other platforms).
+/// - Default skin: the style of the running OS (`default_skin()`).
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -360,6 +376,10 @@ impl Default for Settings {
             col_bit_depth:   true,
             col_chroma:      true,
             col_color_space: true,
+            col_transfer:    true,
+            col_camera:      true,
+            col_iso:         true,
+            col_white_balance: true,
             col_sample_rate: true,
             col_md5:         true,
 
@@ -372,9 +392,9 @@ impl Default for Settings {
 
             theme: "default".to_string(), // follow the OS light/dark setting
 
-            // Default skin: Mint-Y Aqua — the native Linux Mint / Cinnamon look.
-            // On macOS and Windows the user can change this via the hamburger menu.
-            skin: "mint-y-aqua".to_string(),
+            // Default window style: the style of the OS the app runs on.
+            skin: default_skin().to_string(),
+            custom_themes: Vec::new(),
 
             // Folder-structure templates — empty/neutral defaults; opt-in feature.
             folder_var_date_format: "%Y-%m-%d".to_string(),
@@ -510,6 +530,68 @@ impl Settings {
                 // `.ok()` converts serde_json::Error into None on any parse failure.
                 serde_json::from_str(&s).ok()
             })
+            .map(|mut st: Settings| { st.skin = migrate_skin(&st.skin).to_string(); st })
             .unwrap_or_default()        // None → Settings::default()
+    }
+}
+
+/// Window style matching the running OS — on Linux, the desktop environment
+/// (`XDG_CURRENT_DESKTOP` containing "KDE" → Breeze, anything else → libadwaita).
+pub fn default_skin() -> &'static str {
+    if cfg!(target_os = "macos") { return "macos"; }
+    if cfg!(target_os = "windows") { return "windows"; }
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    linux_skin_for_desktop(&desktop)
+}
+
+fn linux_skin_for_desktop(desktop: &str) -> &'static str {
+    if desktop.to_uppercase().contains("KDE") { "breeze" } else { "adwaita" }
+}
+
+/// Maps skin names from older versions to the current window styles.
+/// The old generic Linux styles follow the desktop environment.
+pub fn migrate_skin(skin: &str) -> &'static str {
+    match skin {
+        "adwaita"                  => "adwaita",
+        "breeze"                   => "breeze",
+        "macos"                    => "macos",
+        "windows" | "windows11"    => "windows",
+        _                          => default_skin(), // "linux", "mint-y-aqua", empty…
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_old_skin_names() {
+        assert_eq!(migrate_skin("mint-y-aqua"), default_skin());
+        assert_eq!(migrate_skin("linux"),       default_skin());
+        assert_eq!(migrate_skin("adwaita"),     "adwaita");
+        assert_eq!(migrate_skin("breeze"),      "breeze");
+        assert_eq!(migrate_skin("windows11"),   "windows");
+        assert_eq!(migrate_skin("macos"),       "macos");
+        assert_eq!(migrate_skin(""),            default_skin());
+    }
+
+    #[test]
+    fn old_settings_without_custom_themes_still_parse() {
+        let st: Settings = serde_json::from_str(r#"{"theme":"dark","skin":"adwaita"}"#).unwrap();
+        assert_eq!(st.theme, "dark");
+        assert!(st.custom_themes.is_empty());
+    }
+
+    #[test]
+    fn linux_desktop_picks_style() {
+        assert_eq!(linux_skin_for_desktop("KDE"),           "breeze");
+        assert_eq!(linux_skin_for_desktop("ubuntu:GNOME"),  "adwaita");
+        assert_eq!(linux_skin_for_desktop("X-Cinnamon"),    "adwaita");
+    }
+
+    #[test]
+    fn custom_theme_without_text_still_parses() {
+        let t: CustomTheme = serde_json::from_str(r##"{"name":"a","bg":"#000000","fg":"#ffffff","accent":"#ff0000"}"##).unwrap();
+        assert_eq!(t.text, "");
     }
 }

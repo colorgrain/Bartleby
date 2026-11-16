@@ -67,7 +67,7 @@ jobs:
             patchelf
 
       # ── Sidecar binaries ──────────────────────────────────────────────────
-      # Downloads bartleby-ffmpeg and bartleby-mediainfo from the binaries-v1
+      # Downloads bartleby-ffmpeg and bartleby-mediainfo from the sidecars-ffmpeg-9.0.2-mediainfo-26.10
       # GitHub Release into src-tauri/binaries/.
       # On macOS both arch variants are downloaded (universal binary build).
       - name: Download sidecar binaries (Linux / macOS)
@@ -81,9 +81,21 @@ jobs:
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
           .\scripts\download_sidecars.ps1
 
+      # Prints the version of the sidecars built into this release, so that a
+      # stale or mismatched binary shows up in the CI log (expected: FFmpeg 9.0.2,
+      # MediaInfoLib 26.10 on every platform).
       - name: Verify sidecar binaries
-        if: runner.os != 'Windows'
-        run: ls -lh src-tauri/binaries/
+        shell: bash
+        run: |
+          ls -lh src-tauri/binaries/
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)   T=x86_64-unknown-linux-gnu; X= ;;
+            macOS-ARM64) T=aarch64-apple-darwin;     X= ;;
+            macOS-X64)   T=x86_64-apple-darwin;      X= ;;
+            Windows-X64) T=x86_64-pc-windows-msvc;   X=.exe ;;
+          esac
+          src-tauri/binaries/bartleby-ffmpeg-$T$X -hide_banner -version | head -1
+          src-tauri/binaries/bartleby-mediainfo-$T$X --version | tail -1
 
       # ── npm ───────────────────────────────────────────────────────────────
       - name: npm install

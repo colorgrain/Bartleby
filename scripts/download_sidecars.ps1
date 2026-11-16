@@ -8,7 +8,17 @@
 
 $ErrorActionPreference = "Stop"
 
-$RELEASE_URL = "https://github.com/colorgrain/Bartleby/releases/download/binaries-v1"
+# ── Where the binaries come from ──────────────────────────────────────────────
+# RELEASE_URL points to a GitHub Release used ONLY as storage for the sidecars.
+# It is NOT a Bartleby release: app versions are the v0.1.0-N tags.
+# The tag name states exactly what it contains:
+#   sidecars-ffmpeg-<ffmpeg version>-mediainfo-<mediainfo version>
+# To update the sidecars: publish a NEW release named the same way with the 8
+# bartleby-* files (+ SHA256SUMS), change RELEASE_URL here AND in
+# download_sidecars.ps1, delete src-tauri/binaries/bartleby-* locally, re-run.
+# Keep the old release: older Bartleby commits still download from it.
+# Sources used for 9.0.2 / 26.10: see CLAUDE.md, section "Sidecars".
+$RELEASE_URL = "https://github.com/colorgrain/Bartleby/releases/download/sidecars-ffmpeg-9.0.2-mediainfo-26.10"
 $BINARIES_DIR = Join-Path $PSScriptRoot "..\src-tauri\binaries"
 New-Item -ItemType Directory -Force -Path $BINARIES_DIR | Out-Null
 
