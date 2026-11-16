@@ -831,7 +831,15 @@ pub fn run(
     }
 
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
+    // Source size of each entry of `copied` (same index). `file_sizes` is indexed
+    // on `files`, which diverges from `copied` as soon as one file fails.
+    let mut copied_sizes: Vec<u64> = Vec::new();
+    // Relative paths of files that could not be copied to every destination.
+    let mut copy_failed: Vec<String> = Vec::new();
     let mut copy_errors = 0usize;
+    // Destination-wide flush failures (syncfs / FlushFileBuffers): data may not
+    // be on disk even though every write() succeeded.
+    let mut flush_errors = 0usize;
 
     for (idx, src_path) in files.iter().enumerate() {
         if let Err(_) = pc.wait_if_paused() {
@@ -861,6 +869,7 @@ pub fn run(
         if dst_entries.is_empty() {
             // All destinations already have this file — add to `copied` for verification/reports.
             copied.push((src_path.clone(), rel_str.clone()));
+            copied_sizes.push(fsize);
             bytes_done += fsize * n_dst;
             bytes_done_arc.store(bytes_done, Ordering::Relaxed);
             continue;
@@ -873,10 +882,13 @@ pub fn run(
         let mut dir_ok = true;
         for dst_path in &dst_paths {
             if let Some(parent) = dst_path.parent() {
-                if fs::create_dir_all(parent).is_err() { dir_ok = false; }
+                if let Err(e) = fs::create_dir_all(parent) {
+                    log(&tx, &format!("  ✖  mkdir {}: {}\n", parent.display(), e));
+                    dir_ok = false;
+                }
             }
         }
-        if !dir_ok { copy_errors += 1; continue; }
+        if !dir_ok { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
 
         // Rename conflicting destination files before overwriting (skip-and-keep mode).
         for (i, dst_path) in dst_entries.iter() {
@@ -914,7 +926,7 @@ pub fn run(
                 any_error = true;
             }
         }
-        if any_error { copy_errors += 1; continue; }
+        if any_error { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
 
         // macOS: fsync each destination file immediately after copy.
         // Per-file fsync gives crash-safety granularity on macOS (APFS/HFS+
@@ -928,18 +940,21 @@ pub fn run(
             let sync_results: Vec<io::Result<()>> = dst_paths.par_iter()
                 .map(|dst_path| fs::OpenOptions::new().write(true).open(dst_path)?.sync_all())
                 .collect();
+            let mut sync_error = false;
             for (i, res) in sync_results.iter().enumerate() {
                 if let Err(e) = res {
                     log(&tx, &format!("  ✖  sync {}: {}\n",
                         destinations[dst_indices[i]].display(), e));
-                    copy_errors += 1;
+                    sync_error = true;
                 }
             }
+            if sync_error { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
         }
 
         bytes_done += fsize * n_dst;
         bytes_done_arc.store(bytes_done, Ordering::Relaxed);
         copied.push((src_path.clone(), rel_str.clone()));
+        copied_sizes.push(fsize);
         log(&tx, &format!("  ✓  {}\n", rel_str));
     }
 
@@ -958,10 +973,10 @@ pub fn run(
     // syncfs() is called unconditionally, even when verify=false: the user always
     // wants their data persisted on disk, regardless of hash verification.
     //
-    // If syncfs() fails, we log a warning and continue. Phase 2 (hash comparison)
-    // will detect any data corruption caused by the incomplete flush. The error
-    // is not counted as a copy_error because the write() calls all succeeded —
-    // the data is correct in the kernel buffer; only the flush to disk is uncertain.
+    // If syncfs() fails, the job fails: a deferred write error (e.g. a USB drive
+    // dropping out during writeback) surfaces only here. A hash verification
+    // might catch it, but size-only and copy-only modes would not, so the error
+    // is always counted (`flush_errors`).
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -976,8 +991,9 @@ pub fn run(
                 // This device has not been synced yet — flush it now.
                 if let Err(e) = syncfs_dir(dst) {
                     log(&tx, &format!(
-                        "  △  syncfs {} failed: {} (Phase 2 will verify integrity)\n",
+                        "  ✖  syncfs {} failed: {} — data may not be on disk\n",
                         dst.display(), e));
+                    flush_errors += 1;
                 }
             }
             // dev == 0 or already synced: skip without logging (normal case).
@@ -1008,11 +1024,18 @@ pub fn run(
                 }
             }).collect::<Vec<_>>()
         }).collect();
-        flush_paths.par_iter().for_each(|path| {
-            if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
-                let _ = f.sync_all();
-            }
-        });
+        let flush_failures: Vec<(PathBuf, io::Error)> = flush_paths.par_iter()
+            .filter_map(|path| {
+                let res = fs::OpenOptions::new().write(true).open(path)
+                    .and_then(|f| f.sync_all());
+                res.err().map(|e| (path.clone(), e))
+            })
+            .collect();
+        for (path, e) in &flush_failures {
+            log(&tx, &format!("  ✖  flush {} failed: {} — data may not be on disk\n",
+                path.display(), e));
+        }
+        flush_errors += flush_failures.len();
     }
 
     log(&tx, &format!("\n── Phase 1 complete {} ─────────────────────\n", ts(&start)));
@@ -1046,11 +1069,20 @@ pub fn run(
                          &comment, &mhl_comment, &location,
                          &checksum_name_override, &report_name_override, &report_subfolder,
                          &settings, &reply_rx);
-        let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
-            copied.len(), destinations.len());
-        log(&tx, &format!("\n{}\n", summary));
+        log_failed_copies(&tx, &copy_failed, flush_errors);
         let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
-        let _ = tx.send(Msg::Done(true, summary));
+        let total_errors = copy_errors + flush_errors;
+        if total_errors == 0 {
+            let summary = format!("✓  {} file(s) copied to {} destination(s) — no verification",
+                copied.len(), destinations.len());
+            log(&tx, &format!("\n{}\n", summary));
+            let _ = tx.send(Msg::Done(true, summary));
+        } else {
+            let summary = format!("△  {} error(s) — {}/{} file(s) copied — no verification",
+                total_errors, copied.len(), files.len());
+            log(&tx, &format!("\n{}\n", summary));
+            let _ = tx.send(Msg::Done(false, summary));
+        }
         return;
     }
 
@@ -1073,6 +1105,9 @@ pub fn run(
     let mut results: Vec<(FileHashes, bool)> =
         vec![(FileHashes::default(), true); n_files];
     let mut verify_errors = 0usize;
+    // One warning per path (source + each destination) when the hash had to
+    // fall back to a buffered read.
+    let mut buffered_warned = vec![false; 1 + destinations.len()];
 
     if hash_algo == HashAlgo::Size {
         // ── Path A: fast file-size comparison ────────────────────────────────
@@ -1082,7 +1117,7 @@ pub fn run(
                 let _ = tx.send(Msg::Done(false, "Cancelled.".into()));
                 return;
             }
-            let src_size = file_sizes[file_idx];
+            let src_size = copied_sizes[file_idx];
 
             *action.lock().unwrap() = format!("Checking size {}/{} — {}", file_idx + 1, n_files, rel_str);
 
@@ -1175,7 +1210,7 @@ pub fn run(
                 }
             }
 
-            let hash_results: Vec<io::Result<FileHashes>> = all_paths.par_iter().enumerate()
+            let hash_results: Vec<io::Result<(FileHashes, bool)>> = all_paths.par_iter().enumerate()
                 .map(|(i, path)| {
                     // all_paths layout: [0] = source, [1..] = destinations, which
                     // matches the dev_bytes indexing exactly.
@@ -1206,8 +1241,19 @@ pub fn run(
                 continue;
             }
 
-            let hashes: Vec<FileHashes> = hash_results.into_iter()
-                .map(|r| r.unwrap()).collect();
+            let mut hashes: Vec<FileHashes> = Vec::with_capacity(hash_results.len());
+            for (i, r) in hash_results.into_iter().enumerate() {
+                let (h, buffered) = r.expect("errors handled above");
+                if buffered && !buffered_warned[i] {
+                    buffered_warned[i] = true;
+                    let label = if i == 0 { "source".to_string() }
+                                else { destinations[i-1].display().to_string() };
+                    log(&tx, &format!(
+                        "  △  {}: direct I/O unavailable — verifying with a buffered read (page cache dropped first on Linux)\n",
+                        label));
+                }
+                hashes.push(h);
+            }
             let src_hash = &hashes[0];
 
             let mut mismatch = false;
@@ -1252,7 +1298,9 @@ pub fn run(
         log(&tx, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     }
 
-    let total_errors = copy_errors + verify_errors;
+    log_failed_copies(&tx, &copy_failed, flush_errors);
+
+    let total_errors = copy_errors + flush_errors + verify_errors;
     let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
     let hash_label = if verify {
         format!(" — {} verified", hash_algo.log_name())
@@ -1267,10 +1315,27 @@ pub fn run(
     } else {
         let ok = copied.len().saturating_sub(verify_errors);
         let summary = format!("△  {} error(s) — {}/{} file(s) OK",
-            total_errors, ok, copied.len());
+            total_errors, ok, files.len());
         log(&tx, &format!("\n{}\n", summary));
         let _ = tx.send(Msg::Done(false, summary));
     }
+}
+
+/// Logs the files that could not be copied and any destination flush failure,
+/// so the end-of-job summary lists every problem, not only verification ones.
+fn log_failed_copies(tx: &Sender<Msg>, copy_failed: &[String], flush_errors: usize) {
+    if copy_failed.is_empty() && flush_errors == 0 { return; }
+    log(tx, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    if !copy_failed.is_empty() {
+        log(tx, &format!("⚠  {} file(s) could not be copied:\n", copy_failed.len()));
+        for rel in copy_failed { log(tx, &format!("   ✖  {}\n", rel)); }
+    }
+    if flush_errors > 0 {
+        log(tx, &format!(
+            "⚠  {} flush error(s): data may not have reached the disk — re-copy or verify with a hash.\n",
+            flush_errors));
+    }
+    log(tx, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
 // ── Direct I/O hash (bypasses OS page cache) ──────────────────────────────────
@@ -1315,34 +1380,48 @@ pub fn run(
 /// We use the same 4096-aligned buffer as Linux.
 ///
 /// ## Fallback
-/// If direct I/O fails (unsupported filesystem, insufficient permissions,
-/// very small files), we fall back to standard buffered I/O automatically.
-/// The hash result is still correct — only the cache-bypass guarantee is lost.
-fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<FileHashes> {
-    // Try platform-specific direct I/O first, fall back to buffered on error.
-    let result = hash_direct_impl(path, algo, pc, bytes_out);
-    match result {
-        Ok(h)  => Ok(h),
-        Err(_) => {
-            // Fallback: standard buffered read with pipeline.
-            // On FUSE filesystems (ntfs-3g, fuse-exfat), O_DIRECT returns EINVAL
-            // and we land here. The caller must have already called
-            // fadvise_dontneed() on this path to evict the page cache,
-            // so this buffered read goes to the FUSE driver → physical disk.
-            // On non-FUSE filesystems, syncfs()/sync_all() guarantees that
-            // cache == disk, so the buffered read is still correct.
-            hash_buffered(path, algo, pc, bytes_out)
-        }
+/// Falls back to a buffered read ONLY when direct I/O is not available for this
+/// file: the cache-bypassing open fails (FUSE, network share, overlay…) or the
+/// first reads are rejected for alignment (EINVAL / ERROR_INVALID_PARAMETER).
+/// A genuine read error (EIO, bad sector, unplugged drive…) is returned as is:
+/// re-reading through the page cache could hash the data still in RAM from
+/// Phase 1 and report a damaged file as verified.
+///
+/// Returns the hashes and `true` when the buffered fallback was used, so the
+/// caller can warn that the cache-bypass guarantee is weaker for this path.
+fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<(FileHashes, bool)> {
+    let file = match open_direct(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+        // Direct open not supported here: buffered fallback (an unreadable or
+        // missing file will fail again in the fallback and be reported).
+        Err(_) => return hash_fallback(path, algo, pc, bytes_out),
+    };
+    match hash_buffered_file(file, algo, pc.clone(), bytes_out) {
+        Ok(h) => Ok((h, false)),
+        Err(e) if is_direct_io_unsupported(&e) => hash_fallback(path, algo, pc, bytes_out),
+        Err(e) => Err(e),
     }
 }
 
-/// Platform-specific direct I/O implementation.
-fn hash_direct_impl(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<FileHashes> {
-    // Open with cache-bypassing flags — the file is moved into hash_buffered_file()
-    // which passes it to the reader thread. No buffer needed here: the pipeline
-    // allocates its own per-chunk buffers inside the reader thread.
-    let file = open_direct(path)?;
-    hash_buffered_file(file, algo, pc.clone(), bytes_out)
+/// Buffered re-read used when direct I/O is unavailable. On Linux the page
+/// cache of the file is dropped first, so the read goes to the device (or FUSE
+/// driver) instead of returning the pages written in Phase 1.
+fn hash_fallback(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<(FileHashes, bool)> {
+    #[cfg(target_os = "linux")]
+    fadvise_dontneed(path);
+    hash_buffered(path, algo, pc, bytes_out).map(|h| (h, true))
+}
+
+/// True for the error a filesystem returns when it refuses an unbuffered read
+/// (alignment / unsupported flag), as opposed to a real I/O failure.
+fn is_direct_io_unsupported(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    { e.raw_os_error() == Some(libc::EINVAL) }
+    #[cfg(windows)]
+    { e.raw_os_error() == Some(87) } // ERROR_INVALID_PARAMETER
+    #[cfg(not(any(unix, windows)))]
+    { let _ = e; false }
 }
 
 // ── Platform-specific file openers ───────────────────────────────────────────
@@ -2607,5 +2686,133 @@ fn syncfs_dir(path: &Path) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+// ── Integration tests: run() end to end on temporary directories ─────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Fresh, empty directory under the system temp dir.
+    fn tmp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::AtomicUsize;
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "bartleby_test_{}_{}_{}", tag, std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Source tree: files of distinct sizes at the root, plus `sub/x.bin`.
+    fn make_source(root: &Path) -> PathBuf {
+        let src = root.join("A001");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        for (i, name) in ["a.bin", "b.bin", "c.bin", "d.bin"].iter().enumerate() {
+            fs::write(src.join(name), vec![i as u8 + 1; 1000 * (i + 1) + 7]).unwrap();
+        }
+        fs::write(src.join("sub").join("x.bin"), vec![9u8; 4321]).unwrap();
+        src
+    }
+
+    /// Runs the engine to completion, answering every prompt with Continue.
+    /// Returns (success, summary, full log).
+    fn run_job(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo) -> (bool, String, String) {
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let pc = PauseCancel::new();
+        let src = src.to_path_buf();
+        let h = std::thread::spawn(move || {
+            run(src, dsts, algo, false, false, false, false, false,
+                String::new(), String::new(), String::new(),
+                String::new(), String::new(), String::new(),
+                Settings::default(), tx, reply_rx, pc)
+        });
+        let mut logs = String::new();
+        let result = loop {
+            match rx.recv_timeout(Duration::from_secs(60)).expect("engine timed out") {
+                Msg::Log(l) => logs.push_str(&l),
+                Msg::Done(ok, s) => break (ok, s),
+                Msg::NonEmptyDest(_) | Msg::Conflicts(_) | Msg::MhlConflict { .. } => {
+                    reply_tx.send(Reply::Continue).unwrap();
+                }
+                Msg::Progress(..) => {}
+            }
+        };
+        h.join().unwrap();
+        (result.0, result.1, logs)
+    }
+
+    /// Destination where `sub` is a regular file, so `sub/x.bin` cannot be copied.
+    fn broken_dest(root: &Path) -> PathBuf {
+        let dst = root.join("dst_broken");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("sub"), b"not a directory").unwrap();
+        dst
+    }
+
+    #[test]
+    fn hashed_copy_succeeds_and_files_match() {
+        let root = tmp_dir("ok");
+        let src = make_source(&root);
+        let dst = root.join("dst");
+        let (ok, summary, logs) = run_job(&src, vec![dst.clone()], HashAlgo::Xxh64);
+        assert!(ok, "summary: {summary}\n{logs}");
+        for rel in ["a.bin", "b.bin", "c.bin", "d.bin", "sub/x.bin"] {
+            assert_eq!(fs::read(src.join(rel)).unwrap(), fs::read(dst.join(rel)).unwrap(), "{rel}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // C1: copy-only mode must not report success when a file failed to copy.
+    #[test]
+    fn copy_only_reports_failure_on_copy_error() {
+        let root = tmp_dir("c1");
+        let src = make_source(&root);
+        let dst = broken_dest(&root);
+        let (ok, summary, logs) = run_job(&src, vec![dst], HashAlgo::None);
+        assert!(!ok, "expected failure, got: {summary}\n{logs}");
+        assert!(logs.contains("could not be copied"), "{logs}");
+        assert!(logs.contains("sub/x.bin"), "{logs}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // M3: in size mode, a failed copy must not shift the size comparison of
+    // the following files (no false SIZE MISMATCH). Half of the files fail
+    // (a directory blocks their destination path), interleaved, so whatever
+    // the read_dir order a failure almost surely precedes a success.
+    #[test]
+    fn size_mode_after_copy_error_has_no_false_mismatch() {
+        let root = tmp_dir("m3");
+        let src = root.join("A002");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        for i in 0..20usize {
+            let name = format!("f{:02}.bin", i);
+            fs::write(src.join(&name), vec![i as u8; 100 * (i + 1) + 3]).unwrap();
+            if i % 2 == 0 { fs::create_dir_all(dst.join(&name)).unwrap(); }
+        }
+        let (ok, summary, logs) = run_job(&src, vec![dst], HashAlgo::Size);
+        assert!(!ok, "expected failure, got: {summary}\n{logs}");
+        assert!(!logs.contains("SIZE MISMATCH"), "{logs}");
+        assert!(summary.contains("10/20"), "summary: {summary}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Hashed mode with a copy error: the job fails and lists the file.
+    #[test]
+    fn hashed_mode_reports_copy_error() {
+        let root = tmp_dir("hash_err");
+        let src = make_source(&root);
+        let dst = broken_dest(&root);
+        let (ok, summary, logs) = run_job(&src, vec![dst], HashAlgo::Xxh64);
+        assert!(!ok, "expected failure, got: {summary}\n{logs}");
+        assert!(!logs.contains("MISMATCH"), "{logs}");
+        assert!(logs.contains("could not be copied"), "{logs}");
+        let _ = fs::remove_dir_all(&root);
     }
 }
