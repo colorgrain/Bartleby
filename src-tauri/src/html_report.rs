@@ -139,35 +139,8 @@ fn audio_wave_uri(path: &Path) -> Option<String> {
 }
 
 fn mime_icon_uri(ext: &str) -> Option<String> {
-    let mime = ext_to_mime(ext);
-    let tmp  = std::env::temp_dir().join(format!("_bartleby_html_icon_{}.png", ext));
-    let script = format!(
-        r#"import gi, sys
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gio, Gtk, GdkPixbuf
-ct = Gio.content_type_from_mime_type('{mime}')
-if not ct: sys.exit(1)
-icon = Gio.content_type_get_icon(ct)
-theme = Gtk.IconTheme.get_default()
-info = theme.lookup_by_gicon(icon, 64, 0)
-if not info: sys.exit(1)
-pb = info.load_icon()
-if not pb: sys.exit(1)
-pb = pb.scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)
-pb.savev('{path}', 'png', [], [])
-"#,
-        mime = mime,
-        path = tmp.to_str().unwrap_or(""),
-    );
-    let mut cmd = Command::new("python3");
-    cmd.arg("-c").arg(&script);
-    let out = no_window(&mut cmd).output().ok()?;
-    if out.status.success() && tmp.exists() {
-        let rgba = ::image::open(&tmp).ok().map(|i| i.into_rgba8())?;
-        let _ = std::fs::remove_file(&tmp);
-        return rgba_to_png_uri(rgba);
-    }
-    None
+    // Shared, cached, injection-safe lookup (see sidecar::mime_icon).
+    crate::sidecar::mime_icon(ext_to_mime(ext)).and_then(rgba_to_png_uri)
 }
 
 fn thumb_data_uri(path: &Path, ext: &str) -> Option<String> {

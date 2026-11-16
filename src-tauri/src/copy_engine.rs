@@ -475,6 +475,13 @@ pub fn run(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "source".to_string());
 
+    // ── Refuse destinations that would overwrite the source ──────────────────
+    if let Err(msg) = check_destinations(&src, &destinations, copy_as_subfolder, &src_name) {
+        log(&tx, &format!("✖  {}\n", msg));
+        let _ = tx.send(Msg::Done(false, format!("✖  {}", msg)));
+        return;
+    }
+
     // ── Scan source ───────────────────────────────────────────────────────────
     let _ = tx.send(Msg::Progress(0.0, "Scanning source directory…".into(), None));
     let files = match collect_files(&src) {
@@ -891,6 +898,9 @@ pub fn run(
         if !dir_ok { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
 
         // Rename conflicting destination files before overwriting (skip-and-keep mode).
+        // If the rename fails, that destination is left untouched for this file
+        // (the user asked to keep the existing file) and the file counts as failed.
+        let mut rename_failed: Vec<usize> = Vec::new();
         for (i, dst_path) in dst_entries.iter() {
             if rename_dest_pairs.contains(&(rel_str.clone(), *i)) && dst_path.exists() {
                 let conflict_path = find_conflict_rename(dst_path);
@@ -898,11 +908,19 @@ pub fn run(
                     Ok(_)  => log(&tx, &format!("  ↷  existing file renamed: {} → {}\n",
                         dst_path.file_name().unwrap_or_default().to_string_lossy(),
                         conflict_path.file_name().unwrap_or_default().to_string_lossy())),
-                    Err(e) => log(&tx, &format!("  △  could not rename conflict {}: {}\n",
-                        dst_path.display(), e)),
+                    Err(e) => {
+                        log(&tx, &format!(
+                            "  ✖  could not rename existing {}: {} — kept, not overwritten\n",
+                            dst_path.display(), e));
+                        rename_failed.push(*i);
+                    }
                 }
             }
         }
+        let (dst_paths, dst_indices): (Vec<PathBuf>, Vec<usize>) = dst_paths.into_iter()
+            .zip(dst_indices)
+            .filter(|(_, i)| !rename_failed.contains(i))
+            .unzip();
 
         // Copy to active destinations in parallel.
         let copy_results: Vec<io::Result<u64>> = dst_paths.par_iter().enumerate()
@@ -926,7 +944,9 @@ pub fn run(
                 any_error = true;
             }
         }
-        if any_error { copy_errors += 1; copy_failed.push(rel_str.clone()); continue; }
+        if any_error || !rename_failed.is_empty() {
+            copy_errors += 1; copy_failed.push(rel_str.clone()); continue;
+        }
 
         // macOS: fsync each destination file immediately after copy.
         // Per-file fsync gives crash-safety granularity on macOS (APFS/HFS+
@@ -1318,6 +1338,73 @@ pub fn run(
             total_errors, ok, files.len());
         log(&tx, &format!("\n{}\n", summary));
         let _ = tx.send(Msg::Done(false, summary));
+    }
+}
+
+/// Resolves `p` like `canonicalize`, but also for a path that does not exist
+/// yet: the deepest existing ancestor is canonicalized and the missing tail
+/// appended. Used to compare destinations that will be created by the job.
+fn canonical_lenient(p: &Path) -> PathBuf {
+    use std::path::Component;
+    // Walk the components, canonicalizing as long as the path exists (so
+    // symlinks are resolved before any ".." is applied), and appending the
+    // rest lexically once a component does not exist yet.
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut cur = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => { cur.pop(); }
+            other => {
+                cur.push(other.as_os_str());
+                if let Ok(c) = cur.canonicalize() { cur = c; }
+            }
+        }
+    }
+    cur
+}
+
+/// Refuses a job whose files would land on the source itself: a destination
+/// folder equal to the source or inside it, or two destinations resolving to
+/// the same folder (parallel writes to the same files).
+fn check_destinations(src: &Path, destinations: &[PathBuf], copy_as_subfolder: bool, src_name: &str)
+    -> Result<(), String>
+{
+    let src_c = canonical_lenient(src);
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for dst in destinations {
+        let target = if copy_as_subfolder { dst.join(src_name) } else { dst.clone() };
+        let target_c = canonical_lenient(&target);
+        if target_c == src_c || target_c.starts_with(&src_c) {
+            return Err(format!(
+                "Destination {} would write into the source folder {} — refused.",
+                target.display(), src.display()));
+        }
+        if seen.contains(&target_c) {
+            return Err(format!(
+                "Destination {} is listed twice (same folder) — refused.", target.display()));
+        }
+        seen.push(target_c);
+    }
+    Ok(())
+}
+
+/// True when both paths exist and are the same file on disk.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
     }
 }
 
@@ -2412,6 +2499,13 @@ fn log(tx: &Sender<Msg>, msg: &str) {
 /// (64 MiB per call) or a 4 MiB buffered read/write loop on other platforms.
 /// `wait_if_paused()` is checked between each chunk.
 fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &ByteTally) -> io::Result<u64> {
+    // Last line of defence: opening the destination truncates it, which would
+    // destroy the source if both paths are the same file (hard link, bind
+    // mount, or a path the up-front check did not catch).
+    if is_same_file(src, dst) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            "destination is the source file itself — not overwritten"));
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -2722,12 +2816,19 @@ mod tests {
     /// Runs the engine to completion, answering every prompt with Continue.
     /// Returns (success, summary, full log).
     fn run_job(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo) -> (bool, String, String) {
+        run_job_with(src, dsts, algo, false, || Reply::Continue)
+    }
+
+    /// Same, with the copy-as-subfolder option and the reply given to the
+    /// file-conflict prompt.
+    fn run_job_with(src: &Path, dsts: Vec<PathBuf>, algo: HashAlgo, subfolder: bool,
+                    conflict_reply: fn() -> Reply) -> (bool, String, String) {
         let (tx, rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let pc = PauseCancel::new();
         let src = src.to_path_buf();
         let h = std::thread::spawn(move || {
-            run(src, dsts, algo, false, false, false, false, false,
+            run(src, dsts, algo, false, false, false, false, subfolder,
                 String::new(), String::new(), String::new(),
                 String::new(), String::new(), String::new(),
                 Settings::default(), tx, reply_rx, pc)
@@ -2737,7 +2838,8 @@ mod tests {
             match rx.recv_timeout(Duration::from_secs(60)).expect("engine timed out") {
                 Msg::Log(l) => logs.push_str(&l),
                 Msg::Done(ok, s) => break (ok, s),
-                Msg::NonEmptyDest(_) | Msg::Conflicts(_) | Msg::MhlConflict { .. } => {
+                Msg::Conflicts(_) => reply_tx.send(conflict_reply()).unwrap(),
+                Msg::NonEmptyDest(_) | Msg::MhlConflict { .. } => {
                     reply_tx.send(Reply::Continue).unwrap();
                 }
                 Msg::Progress(..) => {}
@@ -2813,6 +2915,56 @@ mod tests {
         assert!(!ok, "expected failure, got: {summary}\n{logs}");
         assert!(!logs.contains("MISMATCH"), "{logs}");
         assert!(logs.contains("could not be copied"), "{logs}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // M1: copying a card "as subfolder" into its own parent folder targets the
+    // source itself; it must be refused before anything is truncated.
+    #[test]
+    fn destination_equal_to_source_is_refused() {
+        let root = tmp_dir("m1");
+        let src = make_source(&root);
+        let before = fs::read(src.join("c.bin")).unwrap();
+        let (ok, summary, logs) = run_job_with(&src, vec![root.clone()], HashAlgo::Xxh64, true,
+                                               || Reply::Continue);
+        assert!(!ok, "expected refusal, got: {summary}\n{logs}");
+        assert!(summary.contains("refused"), "summary: {summary}");
+        assert_eq!(fs::read(src.join("c.bin")).unwrap(), before, "source was modified");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn destination_inside_source_or_duplicated_is_refused() {
+        let root = tmp_dir("m1b");
+        let src = make_source(&root);
+        let (ok, summary, _) = run_job(&src, vec![src.join("sub")], HashAlgo::None);
+        assert!(!ok && summary.contains("refused"), "inside source: {summary}");
+        let dst = root.join("dst");
+        let (ok, summary, _) = run_job(&src, vec![dst.clone(), root.join("x").join("..").join("dst")],
+                                       HashAlgo::None);
+        assert!(!ok && summary.contains("twice"), "duplicate: {summary}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // M2: "skip and keep" must never overwrite the existing file, even when it
+    // cannot be renamed out of the way (read-only destination folder).
+    #[cfg(unix)]
+    #[test]
+    fn skip_keep_never_overwrites_when_rename_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 { return; } // root ignores permissions
+        let root = tmp_dir("m2");
+        let src = make_source(&root);
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("a.bin"), b"precious existing file").unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).unwrap();
+        let (ok, summary, logs) = run_job_with(&src, vec![dst.clone()], HashAlgo::None, false,
+                                               || Reply::SkipKeep);
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(dst.join("a.bin")).unwrap(), b"precious existing file",
+                   "existing file was overwritten\n{logs}");
+        assert!(!ok, "expected failure, got: {summary}\n{logs}");
         let _ = fs::remove_dir_all(&root);
     }
 }

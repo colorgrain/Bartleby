@@ -1653,51 +1653,8 @@ fn draw_file_icon(
 /// safe filename `_bartleby_icon_{ext}.png` where `ext` is always an ASCII
 /// alphabetic string (file extensions are safe).
 fn get_mime_icon(ext: &str) -> Option<RgbImage> {
-    let mime = ext_to_mime(ext); // e.g. "pdf" → "application/pdf"
-    let tmp  = std::env::temp_dir().join(format!("_bartleby_icon_{}.png", ext));
-
-    // Build the Python script as a String using a raw string literal.
-    // `r#" … "#` : raw string literal — backslashes and single quotes are literal.
-    // Named format args: `{mime}` and `{path}` are substituted at runtime.
-    let script = format!(
-        r#"import gi, sys
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gio, Gtk, GdkPixbuf
-ct = Gio.content_type_from_mime_type('{mime}')
-if not ct: sys.exit(1)
-icon = Gio.content_type_get_icon(ct)
-theme = Gtk.IconTheme.get_default()
-info = theme.lookup_by_gicon(icon, 64, 0)
-if not info: sys.exit(1)
-pb = info.load_icon()
-if not pb: sys.exit(1)
-pb = pb.scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)
-pb.savev('{path}', 'png', [], [])
-"#,
-        mime = mime,
-        path = tmp.to_str().unwrap_or(""), // &Path → &str (fails for non-UTF-8 paths)
-    );
-
-    // Run `python3 -c "<script>"`. `.output()` waits and captures stdout/stderr.
-    // `.ok()?` : None if `python3` is not installed.
-    // Suppress console window on Windows before spawning python3.
-    // python3 is only available on Linux/macOS (the GTK icon API used in the script
-    // requires gi.repository which does not exist on Windows). On Windows this call
-    // will return None (python3 not found or script fails) and draw_file_icon()
-    // will fall through to the coloured rectangle fallback. The no_window() call
-    // here is defensive — it ensures no flash even if python3 is somehow present.
-    let mut py_cmd = Command::new("python3");
-    py_cmd.arg("-c").arg(&script);
-    let out = no_window(&mut py_cmd).output().ok()?;
-
-    // Check both the exit code and that the file was actually created.
-    // `tmp.exists()` verifies the PNG was written (the script may succeed but write nothing).
-    if out.status.success() && tmp.exists() {
-        let rgb = ::image::open(&tmp).ok().map(|i| rgba_to_rgb_white(i.into_rgba8()));
-        let _   = std::fs::remove_file(&tmp); // clean up the temp file
-        return rgb;
-    }
-    None // Python script failed or icon file was not created
+    // Shared, cached, injection-safe lookup (see sidecar::mime_icon).
+    crate::sidecar::mime_icon(ext_to_mime(ext)).map(rgba_to_rgb_white)
 }
 
 /// Maps common file extensions to their canonical MIME type strings.
