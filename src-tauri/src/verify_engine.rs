@@ -268,24 +268,82 @@ struct RawEntry {
 
 fn parse_checksum_file(path: &Path) -> io::Result<Vec<RawEntry>> {
     let text = std::fs::read_to_string(path)?;
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        // Formats: "<hash>  <path>"  |  "<hash> *<path>"  |  "<hash> <path>"
-        let (hash, rel) = if let Some(i) = line.find("  ") {
-            (&line[..i], line[i + 2..].trim())
-        } else if let Some(i) = line.find(" *") {
-            (&line[..i], &line[i + 2..])
-        } else if let Some(i) = line.find(' ') {
-            (&line[..i], line[i + 1..].trim())
-        } else {
-            continue;
-        };
-        if hash.is_empty() || rel.is_empty() { continue; }
-        entries.push(RawEntry { rel_path: rel.to_string(), expected: hash.to_string() });
+    // A UTF-8 BOM (files saved by some Windows tools) would otherwise stick to
+    // the first hash and make the first file a false mismatch.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
+    Ok(text.lines().filter_map(parse_checksum_line).collect())
+}
+
+/// Parses one line of a checksum file. Accepted formats:
+/// - GNU / coreutils: `<hash>  <path>` (text) or `<hash> *<path>` (binary);
+///   the path is taken verbatim after the separator, so names with double
+///   spaces or leading / trailing spaces are kept; a line starting with `\`
+///   has `\\` and `\n` escapes in the path (md5sum convention);
+/// - BSD / `--tag`: `MD5 (<path>) = <hash>`;
+/// - xxhsum's XXH3 prefix: `XXH3_<hash>  <path>`.
+/// Comments (`#`) and blank lines are skipped.
+fn parse_checksum_line(line: &str) -> Option<RawEntry> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.trim().is_empty() || line.starts_with('#') { return None; }
+
+    // BSD style: ALGO (path) = hash
+    if let (Some(open), Some(close)) = (line.find(" ("), line.rfind(") = ")) {
+        let algo = &line[..open];
+        if open < close && !algo.is_empty() && algo.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            let rel  = &line[open + 2..close];
+            let hash = line[close + 4..].trim();
+            if !rel.is_empty() && !hash.is_empty() {
+                return Some(RawEntry { rel_path: rel.to_string(), expected: hash.to_string() });
+            }
+        }
     }
-    Ok(entries)
+
+    // GNU style
+    let (escaped, line) = match line.strip_prefix('\\') {
+        Some(rest) => (true, rest),
+        None       => (false, line),
+    };
+    let sp = line.find(' ')?;
+    let hash = &line[..sp];
+    let rest = &line[sp + 1..];
+    let rel = match rest.chars().next() {
+        Some(' ') | Some('*') => &rest[1..],
+        _ => rest, // tolerate a single space
+    };
+    if hash.is_empty() || rel.is_empty() { return None; }
+    let hash = hash.strip_prefix("XXH3_").unwrap_or(hash);
+    let rel = if escaped {
+        let mut out = String::with_capacity(rel.len());
+        let mut it = rel.chars();
+        while let Some(c) = it.next() {
+            if c == '\\' {
+                match it.next() {
+                    Some('n')  => out.push('\n'),
+                    Some('\\') => out.push('\\'),
+                    Some(o)    => { out.push('\\'); out.push(o); }
+                    None       => out.push('\\'),
+                }
+            } else { out.push(c); }
+        }
+        out
+    } else { rel.to_string() };
+    Some(RawEntry { rel_path: rel, expected: hash.to_string() })
+}
+
+/// Status of an entry whose path leaves the checked folder.
+const REFUSED_PATH: &str = "error: path outside the checked folder";
+
+/// Resolves an entry path (with `/` separators) inside `root`. Absolute paths
+/// and `..` components are refused: a checksum file or MHL must not make
+/// Bartleby read files elsewhere on the disk.
+fn resolve_entry(root: &Path, rel: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let rel_native = PathBuf::from(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if rel_native.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+        Some(root.join(rel_native))
+    } else {
+        None
+    }
 }
 
 fn algo_from_ext(ext: &str) -> HashAlgo {
@@ -327,10 +385,11 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<Pa
             label:    format!("Verifying {} / {}", i + 1, total),
         });
 
-        let rel_native = raw_e.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
-        let abs = root.join(&rel_native);
+        let abs = resolve_entry(root, &raw_e.rel_path);
 
-        let (computed, file_size, status) = match crate::copy_engine::hash_file_verified(&abs, algo, pc) {
+        let (computed, file_size, status) = match abs.as_deref() {
+          None => (String::new(), 0, REFUSED_PATH.to_string()),
+          Some(abs) => match crate::copy_engine::hash_file_verified(abs, algo, pc) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
             Ok(hash) => {
                 let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
@@ -341,6 +400,7 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<Pa
                 (String::new(), 0, "missing".to_string())
             }
             Err(e) => (String::new(), 0, format!("error: {}", e)),
+          },
         };
 
         let _ = win.emit("verify-entry", VerifyEntryEvent {
@@ -519,10 +579,11 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<PauseCa
             label:    format!("Verifying {} / {}", i + 1, total),
         });
 
-        let rel_native = raw.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
-        let abs = root.join(&rel_native);
-
-        let meta_result = std::fs::metadata(&abs);
+        let abs = resolve_entry(root, &raw.rel_path);
+        let meta_result = match abs.as_deref() {
+            Some(p) => std::fs::metadata(p),
+            None    => Err(io::Error::new(io::ErrorKind::PermissionDenied, REFUSED_PATH)),
+        };
         let file_size   = meta_result.as_ref().map(|m| m.len()).unwrap_or(0);
 
         let size_ok = if raw.expected_size > 0 {
@@ -543,10 +604,12 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<PauseCa
                 .unwrap_or(false)
         });
 
-        let (computed, status) = if meta_result.is_err() {
+        let (computed, status) = if abs.is_none() {
+            (String::new(), REFUSED_PATH.to_string())
+        } else if meta_result.is_err() {
             (String::new(), "missing".to_string())
         } else {
-            match crate::copy_engine::hash_file_verified(&abs, raw.algo, pc) {
+            match crate::copy_engine::hash_file_verified(abs.as_deref().unwrap(), raw.algo, pc) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
                 Ok(hash) => {
                     let ok = hash.eq_ignore_ascii_case(&raw.expected_hash);
@@ -780,4 +843,36 @@ tr.row-miss{{background:#fffbf0}}
     writeln!(f, "</body></html>")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(l: &str) -> Option<(String, String)> {
+        parse_checksum_line(l).map(|e| (e.expected, e.rel_path))
+    }
+
+    #[test]
+    fn checksum_line_formats() {
+        let h = "d41d8cd98f00b204e9800998ecf8427e";
+        assert_eq!(p(&format!("{h}  A001/clip.mov")), Some((h.into(), "A001/clip.mov".into())));
+        assert_eq!(p(&format!("{h} *A001/clip.mov")), Some((h.into(), "A001/clip.mov".into())));
+        assert_eq!(p(&format!("{h}  name  with  spaces.mov")), Some((h.into(), "name  with  spaces.mov".into())));
+        assert_eq!(p(&format!("{h}  trailing.mov \r")), Some((h.into(), "trailing.mov ".into())));
+        assert_eq!(p(&format!("MD5 (A001/clip (1).mov) = {h}")), Some((h.into(), "A001/clip (1).mov".into())));
+        assert_eq!(p(&format!("\\{h}  a\\nb\\\\c")), Some((h.into(), "a\nb\\c".into())));
+        assert_eq!(p("XXH3_0123456789abcdef  clip.mov"), Some(("0123456789abcdef".into(), "clip.mov".into())));
+        assert_eq!(p("# FAILED: x"), None);
+        assert_eq!(p("   "), None);
+    }
+
+    #[test]
+    fn entries_cannot_leave_the_folder() {
+        let root = Path::new("/media/card");
+        assert!(resolve_entry(root, "A001/clip.mov").is_some());
+        assert!(resolve_entry(root, "../etc/passwd").is_none());
+        assert!(resolve_entry(root, "A001/../../x").is_none());
+        assert!(resolve_entry(root, "/etc/passwd").is_none());
+    }
 }
