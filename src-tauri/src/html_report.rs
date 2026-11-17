@@ -29,20 +29,8 @@ use crate::settings::Settings;
 
 // ── File type classification (mirrors pdf_report) ────────────────────────────
 
-const IMAGE_EXTS: &[&str] = &[
-    "jpg", "jpeg", "png", "tiff", "tif", "webp", "bmp", "gif",
-    "heic", "heif", "cr2", "cr3", "nef", "arw", "dng",
-];
 
-const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mov", "mxf", "avi", "mkv", "m4v", "wmv", "flv", "webm",
-    "m2ts", "mts", "ts", "r3d", "braw", "mpg", "mpeg",
-];
 
-const AUDIO_EXTS: &[&str] = &[
-    "mp3", "wav", "aac", "flac", "ogg", "m4a", "aif", "aiff",
-    "opus", "wma", "alac",
-];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -134,13 +122,15 @@ fn mime_icon_uri(ext: &str) -> Option<String> {
 }
 
 fn thumb_data_uri(path: &Path, ext: &str) -> Option<String> {
-    if IMAGE_EXTS.contains(&ext) {
+    // One frame of an image sequence: icon only (see SEQUENCE_EXTS).
+    if crate::metadata::SEQUENCE_EXTS.contains(&ext) { return mime_icon_uri(ext); }
+    if crate::metadata::IMAGE_EXTS.contains(&ext) {
         if let Some(uri) = image_thumb_uri(path) { return Some(uri); }
     }
-    if VIDEO_EXTS.contains(&ext) {
+    if crate::metadata::VIDEO_EXTS.contains(&ext) {
         if let Some(uri) = video_thumb_uri(path) { return Some(uri); }
     }
-    if AUDIO_EXTS.contains(&ext) {
+    if crate::metadata::AUDIO_EXTS.contains(&ext) {
         if let Some(uri) = audio_wave_uri(path) { return Some(uri); }
     }
     mime_icon_uri(ext)

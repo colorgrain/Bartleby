@@ -201,53 +201,8 @@ const TEXT_MID:   (f32, f32, f32) = (0.400, 0.420, 0.450);
 // - `&[…]` : a slice — a pointer to the first element + a count of elements.
 // No heap allocation occurs; these slices point directly into the binary.
 
-/// Still image formats directly decodable by the `image` crate.
-const IMAGE_EXTS: &[&str] = &[
-    "jpg", "jpeg",       // JPEG — most common camera format
-    "png",               // Portable Network Graphics
-    "tiff", "tif",       // TIFF — common in professional photography
-    "webp",              // Google WebP
-    "bmp",               // Windows Bitmap
-    "gif",               // Graphics Interchange Format
-    "heic", "heif",      // Apple HEIF/HEIC (iPhone 12+, modern mirrorless)
-    "cr2", "cr3",        // Canon RAW (CR3 since EOS R series)
-    "nef",               // Nikon Electronic Format
-    "arw",               // Sony Alpha RAW
-    "dng",               // Adobe Digital Negative (open RAW container)
-    // Note: most RAW formats below (cr2, cr3, nef, arw, dng) will fail in
-    // `image::open()` and fall through to the OS MIME icon. Only JPEG-based
-    // RAW previews (some DNG files) may succeed.
-];
 
-/// Video formats for which `ffmpeg` frame extraction is attempted.
-const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mov",        // Consumer/prosumer containers (H.264, H.265, ProRes)
-    "mxf",               // Material eXchange Format (broadcast, cinema, Sony XDCAM)
-    "avi",               // Audio Video Interleave (legacy Windows)
-    "mkv",               // Matroska (open container, common online)
-    "m4v",               // iTunes video
-    "wmv",               // Windows Media Video
-    "flv",               // Flash Video (legacy web)
-    "webm",              // WebM (VP8/VP9 for browsers)
-    "m2ts", "mts", "ts", // MPEG-2 Transport Stream (Blu-ray, Sony cameras)
-    "r3d",               // RED Cinema proprietary RAW video
-    "braw",              // Blackmagic RAW (BMPCC cameras)
-    "mpg", "mpeg",       // MPEG-1/2 video (legacy)
-];
 
-/// Audio-only formats for which `ffmpeg showwavespic` is attempted.
-const AUDIO_EXTS: &[&str] = &[
-    "mp3",               // MPEG Audio Layer III
-    "wav",               // Waveform Audio (uncompressed PCM)
-    "aac",               // Advanced Audio Coding
-    "flac",              // Free Lossless Audio Codec
-    "ogg",               // Ogg Vorbis
-    "m4a",               // MPEG-4 Audio (AAC in MP4 container)
-    "aif", "aiff",       // Audio Interchange File Format (Apple/pro audio)
-    "opus",              // Opus (low latency, VoIP)
-    "wma",               // Windows Media Audio
-    "alac",              // Apple Lossless Audio Codec
-];
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -1302,7 +1257,9 @@ fn draw_thumb(
     //   `ext.as_ref()` converts `&String` to `&str` (via the `AsRef<str>` trait).
     //   Since `ext` is already `&str` (from the caller), this is a no-op here,
     //   but it is written defensively for clarity.
-    if IMAGE_EXTS.contains(&ext.as_ref()) {
+    // One frame of an image sequence: icon only (see SEQUENCE_EXTS).
+    let is_sequence_frame = crate::metadata::SEQUENCE_EXTS.contains(&ext.as_ref());
+    if !is_sequence_frame && crate::metadata::IMAGE_EXTS.contains(&ext.as_ref()) {
         // Load as RGBA so we can composite the alpha channel onto the row background.
         // This avoids a black or white halo: transparent pixels take the row colour
         // (light grey for even rows, white for odd rows).
@@ -1318,13 +1275,13 @@ fn draw_thumb(
         }
         // Fall through if the image could not be loaded (e.g. unsupported RAW).
     }
-    if VIDEO_EXTS.contains(&ext.as_ref()) {
+    if !is_sequence_frame && crate::metadata::VIDEO_EXTS.contains(&ext.as_ref()) {
         if let Some(rgb) = video_frame(path) {
             embed_rgb(doc, layer, rgb, None, x, y, TW, TH);
             return;
         }
     }
-    if AUDIO_EXTS.contains(&ext.as_ref()) {
+    if !is_sequence_frame && crate::metadata::AUDIO_EXTS.contains(&ext.as_ref()) {
         if let Some(rgb) = audio_wave(path) {
             embed_rgb(doc, layer, rgb, None, x, y, TW, TH);
             return;

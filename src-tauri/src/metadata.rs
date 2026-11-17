@@ -122,8 +122,16 @@ pub struct FileMeta {
 // The literals "jpg", "jpeg" etc. are `&'static str`: they live in the binary's
 // read-only data section for the entire program lifetime. No heap allocation.
 
+// Single source of truth for file-type detection: metadata extraction and
+// the PDF / HTML thumbnails all use these lists.
+
+/// Image-sequence frame formats (one file per frame): no per-file thumbnail
+/// in the reports — a 20 000-frame ARRIRAW or DPX folder would otherwise
+/// spawn ffmpeg 20 000 times.
+pub(crate) const SEQUENCE_EXTS: &[&str] = &["dpx", "exr", "ari"];
+
 /// Still image formats, including RAW formats from major camera manufacturers.
-const IMAGE_EXTS: &[&str] = &[
+pub(crate) const IMAGE_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "tiff", "tif", "webp", "bmp", "gif", "ico",
     "heic", "heif",     // Apple High Efficiency Image Format (iPhone, modern mirrorless)
     "raw",              // Generic RAW container
@@ -138,7 +146,7 @@ const IMAGE_EXTS: &[&str] = &[
 ];
 
 /// Video formats including broadcast and cinema containers.
-const VIDEO_EXTS: &[&str] = &[
+pub(crate) const VIDEO_EXTS: &[&str] = &[
     "mp4", "mov", "mxf", "avi", "mkv", "m4v", "wmv", "flv", "webm",
     "m2ts", "mts", "ts",    // MPEG-2 Transport Stream (broadcast delivery)
     "mpg", "mpeg",
@@ -151,7 +159,7 @@ const VIDEO_EXTS: &[&str] = &[
 ];
 
 /// Audio-only formats including lossless and professional formats.
-const AUDIO_EXTS: &[&str] = &[
+pub(crate) const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "aac", "flac", "ogg", "m4a",
     "aif", "aiff",      // Audio Interchange File Format (Apple / professional audio)
     "opus", "wma",
@@ -288,7 +296,7 @@ fn run_inform(path: &Path, inform: &str) -> Option<Vec<String>> {
 /// - `.unwrap_or("")` : default if field is absent
 fn query_image(path: &Path, meta: &mut FileMeta) {
     if let Some(fields) = run_inform(path,
-        "Image;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%\\n")
+        "Image;%Width%|%Height%|%Format%|%BitDepth%|%colour_primaries%\\n")
     {
         let w  = clean_number(fields.get(0).map(|s| s.as_str()).unwrap_or(""));
         let h  = clean_number(fields.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -305,7 +313,7 @@ fn query_image(path: &Path, meta: &mut FileMeta) {
     }
     // Fallback: Video section for RAW / HEIC / multi-page TIFF
     if let Some(fields) = run_inform(path,
-        "Video;%Width%|%Height%|%Format%|%BitDepth%|%ColorSpace%\\n")
+        "Video;%Width%|%Height%|%Format%|%BitDepth%|%colour_primaries%\\n")
     {
         let w  = clean_number(fields.get(0).map(|s| s.as_str()).unwrap_or(""));
         let h  = clean_number(fields.get(1).map(|s| s.as_str()).unwrap_or(""));
@@ -487,11 +495,11 @@ fn query_camera(path: &Path, ext: &str, meta: &mut FileMeta) {
     }
     if ext == "mxf" {
         let m = crate::camera_meta::read_mxf(path);
-        if !m.gamut.is_empty()    { meta.color_space = m.gamut; }
-        if !m.transfer.is_empty() { meta.transfer    = m.transfer; }
+        set_label(&mut meta.color_space, m.gamut);
+        set_label(&mut meta.transfer,    m.transfer);
         if let Some(m) = crate::camera_meta::read_sony_xml(path) {
-            if !m.gamut.is_empty()    { meta.color_space = m.gamut; }
-            if !m.transfer.is_empty() { meta.transfer    = m.transfer; }
+            set_label(&mut meta.color_space, m.gamut);
+            set_label(&mut meta.transfer,    m.transfer);
             if !m.camera.is_empty()   { meta.camera      = m.camera; }
         }
     }
@@ -513,6 +521,15 @@ fn query_camera(path: &Path, ext: &str, meta: &mut FileMeta) {
         if meta.color_space.is_empty() { meta.color_space = "Not recorded".into(); }
         if meta.transfer.is_empty()    { meta.transfer    = "Not recorded".into(); }
     }
+}
+
+/// Replaces a gamut / transfer value with one read from the file, except that
+/// an unknown MXF label (shown as a raw "UL …" code) never overwrites a name
+/// already found elsewhere (mediainfo JSON, ARRI LUT metadata…).
+fn set_label(cur: &mut String, new: String) {
+    if new.is_empty() { return; }
+    if new.starts_with("UL ") && !cur.is_empty() && !cur.starts_with("UL ") { return; }
+    *cur = new;
 }
 
 /// Runs `mediainfo --Output=JSON` and parses the result.
@@ -606,7 +623,9 @@ fn video_codec_name(format: &str, profile: &str, commercial: &str, codec_id: &st
     let up = format.to_uppercase();
     if up.starts_with("PRORES") {
         // "ProRes" or, on newer mediainfo versions, possibly "ProRes RAW".
-        let base = format!("ProRes{}", &format["ProRes".len()..]);
+        // `get` instead of slicing: never panics, even if to_uppercase()
+        // changed the byte length of a non-ASCII format string.
+        let base = format!("ProRes{}", format.get("ProRes".len()..).unwrap_or(""));
         let p = profile.trim();
         if p.is_empty() || base.to_uppercase().contains(&p.to_uppercase()) {
             return base;
@@ -1029,6 +1048,18 @@ fn csv_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_ul_never_hides_a_known_name() {
+        let mut v = "ARRI Wide Gamut 3".to_string();
+        set_label(&mut v, "UL 0E06040101010001".into());
+        assert_eq!(v, "ARRI Wide Gamut 3");
+        set_label(&mut v, "ARRI Wide Gamut 4".into());
+        assert_eq!(v, "ARRI Wide Gamut 4");
+        let mut e = String::new();
+        set_label(&mut e, "UL 0E06040101010001".into());
+        assert_eq!(e, "UL 0E06040101010001");
+    }
 
     #[test]
     fn prores_raw_detected_from_fourcc() {

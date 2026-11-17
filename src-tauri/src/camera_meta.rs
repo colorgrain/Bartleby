@@ -118,7 +118,14 @@ pub fn read_sony_xml(mxf: &Path) -> Option<CameraMeta> {
     let xml = ["M01.XML", "M01.xml"].iter()
         .map(|suffix| dir.join(format!("{}{}", stem, suffix)))
         .find(|p| p.is_file())?;
-    let text = std::fs::read_to_string(xml).ok()?;
+    // Bounded read: a real sidecar is a few KB; a huge file that only happens
+    // to carry this name must not be loaded whole (once per rayon thread).
+    let mut buf = Vec::new();
+    {
+        use std::io::Read;
+        std::fs::File::open(&xml).ok()?.take(1024 * 1024).read_to_end(&mut buf).ok()?;
+    }
+    let text = String::from_utf8_lossy(&buf);
     if !text.contains("NonRealTimeMeta") { return None; }
 
     let mut meta = CameraMeta::default();
@@ -220,7 +227,7 @@ pub fn read_r3d(path: &Path) -> Option<CameraMeta> {
             _ => {}
         }
     }
-    if !meta.camera.is_empty() { meta.camera = format!("RED {}", meta.camera); }
+    if !meta.camera.is_empty() { meta.camera = join_make_model("RED", &meta.camera); }
     Some(meta)
 }
 
