@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub const THUMB_TIMEOUT:     Duration = Duration::from_secs(30);
 pub const WAVEFORM_TIMEOUT:  Duration = Duration::from_secs(120);
 pub const MEDIAINFO_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(target_os = "linux")]
 const ICON_TIMEOUT:          Duration = Duration::from_secs(15);
 
 /// Runs `cmd` like `Command::output()`, but kills it after `timeout`

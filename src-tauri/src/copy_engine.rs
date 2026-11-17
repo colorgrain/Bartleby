@@ -1574,6 +1574,12 @@ fn log_failed_copies(tx: &Sender<Msg>, copy_failed: &[String], flush_errors: usi
 /// Returns the hashes and `true` when the buffered fallback was used, so the
 /// caller can warn that the cache-bypass guarantee is weaker for this path.
 fn hash_direct(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>, bytes_out: &ByteTally) -> io::Result<(FileHashes, bool)> {
+    // macOS: F_NOCACHE (set by open_direct) keeps NEW data out of the unified
+    // buffer cache, but pages already cached — e.g. written by Phase 1 — can
+    // still satisfy the read. Invalidate them first so the hash comes from
+    // the disk.
+    #[cfg(target_os = "macos")]
+    purge_cached_pages(path);
     let file = match open_direct(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
@@ -1606,6 +1612,30 @@ fn is_direct_io_unsupported(e: &io::Error) -> bool {
     { e.raw_os_error() == Some(87) } // ERROR_INVALID_PARAMETER
     #[cfg(not(any(unix, windows)))]
     { let _ = e; false }
+}
+
+/// Drops the cached pages of a file on macOS: maps it and calls
+/// msync(MS_INVALIDATE), which discards the cached copies of the mapped range
+/// so later reads go to the storage device. Best effort (errors ignored).
+#[cfg(target_os = "macos")]
+fn purge_cached_pages(path: &Path) {
+    use std::os::unix::io::AsRawFd;
+    let Ok(f) = fs::File::open(path) else { return };
+    let len = match f.metadata() { Ok(m) if m.len() > 0 => m.len() as usize, _ => return };
+    // Map and invalidate in 1 GiB windows to keep the mapping size modest.
+    const WIN: usize = 1 << 30;
+    let mut off = 0usize;
+    while off < len {
+        let n = WIN.min(len - off);
+        unsafe {
+            let p = libc::mmap(std::ptr::null_mut(), n, libc::PROT_READ, libc::MAP_SHARED,
+                               f.as_raw_fd(), off as libc::off_t);
+            if p == libc::MAP_FAILED { return; }
+            libc::msync(p, n, libc::MS_INVALIDATE);
+            libc::munmap(p, n);
+        }
+        off += n;
+    }
 }
 
 // ── Platform-specific file openers ───────────────────────────────────────────
