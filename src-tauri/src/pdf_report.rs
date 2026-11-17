@@ -633,6 +633,15 @@ pub fn write_pdf(
                 } else {
                     layer.use_text(&line1, FS_CELL, Mm(tx), Mm(ty), &font_reg);
                 }
+            } else if !hash_col.is_empty() && idx + 1 == cols.len() && !val.is_empty() {
+                // Hash column: full digest, on two lines / smaller font if needed.
+                let (fs, lines) = layout_hash(val, *w - 1.0, FS_CELL, 3.5);
+                if lines.len() == 1 {
+                    layer.use_text(&lines[0], fs, Mm(tx), Mm(ty), &font_reg);
+                } else {
+                    layer.use_text(&lines[0], fs, Mm(tx), Mm(ty + 2.2), &font_reg);
+                    layer.use_text(&lines[1], fs, Mm(tx), Mm(ty - 1.5), &font_reg);
+                }
             } else if val.contains('\n') {
                 let mut parts = val.splitn(2, '\n');
                 let line1 = parts.next().unwrap_or("");
@@ -640,7 +649,7 @@ pub fn write_pdf(
                 layer.use_text(clip(line1, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty + 2.2), &font_reg);
                 layer.use_text(clip(line2, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty - 1.5), &font_reg);
             } else {
-                layer.use_text(clip(val, *w, FS_CELL), FS_CELL, Mm(tx), Mm(ty), &font_reg);
+                layer.use_text(clip(val, *w - 1.0, FS_CELL), FS_CELL, Mm(tx), Mm(ty), &font_reg);
             }
             tx += w;
         }
@@ -898,6 +907,28 @@ mod tests {
     use super::truncate_path_tail;
 
     #[test]
+    fn hashes_are_never_cut_and_fit_their_column() {
+        use super::{layout_hash, text_width_mm};
+        let c4 = format!("c4{}", "5".repeat(88));
+        let (fs, lines) = layout_hash(&c4, 40.0, 6.5, 3.5);
+        assert_eq!(lines.concat(), c4);
+        assert!(lines.iter().all(|l| text_width_mm(l, fs, false) <= 40.0 + 1e-3));
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e";
+        let (_, lines) = layout_hash(md5, 45.0, 6.5, 3.5);
+        assert_eq!(lines, vec![md5.to_string()]);
+    }
+
+    #[test]
+    fn clip_respects_measured_width() {
+        use super::{clip, text_width_mm};
+        let name = "A001C003_240101_R1AB_EXTRA_LONG_NAME.MXF";
+        let c = clip(name, 30.0, 6.5);
+        assert!(text_width_mm(&c, 6.5, false) <= 30.0 + 1e-3, "{c}");
+        assert!(c.ends_with('…'));
+        assert_eq!(clip("short", 30.0, 6.5), "short");
+    }
+
+    #[test]
     fn truncate_path_tail_handles_multibyte_paths() {
         let p = format!("/Volumes/Tournage été/{}", "é".repeat(300));
         let t = truncate_path_tail(&p, 50);
@@ -966,7 +997,11 @@ fn draw_col_headers(
     // `.zip()` stops at the shorter iterator — both have the same length since they
     // are both derived from the same `settings.col_*` flags.
     for (name, w) in names.iter().zip(widths.iter()) {
-        layer.use_text(*name, FS_HEAD, Mm(tx), Mm(hy), bold);
+        // Shrink a label that is wider than its column (they overlapped the
+        // next label: "Gamma/Log" over "Camera", "Sample Rate" over the hash).
+        let lw = text_width_mm(name, 1.0, true);
+        let fs = if lw > 0.0 { (FS_HEAD).min((w - 1.5) / lw).max(4.5) } else { FS_HEAD };
+        layer.use_text(*name, fs, Mm(tx), Mm(hy), bold);
         // `*name` dereferences `&&str` (reference to a `&'static str`) to `&str`.
         // Rust iterators yield references; `names.iter()` gives `&&str` here.
         tx += w; // `w` is `&f32` from `widths.iter()`; `tx += w` works via Deref
@@ -1819,20 +1854,50 @@ fn set_color(layer: &PdfLayerReference, c: (f32, f32, f32)) {
 /// We need the byte offset (not the char index) because Rust string slicing (`&text[..end]`)
 /// uses byte offsets. Slicing at a char boundary is valid; slicing mid-character panics.
 fn clip(text: &str, col_w: f32, fs: f32) -> String {
-    // Estimate how many characters fit in `col_w` mm.
-    let max_chars = (col_w / (fs * 0.155)) as usize;
-    if text.chars().count() <= max_chars {
-        return text.to_string(); // text fits — return as-is
+    // Measured with the Helvetica AFM widths (text_width_mm), not estimated
+    // per character: digits and capitals are much wider than the average,
+    // so a character count let camera names and hashes overflow the column.
+    if text_width_mm(text, fs, false) <= col_w {
+        return text.to_string();
     }
-    // Find the byte offset of the character at position `max_chars - 1`.
-    // We subtract 1 to leave room for the "…" suffix.
-    let end = text.char_indices()
-        .nth(max_chars.saturating_sub(1)) // `saturating_sub`: clamps to 0 if max_chars == 0
-        .map(|(i, _)| i)                  // extract the byte offset
-        .unwrap_or(text.len());            // fall back to end of string
-    // `&text[..end]` : a &str slice from byte 0 to byte `end` (exclusive).
-    // This is valid UTF-8 because `end` is always a char boundary from `char_indices`.
-    format!("{}…", &text[..end])          // append the ellipsis character U+2026
+    let mut out = String::new();
+    for c in text.chars() {
+        out.push(c);
+        if text_width_mm(&format!("{}…", out), fs, false) > col_w {
+            out.pop();
+            break;
+        }
+    }
+    format!("{}…", out)
+}
+
+/// Longest prefix of `text` (in chars) whose width fits `col_w`.
+fn fit_prefix_len(text: &str, col_w: f32, fs: f32) -> usize {
+    let mut w = String::new();
+    let mut n = 0;
+    for c in text.chars() {
+        w.push(c);
+        if text_width_mm(&w, fs, false) > col_w { break; }
+        n += 1;
+    }
+    n
+}
+
+/// Lays out a hash in its column: one line at `fs` if it fits, otherwise two
+/// halves with the font reduced until both fit (down to `fs_min`). A hash is
+/// never shortened: a cut digest cannot be checked by hand. Returns the font
+/// size and the lines.
+fn layout_hash(hash: &str, col_w: f32, fs: f32, fs_min: f32) -> (f32, Vec<String>) {
+    if text_width_mm(hash, fs, false) <= col_w {
+        return (fs, vec![hash.to_string()]);
+    }
+    let chars: Vec<char> = hash.chars().collect();
+    let mid = (chars.len() + 1) / 2;
+    let l1: String = chars[..mid].iter().collect();
+    let l2: String = chars[mid..].iter().collect();
+    let widest_at_1pt = text_width_mm(&l1, 1.0, false).max(text_width_mm(&l2, 1.0, false));
+    let fit = if widest_at_1pt > 0.0 { col_w / widest_at_1pt } else { fs };
+    (fit.min(fs).max(fs_min), vec![l1, l2])
 }
 
 /// Splits `text` into at most 2 lines for the Name column, returning `(line1, Option<line2>)`.
@@ -1858,38 +1923,19 @@ fn clip(text: &str, col_w: f32, fs: f32) -> String {
 /// `.trim_end()` removes trailing whitespace; `.trim_start()` removes leading whitespace.
 /// We call `.to_string()` to get owned `String` values from the `&str` slices.
 fn wrap_text(text: &str, col_w: f32, fs: f32) -> (String, Option<String>) {
-    // Maximum characters on the first line (fixed threshold for visual consistency).
-    const MAX_NAME_CHARS: usize = 25;
-
-    if text.chars().count() <= MAX_NAME_CHARS {
-        return (text.to_string(), None); // text fits on one line
+    if text_width_mm(text, fs, false) <= col_w {
+        return (text.to_string(), None); // fits on one line
     }
-
-    // Find the byte offset of the character at position MAX_NAME_CHARS.
-    // This is where we will cut the string if no space is found earlier.
-    let boundary = text.char_indices()
-        .nth(MAX_NAME_CHARS)           // the character at position 25 (0-based)
-        .map(|(i, _)| i)               // extract byte offset
-        .unwrap_or(text.len());        // if nth returns None (text is shorter), use the end
-
-    // Try to split at the last space before `boundary`.
-    // `text[..boundary]` : the first `MAX_NAME_CHARS` bytes (valid UTF-8 slice).
-    // `.rfind(' ')` : byte offset of the last space in that slice, or None.
-    // `.unwrap_or(boundary)` : if no space, cut at the char boundary exactly.
-    let split = text[..boundary].rfind(' ').unwrap_or(boundary);
-
-    // Construct the two lines.
+    // Fill line 1 up to the column width (measured), preferring to break at
+    // the last space or underscore inside that span.
+    let n = fit_prefix_len(text, col_w, fs).max(1);
+    let boundary = text.char_indices().nth(n).map(|(i, _)| i).unwrap_or(text.len());
+    let split = text[..boundary].rfind([' ', '_'])
+        .map(|i| if text[i..].starts_with('_') { i + 1 } else { i })
+        .filter(|&i| i > 0)
+        .unwrap_or(boundary);
     let line1 = text[..split].trim_end().to_string();
-    // `text[split..]` : the remainder of the string starting at `split` (byte offset).
-    // `.trim_start()` : remove leading whitespace (the space we split at).
     let rest  = text[split..].trim_start();
-
-    let line2 = if rest.is_empty() {
-        None // Nothing left after trimming — one line is sufficient
-    } else {
-        // Clip line 2 if it is still too long for the column.
-        Some(clip(rest, col_w, fs))
-    };
-
+    let line2 = if rest.is_empty() { None } else { Some(clip(rest, col_w, fs)) };
     (line1, line2)
 }

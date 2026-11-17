@@ -3158,8 +3158,23 @@ mod tests {
         let src = PathBuf::from(std::env::var("BARTLEBY_MHL_SRC").expect("BARTLEBY_MHL_SRC"));
         let dst = PathBuf::from(std::env::var("BARTLEBY_MHL_DST").expect("BARTLEBY_MHL_DST"));
         let algo = HashAlgo::from_str(&std::env::var("BARTLEBY_MHL_ALGO").unwrap_or("xxh64".into()));
-        let (ok, summary, logs) = run_job_full(&src, vec![dst], algo, true, true, || Reply::Continue);
-        println!("{logs}");
+        // BARTLEBY_FIXTURE_REPORTS=1 also writes the CSV / PDF / HTML reports
+        // (to check their layout by eye).
+        let reports = std::env::var("BARTLEBY_FIXTURE_REPORTS").is_ok();
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let h = std::thread::spawn(move || run(src, vec![dst], algo, reports, reports, reports, true, true,
+            String::new(), String::new(), String::new(), String::new(), String::new(), String::new(),
+            Settings::default(), tx, reply_rx, PauseCancel::new()));
+        let (ok, summary) = loop {
+            match rx.recv_timeout(Duration::from_secs(600)).expect("engine timed out") {
+                Msg::Log(l) => print!("{l}"),
+                Msg::Done(ok, s) => break (ok, s),
+                Msg::NonEmptyDest(_) | Msg::Conflicts(_) => reply_tx.send(Reply::Continue).unwrap(),
+                Msg::Progress(..) => {}
+            }
+        };
+        h.join().unwrap();
         assert!(ok, "{summary}");
     }
 }
