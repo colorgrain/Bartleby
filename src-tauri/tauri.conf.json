@@ -9,7 +9,7 @@
     "frontendDist": "../src"
   },
   "app": {
-        "windows": [
+    "windows": [
       {
         "title": "Bartleby",
         "width": 1100,
@@ -42,6 +42,9 @@
     "externalBin": [
       "binaries/bartleby-ffmpeg",
       "binaries/bartleby-mediainfo"
-    ]
+    ],
+    "category": "Video",
+    "shortDescription": "Multi-destination media offload with checksum verification and ASC MHL",
+    "longDescription": "Bartleby copies camera cards and media to several destinations at once, re-reads every copy from disk to verify it (MD5, SHA-1, XXH64, XXH3, XXH128, C4), and writes checksum files, ASC MHL v2.0 histories and CSV / PDF / HTML reports. Built for DITs and data wranglers."
   }
 }

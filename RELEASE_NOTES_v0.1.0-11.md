@@ -147,6 +147,9 @@ the card, and Unicode text in PDF reports.
   sidecars are checked against SHA-256 sums kept in the repository.
 - Arch Linux package: `libnotify` and `python-gobject` listed as optional
   dependencies.
+- AppImage: the app icon (`.DirIcon`) was a broken absolute link, so launchers
+  and AppImage managers showed no icon; the desktop entry now has a category
+  (Audio/Video › Video) and an up-to-date description.
 
 ---
 
