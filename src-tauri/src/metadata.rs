@@ -188,6 +188,27 @@ pub(crate) const AUDIO_EXTS: &[&str] = &[
 /// via `rayon::par_iter()`. It modifies no global state, acquires no locks,
 /// and performs only pure operations — all properties that make it safe in a
 /// multi-threaded context (thread-safe by design).
+/// Key grouping the frames of one image sequence: same folder, same
+/// sequence extension (DPX / EXR / ARRIRAW). `None` for any other file.
+pub fn sequence_key(path: &Path) -> Option<(PathBuf, String)> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if !SEQUENCE_EXTS.contains(&ext.as_str()) { return None; }
+    Some((path.parent()?.to_path_buf(), ext))
+}
+
+/// Metadata of one frame of an image sequence, taking the media fields
+/// (resolution, codec, bit depth, colour…) from another frame of the same
+/// sequence already read with `extract`. Frames of a sequence share them, so
+/// mediainfo runs once per sequence instead of once per frame (a 20 000-frame
+/// ARRIRAW magazine used to spawn it 40 000+ times). Name, type and size are
+/// still read for this frame.
+pub fn extract_like(path: &Path, first_frame: &FileMeta) -> FileMeta {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_type = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+    let size_human = format_size(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+    FileMeta { name, file_type, size_human, ..first_frame.clone() }
+}
+
 pub fn extract(path: &Path) -> FileMeta {
     // `path.file_name()` : returns the last path component (the filename)
     // as an `OsStr`. We convert to String with `to_string_lossy` which handles
@@ -1062,6 +1083,25 @@ fn csv_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_frames_share_media_fields() {
+        let d = std::env::temp_dir().join(format!("bartleby_seq_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(d.join("A_0001.dpx"), vec![0u8; 10]).unwrap();
+        std::fs::write(d.join("A_0002.dpx"), vec![0u8; 2048]).unwrap();
+        assert_eq!(sequence_key(&d.join("A_0001.dpx")), sequence_key(&d.join("A_0002.dpx")));
+        assert!(sequence_key(&d.join("clip.mov")).is_none());
+        let first = FileMeta { name: "A_0001.dpx".into(), resolution: "4096x2160".into(),
+                               bit_depth: "10 bit".into(), ..Default::default() };
+        let m = extract_like(&d.join("A_0002.dpx"), &first);
+        assert_eq!(m.name, "A_0002.dpx");
+        assert_eq!(m.file_type, "DPX");
+        assert_eq!(m.size_human, format_size(2048));
+        assert_eq!(m.resolution, "4096x2160");
+        assert_eq!(m.bit_depth, "10 bit");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn csv_escape_quotes_and_neutralises_formulas() {

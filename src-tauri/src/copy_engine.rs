@@ -1081,8 +1081,30 @@ pub fn run(
         log(&tx, &format!("\n── Metadata {} ─────────────────────────────\n", ts(&start)));
     }
     let meta_entries: Vec<(String, metadata::FileMeta)> = if gen_csv || gen_pdf || gen_html {
-        copied.par_iter()
-            .map(|(src_path, rel_str)| (rel_str.clone(), metadata::extract(src_path)))
+        // Image sequences (DPX / EXR / ARRIRAW): mediainfo on the first frame
+        // of each sequence only; the other frames reuse its media fields.
+        let mut first_of_seq: std::collections::HashMap<(PathBuf, String), usize> =
+            std::collections::HashMap::new();
+        for (i, (src_path, _)) in copied.iter().enumerate() {
+            if let Some(k) = metadata::sequence_key(src_path) { first_of_seq.entry(k).or_insert(i); }
+        }
+        let is_leader = |i: usize, p: &Path| metadata::sequence_key(p)
+            .map_or(true, |k| first_of_seq.get(&k) == Some(&i));
+        let leaders: std::collections::HashMap<usize, metadata::FileMeta> = copied.par_iter().enumerate()
+            .filter(|(i, (p, _))| is_leader(*i, p))
+            .map(|(i, (p, _))| (i, metadata::extract(p)))
+            .collect();
+        copied.iter().enumerate()
+            .map(|(i, (src_path, rel_str))| {
+                let meta = match leaders.get(&i) {
+                    Some(m) => m.clone(),
+                    None => {
+                        let k = metadata::sequence_key(src_path).expect("non-leader is a sequence frame");
+                        metadata::extract_like(src_path, &leaders[&first_of_seq[&k]])
+                    }
+                };
+                (rel_str.clone(), meta)
+            })
             .collect()
     } else {
         copied.iter()
