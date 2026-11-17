@@ -110,8 +110,9 @@ fn name_ul(ul: &[u8; 8], table: &[([u8; 8], &str)]) -> Option<String> {
 
 // ── Sony XML sidecar ──────────────────────────────────────────────────────────
 
-/// Reads the Sony `NonRealTimeMeta` sidecar written next to an MXF clip
-/// (`Clip0054.MXF` → `Clip0054M01.XML`). Returns `None` if there is none.
+/// Reads the Sony `NonRealTimeMeta` sidecar written next to an XDCAM MXF or an
+/// XAVC S / HS MP4 clip (`Clip0054.MXF` → `Clip0054M01.XML`, `C0001.MP4` →
+/// `C0001M01.XML`). Returns `None` if there is none.
 pub fn read_sony_xml(mxf: &Path) -> Option<CameraMeta> {
     let stem = mxf.file_stem()?.to_string_lossy().to_string();
     let dir  = mxf.parent()?;

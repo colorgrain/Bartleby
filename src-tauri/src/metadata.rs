@@ -497,6 +497,10 @@ fn query_camera(path: &Path, ext: &str, meta: &mut FileMeta) {
         let m = crate::camera_meta::read_mxf(path);
         set_label(&mut meta.color_space, m.gamut);
         set_label(&mut meta.transfer,    m.transfer);
+    }
+    // Sony writes the same NonRealTimeMeta sidecar (CLIP0001M01.XML) next to
+    // XDCAM MXF clips and next to XAVC S / HS MP4 clips (FX3, FX30, A7S III…).
+    if ext == "mxf" || ext == "mp4" {
         if let Some(m) = crate::camera_meta::read_sony_xml(path) {
             set_label(&mut meta.color_space, m.gamut);
             set_label(&mut meta.transfer,    m.transfer);
