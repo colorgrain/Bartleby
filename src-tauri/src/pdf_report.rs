@@ -342,10 +342,10 @@ fn draw_location_line(
     *cursor -= 2.5;
     let ty = *cursor - 3.2;
     set_color(layer, TEXT_DARK);
-    layer.use_text("Location:", 8.0, Mm(TEXT_X), Mm(ty), font_bold);
+    crate::pdf_fonts::put_text(&layer, "Location:", 8.0, Mm(TEXT_X), Mm(ty), font_bold);
     let lw = text_width_mm("Location:", 8.0, true);
     fill_rect(layer, TEXT_X, ty - 1.0, TEXT_X + lw, ty - 0.5, 0.0, 0.0, 0.0);
-    layer.use_text(location, FS, Mm(TEXT_X + lw + 2.0), Mm(ty), font_reg);
+    crate::pdf_fonts::put_text(&layer, location, FS, Mm(TEXT_X + lw + 2.0), Mm(ty), font_reg);
     *cursor -= 4.5 + 3.0;
 }
 
@@ -383,7 +383,7 @@ fn draw_rich_comment(
     // "Comments:" label — bold, dark, underlined
     let label_ty = *cursor - 3.2;
     set_color(layer, TEXT_DARK);
-    layer.use_text("Comments:", LABEL_FS, Mm(TEXT_X), Mm(label_ty), font_bold);
+    crate::pdf_fonts::put_text(&layer, "Comments:", LABEL_FS, Mm(TEXT_X), Mm(label_ty), font_bold);
     let label_w = text_width_mm("Comments:", LABEL_FS, true);
     fill_rect(layer, TEXT_X, label_ty - 1.0, TEXT_X + label_w, label_ty - 0.5, 0.0, 0.0, 0.0);
     *cursor -= LINE_H;
@@ -403,7 +403,7 @@ fn draw_rich_comment(
                 (false, true)  => font_ital,
                 (false, false) => font_reg,
             };
-            layer.use_text(&word.text, FS, Mm(tx), Mm(ty), font);
+            crate::pdf_fonts::put_text(&layer, &word.text, FS, Mm(tx), Mm(ty), font);
             tx += text_width_mm(&word.text, FS, word.bold);
         }
         *cursor -= LINE_H;
@@ -468,14 +468,30 @@ pub fn write_pdf(
     // provide without embedding. Using them keeps the file size small (no font data).
     //
     // `doc.add_builtin_font(BuiltinFont::Helvetica)` returns `IndirectFontRef`,
-    // which is printpdf's handle to a font resource. It is used in `layer.use_text(…)`.
+    // which is printpdf's handle to a font resource. It is used in `crate::pdf_fonts::put_text(&layer, …)`.
     //
     // `.unwrap()` is safe here: built-in fonts always load successfully. A failure
     // would indicate a bug in the printpdf library itself.
-    let font_reg     = doc.add_builtin_font(BuiltinFont::Helvetica).unwrap();
-    let font_bold    = doc.add_builtin_font(BuiltinFont::HelveticaBold).unwrap();
-    let font_ital    = doc.add_builtin_font(BuiltinFont::HelveticaOblique).unwrap();
-    let font_bold_it = doc.add_builtin_font(BuiltinFont::HelveticaBoldOblique).unwrap();
+    // Every string the report may draw, so pdf_fonts can look for system
+    // fallback fonts only when a character is missing from Noto Sans.
+    let mut texts: Vec<String> = vec![
+        report_name.to_string(), src_path.to_string_lossy().to_string(),
+        comment.to_string(), location.to_string(),
+        settings.company.clone(), settings.contact_name.clone(), settings.email.clone(),
+        settings.phone.clone(), settings.project_title.clone(),
+    ];
+    texts.extend(destinations.iter().map(|d| d.to_string_lossy().to_string()));
+    for (m, hash, rel, _) in entries {
+        texts.extend([rel.clone(), hash.clone(), m.name.clone(), m.codec.clone(), m.camera.clone(),
+                      m.color_space.clone(), m.transfer.clone(), m.white_balance.clone()]);
+    }
+    let text_refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
+    let (fonts, _fonts_guard) = crate::pdf_fonts::install(&doc, &text_refs)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("PDF fonts: {}", e)))?;
+    let font_reg     = fonts.regular;
+    let font_bold    = fonts.bold;
+    let font_ital    = fonts.italic;
+    let font_bold_it = fonts.bold_italic;
 
     // ── Page index ─────────────────────────────────────────────────────────────
     // `pages` accumulates (PdfPageIndex, PdfLayerIndex) pairs as new pages are added.
@@ -612,7 +628,7 @@ pub fn write_pdf(
                 None        => (0.5_f32,  0.5_f32,  0.5_f32),
             };
             layer.set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
-            layer.use_text(label, FS_CELL + 1.0, Mm(tx + 1.0), Mm(ty), &font_reg);
+            crate::pdf_fonts::put_text(&layer, label, FS_CELL + 1.0, Mm(tx + 1.0), Mm(ty), &font_reg);
             set_color(&layer, TEXT_DARK);
             tx += 10.0;
         }
@@ -625,31 +641,31 @@ pub fn write_pdf(
             if idx == 0 && settings.col_name {
                 let (line1, line2) = wrap_text(val, *w - 1.0, FS_CELL);
                 if line2.is_some() {
-                    layer.use_text(&line1, FS_CELL, Mm(tx), Mm(ty + 2.2), &font_reg);
-                    layer.use_text(
+                    crate::pdf_fonts::put_text(&layer, &line1, FS_CELL, Mm(tx), Mm(ty + 2.2), &font_reg);
+                    crate::pdf_fonts::put_text(&layer, 
                         line2.as_deref().unwrap_or(""),
                         FS_CELL, Mm(tx), Mm(ty - 1.5), &font_reg,
                     );
                 } else {
-                    layer.use_text(&line1, FS_CELL, Mm(tx), Mm(ty), &font_reg);
+                    crate::pdf_fonts::put_text(&layer, &line1, FS_CELL, Mm(tx), Mm(ty), &font_reg);
                 }
             } else if !hash_col.is_empty() && idx + 1 == cols.len() && !val.is_empty() {
                 // Hash column: full digest, on two lines / smaller font if needed.
                 let (fs, lines) = layout_hash(val, *w - 1.0, FS_CELL, 3.5);
                 if lines.len() == 1 {
-                    layer.use_text(&lines[0], fs, Mm(tx), Mm(ty), &font_reg);
+                    crate::pdf_fonts::put_text(&layer, &lines[0], fs, Mm(tx), Mm(ty), &font_reg);
                 } else {
-                    layer.use_text(&lines[0], fs, Mm(tx), Mm(ty + 2.2), &font_reg);
-                    layer.use_text(&lines[1], fs, Mm(tx), Mm(ty - 1.5), &font_reg);
+                    crate::pdf_fonts::put_text(&layer, &lines[0], fs, Mm(tx), Mm(ty + 2.2), &font_reg);
+                    crate::pdf_fonts::put_text(&layer, &lines[1], fs, Mm(tx), Mm(ty - 1.5), &font_reg);
                 }
             } else if val.contains('\n') {
                 let mut parts = val.splitn(2, '\n');
                 let line1 = parts.next().unwrap_or("");
                 let line2 = parts.next().unwrap_or("");
-                layer.use_text(clip(line1, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty + 2.2), &font_reg);
-                layer.use_text(clip(line2, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty - 1.5), &font_reg);
+                crate::pdf_fonts::put_text(&layer, clip(line1, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty + 2.2), &font_reg);
+                crate::pdf_fonts::put_text(&layer, clip(line2, *w, FS_CELL - 0.5), FS_CELL - 0.5, Mm(tx), Mm(ty - 1.5), &font_reg);
             } else {
-                layer.use_text(clip(val, *w - 1.0, FS_CELL), FS_CELL, Mm(tx), Mm(ty), &font_reg);
+                crate::pdf_fonts::put_text(&layer, clip(val, *w - 1.0, FS_CELL), FS_CELL, Mm(tx), Mm(ty), &font_reg);
             }
             tx += w;
         }
@@ -768,7 +784,7 @@ fn draw_header(
 
     if !settings.company.is_empty() {
         set_color(layer, TEXT_DARK);
-        layer.use_text(settings.company.to_uppercase(), FS_TITLE, Mm(M), Mm(ly), bold);
+        crate::pdf_fonts::put_text(&layer, settings.company.to_uppercase(), FS_TITLE, Mm(M), Mm(ly), bold);
         ly -= 5.0;
     }
 
@@ -785,7 +801,7 @@ fn draw_header(
 
     if !contact_line.is_empty() {
         set_color(layer, TEXT_MID);
-        layer.use_text(&contact_line, FS_SUB, Mm(M), Mm(ly), reg);
+        crate::pdf_fonts::put_text(&layer, &contact_line, FS_SUB, Mm(M), Mm(ly), reg);
         ly -= 4.5;
     }
 
@@ -803,7 +819,7 @@ fn draw_header(
         set_color(layer, (0.0, 0.0, 0.0));
         let text_w = text_width_mm(&project_text, FS_TITLE + 2.0, true);
         let cx = ((W / 2.0) - text_w / 2.0).max(M);
-        layer.use_text(&project_text, FS_TITLE + 2.0, Mm(cx), Mm(cy), bold);
+        crate::pdf_fonts::put_text(&layer, &project_text, FS_TITLE + 2.0, Mm(cx), Mm(cy), bold);
         // Manual underline: thin filled rect 0.8 mm below baseline
         fill_rect(layer, cx, cy - 1.3, (cx + text_w).min(W - M), cy - 0.7, 0.0, 0.0, 0.0);
         cy -= 7.0;
@@ -814,7 +830,7 @@ fn draw_header(
     set_color(layer, TEXT_DARK);
     let rw = text_width_mm(&report_line, FS_TITLE - 3.0, true);
     let rx = ((W / 2.0) - rw / 2.0).max(M);
-    layer.use_text(&report_line, FS_TITLE - 3.0, Mm(rx), Mm(cy), bold);
+    crate::pdf_fonts::put_text(&layer, &report_line, FS_TITLE - 3.0, Mm(rx), Mm(cy), bold);
     cy -= 5.5;
 
     // "Source : /path – size" — regular, centered
@@ -827,7 +843,7 @@ fn draw_header(
     set_color(layer, TEXT_MID);
     let sw = text_width_mm(&src_line, FS_SUB, false);
     let sx = ((W / 2.0) - sw / 2.0).max(M);
-    layer.use_text(&src_line, FS_SUB, Mm(sx), Mm(cy), reg);
+    crate::pdf_fonts::put_text(&layer, &src_line, FS_SUB, Mm(sx), Mm(cy), reg);
     cy -= 4.5;
 
     // Destinations — regular, centered, slightly smaller
@@ -838,7 +854,7 @@ fn draw_header(
         let dst_line = format!("Destination {} : {}", i + 1, dst_disp);
         let dw = text_width_mm(&dst_line, FS_SUB - 0.5, false);
         let dx = ((W / 2.0) - dw / 2.0).max(M);
-        layer.use_text(&dst_line, FS_SUB - 0.5, Mm(dx), Mm(cy), reg);
+        crate::pdf_fonts::put_text(&layer, &dst_line, FS_SUB - 0.5, Mm(dx), Mm(cy), reg);
         cy -= 4.0;
     }
 
@@ -849,6 +865,9 @@ fn draw_header(
 /// using the official Adobe AFM glyph-width table (units/1000 em).
 /// Fallback for non-ASCII characters: 600 units (reasonable Latin average).
 fn text_width_mm(text: &str, font_size_pt: f32, bold: bool) -> f32 {
+    // The real fonts of the report (Noto Sans + fallbacks) when installed;
+    // the Helvetica AFM table below otherwise (unit tests).
+    if let Some(w) = crate::pdf_fonts::width_mm(text, font_size_pt, bold) { return w; }
     // AFM widths for codepoints 32–126 (space → tilde), Helvetica regular then bold.
     #[rustfmt::skip]
     const REG: [u16; 95] = [
@@ -974,7 +993,7 @@ fn draw_col_headers(
     let hy = *cursor - 5.5;
 
     // "Preview" label for the thumbnail column — always present.
-    layer.use_text("Preview", FS_HEAD, Mm(M + 1.5), Mm(hy), bold);
+    crate::pdf_fonts::put_text(&layer, "Preview", FS_HEAD, Mm(M + 1.5), Mm(hy), bold);
 
     // Data column labels: retrieved from `active_col_names` in the same order
     // as the column widths from `col_widths`. Both functions check the same
@@ -989,7 +1008,7 @@ fn draw_col_headers(
     if has_status {
         // "St." is the abbreviated header for the "Status" column.
         // The full word "Status" would not fit in the 10 mm column at 7 pt.
-        layer.use_text("St.", FS_HEAD, Mm(tx + 2.0), Mm(hy), bold);
+        crate::pdf_fonts::put_text(&layer, "St.", FS_HEAD, Mm(tx + 2.0), Mm(hy), bold);
         tx += 10.0; // advance past the 10 mm status column
     }
 
@@ -1001,7 +1020,7 @@ fn draw_col_headers(
         // next label: "Gamma/Log" over "Camera", "Sample Rate" over the hash).
         let lw = text_width_mm(name, 1.0, true);
         let fs = if lw > 0.0 { (FS_HEAD).min((w - 1.5) / lw).max(4.5) } else { FS_HEAD };
-        layer.use_text(*name, fs, Mm(tx), Mm(hy), bold);
+        crate::pdf_fonts::put_text(&layer, *name, fs, Mm(tx), Mm(hy), bold);
         // `*name` dereferences `&&str` (reference to a `&'static str`) to `&str`.
         // Rust iterators yield references; `names.iter()` gives `&&str` here.
         tx += w; // `w` is `&f32` from `widths.iter()`; `tx += w` works via Deref
@@ -1040,19 +1059,19 @@ fn draw_footer(
     // `W / 2.0 - 8.0` : rough centring. A "Page X / Y" string is ~16 mm wide
     // at 6 pt, so we start 8 mm left of centre.
     let page_str = format!("Page {} / {}", page_num, page_total);
-    layer.use_text(&page_str, 6.0, Mm(W / 2.0 - 8.0), Mm(M - 1.5), reg);
+    crate::pdf_fonts::put_text(&layer, &page_str, 6.0, Mm(W / 2.0 - 8.0), Mm(M - 1.5), reg);
 
     // App credit: 4 mm below the page number, slightly smaller font.
     // Positioned at `M - 5.5` mm (close to the bottom margin).
     let made_str = format!("Made with Bartleby {}", crate::VERSION);
-    layer.use_text(&made_str, 5.5, Mm(W / 2.0 - 14.0), Mm(M - 5.5), reg);
+    crate::pdf_fonts::put_text(&layer, &made_str, 5.5, Mm(W / 2.0 - 14.0), Mm(M - 5.5), reg);
 
     // File count: right-aligned, shown only on the last page.
     // `page_num == page_total` : equality check. In Rust, `==` is used for all types;
     // there is no `===` (strict equality) — Rust has no implicit type coercion.
     if page_num == page_total {
         let count_str = format!("{} file(s)", file_count);
-        layer.use_text(&count_str, 6.0, Mm(W - M - 20.0), Mm(M - 1.5), reg);
+        crate::pdf_fonts::put_text(&layer, &count_str, 6.0, Mm(W - M - 20.0), Mm(M - 1.5), reg);
     }
 }
 
@@ -1245,7 +1264,7 @@ fn draw_dir_separator(
     draw_folder_icon_pdf(layer, icon_cx, icon_cy, accent1.0, accent1.1, accent1.2);
     set_color(layer, TEXT_DARK);
     let ty = cursor - RH / 2.0 - 1.5;
-    layer.use_text(dir, FS_HEAD + 0.5, Mm(M + TW + 3.0), Mm(ty), bold);
+    crate::pdf_fonts::put_text(&layer, dir, FS_HEAD + 0.5, Mm(M + TW + 3.0), Mm(ty), bold);
 }
 
 // ── Thumbnail dispatch ────────────────────────────────────────────────────────

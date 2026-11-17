@@ -61,6 +61,7 @@ src-tauri/src/          ← Rust backend
   metadata.rs           ← mediainfo CLI wrapper + CSV generation
   camera_meta.rs        ← Vendor camera metadata mediainfo misses: MXF gamut/log labels, Sony XML sidecar, R3D header
   pdf_report.rs         ← printpdf PDF visual report generator
+  pdf_fonts.rs          ← PDF fonts: embedded Noto Sans (fonts/, OFL) + system TrueType fallbacks, '?' last
   html_report.rs        ← Self-contained HTML report (inlined CSS + base64 thumbnails)
   sidecar.rs            ← Resolves bundled bartleby-ffmpeg / bartleby-mediainfo, PATH fallback
   settings.rs           ← Settings struct: JSON persistence via serde
@@ -147,6 +148,7 @@ The version must be kept in sync in `src-tauri/Cargo.toml`, `src-tauri/tauri.con
 ## Key constraints
 
 - **Folder picker is JS-only**: calling `tauri_plugin_dialog`'s `pick_folder` from a Rust worker thread deadlocks on Linux (GTK main thread conflict). The dialog is always opened from JS via `window.__TAURI__.dialog.open()`.
+- **PDF text goes through `pdf_fonts::put_text`**, never `layer.use_text` directly: it splits text into runs per font (Noto Sans, then a system TrueType fallback for CJK/Arabic…, else `?`). printpdf embeds only TrueType (`glyf`) fonts — CFF fonts like Noto Sans CJK cannot be fallbacks — and does no shaping or right-to-left layout (Arabic/Hebrew letters show unjoined, in logical order).
 - **`printpdf` version is pinned at `0.7`**: the polygon/line API changed across minor versions. Upgrading requires careful review of all drawing calls in `pdf_report.rs`.
 - **Missing sidecars degrade gracefully**: without mediainfo, metadata fields are empty strings; without ffmpeg, video/audio thumbnails fall back to icons. Copy and verification are unaffected.
 - **Linux notifications**: `tauri_plugin_notification` can fail silently on Cinnamon. The `send_notification` command uses `notify-send` CLI directly on Linux.

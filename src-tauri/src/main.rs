@@ -137,6 +137,7 @@ mod copy_engine;   // Phase 1 (streaming copy) + Phase 2 (hash verify) + Phase 3
 mod camera_meta;   // Vendor camera metadata: MXF colour labels, Sony XML sidecar, R3D header
 mod metadata;      // mediainfo-based technical metadata extraction + CSV writing
 mod pdf_report;    // A4 landscape PDF report generation (thumbnails, table, header)
+mod pdf_fonts;     // PDF fonts: embedded Noto Sans + system fallbacks, per-character runs
 mod html_report;   // Self-contained HTML report generation (thumbnails, table, header)
 mod mhl_report;    // ASC MHL v2.0 hash-list generator (one file per destination)
 mod settings;      // User preferences: JSON persistence, defaults, typed fields

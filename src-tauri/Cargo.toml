@@ -265,7 +265,11 @@ roxmltree = "0.19"
 #   • `add_rect` was removed in 0.6 → replaced with add_polygon
 #   • `add_shape(Line)` was renamed/restructured
 #   • PaintMode and WindingOrder moved to printpdf::path in 0.7
-printpdf = "0.7"
+# font_subsetting: embedded fonts (Noto Sans, system fallbacks) are reduced to
+# the glyphs a report uses, so each PDF stays small. See src/pdf_fonts.rs.
+printpdf = { version = "0.7", features = ["font_subsetting"] }
+# Glyph coverage and advance widths of the PDF fonts (same version printpdf uses).
+ttf-parser = "0.19"
 
 # ── image: image loading and resizing ────────────────────────────────────────
 #
