@@ -15,7 +15,8 @@ $ErrorActionPreference = "Stop"
 #   sidecars-ffmpeg-<ffmpeg version>-mediainfo-<mediainfo version>
 # To update the sidecars: publish a NEW release named the same way with the 8
 # bartleby-* files (+ SHA256SUMS), change RELEASE_URL here AND in
-# download_sidecars.ps1, delete src-tauri/binaries/bartleby-* locally, re-run.
+# download_sidecars.sh, replace scripts/sidecars.sha256 with the new
+# SHA256SUMS, and re-run (outdated local binaries are replaced automatically).
 # Keep the old release: older Bartleby commits still download from it.
 # Sources used for 9.0.2 / 26.10: see CLAUDE.md, section "Sidecars".
 $RELEASE_URL = "https://github.com/colorgrain/Bartleby/releases/download/sidecars-ffmpeg-9.0.2-mediainfo-26.10"
@@ -25,14 +26,35 @@ New-Item -ItemType Directory -Force -Path $BINARIES_DIR | Out-Null
 Write-Host "Output: $BINARIES_DIR"
 Write-Host ""
 
+# Expected SHA-256 of every sidecar, versioned in the repository: a replaced
+# or corrupted release asset, or a truncated earlier download, is rejected.
+$SUMS_FILE = Join-Path $PSScriptRoot "sidecars.sha256"
+$SUMS = @{}
+Get-Content $SUMS_FILE | ForEach-Object {
+    $parts = $_ -split '\s+', 2
+    if ($parts.Count -eq 2) { $SUMS[$parts[1].Trim()] = $parts[0].ToLower() }
+}
+
 function Download-Sidecar($name) {
     $dest = Join-Path $BINARIES_DIR $name
+    $expected = $SUMS[$name]
+    if (-not $expected) { throw "No checksum for $name in $SUMS_FILE" }
     if (Test-Path $dest) {
-        Write-Host "  (skip) $name already present"
-        return
+        if ((Get-FileHash -Algorithm SHA256 $dest).Hash.ToLower() -eq $expected) {
+            Write-Host "  (ok)   $name already present"
+            return
+        }
+        Write-Host "  (stale) $name differs from the expected version - downloading again"
     }
     Write-Host "  v $name"
-    Invoke-WebRequest -Uri "$RELEASE_URL/$name" -OutFile $dest -UseBasicParsing
+    $part = "$dest.part"
+    Invoke-WebRequest -Uri "$RELEASE_URL/$name" -OutFile $part -UseBasicParsing
+    $got = (Get-FileHash -Algorithm SHA256 $part).Hash.ToLower()
+    if ($got -ne $expected) {
+        Remove-Item -Force $part
+        throw "SHA-256 mismatch for $name`n  expected $expected`n  got      $got"
+    }
+    Move-Item -Force $part $dest
 }
 
 Download-Sidecar "bartleby-ffmpeg-x86_64-pc-windows-msvc.exe"

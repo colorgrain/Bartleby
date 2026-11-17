@@ -12,11 +12,13 @@
 pkgname=bartleby
 pkgver=0.1.0.10
 pkgrel=1
-pkgdesc="Multi-destination file copy with MD5/XXH3 integrity verification and metadata reports"
+pkgdesc="Multi-destination media offload with checksum verification, ASC MHL and metadata reports"
 arch=('x86_64')
 url="https://github.com/colorgrain/Bartleby"
 license=('GPL-3.0-only')
 depends=('webkit2gtk-4.1' 'gtk3')
+optdepends=('libnotify: desktop notification when a copy ends (notify-send)'
+            'python-gobject: file-type icons in the PDF/HTML reports')
 makedepends=('rust' 'nodejs' 'npm' 'librsvg' 'patchelf')
 options=('!lto')
 source=()
@@ -29,8 +31,8 @@ _root() {
 build() {
   cd "$(_root)"
   npm install
-  # Override target-cpu=native from .cargo/cargo_config.toml so the binary
-  # runs on any x86_64 CPU, not just the machine that built it.
+  # Empty RUSTFLAGS: never let a local `target-cpu=native` (see the inactive
+  # src-tauri/.cargo/cargo_config.toml) leak into a distributed binary.
   RUSTFLAGS="" npm run tauri build -- --bundles deb
 }
 

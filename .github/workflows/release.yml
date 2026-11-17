@@ -36,8 +36,25 @@ jobs:
 
     steps:
       # ── Source ───────────────────────────────────────────────────────────────
+      # A manual run must build the requested tag, not the branch it was
+      # started from (otherwise the release gets binaries of another commit).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # The tag must match the app version, or the installers would carry a
+      # different version number than the release they are attached to.
+      - name: Check tag matches app version
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          WANT="${TAG#v}"
+          CARGO=$(sed -n 's/^version *= *"\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          CONF=$(sed -n 's/.*"version" *: *"\(.*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)
+          echo "tag=$WANT  Cargo.toml=$CARGO  tauri.conf.json=$CONF"
+          [ "$CARGO" = "$WANT" ] && [ "$CONF" = "$WANT" ] || { echo "::error::version mismatch"; exit 1; }
 
       # ── Rust ─────────────────────────────────────────────────────────────────
       - name: Install Rust stable
@@ -93,9 +110,14 @@ jobs:
             macOS-ARM64) T=aarch64-apple-darwin;     X= ;;
             macOS-X64)   T=x86_64-apple-darwin;      X= ;;
             Windows-X64) T=x86_64-pc-windows-msvc;   X=.exe ;;
+            *) echo "::error::unsupported runner $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
           esac
-          src-tauri/binaries/bartleby-ffmpeg-$T$X -hide_banner -version | head -1
-          src-tauri/binaries/bartleby-mediainfo-$T$X --version | tail -1
+          FF=$(src-tauri/binaries/bartleby-ffmpeg-$T$X -hide_banner -version | head -1)
+          MI=$(src-tauri/binaries/bartleby-mediainfo-$T$X --version | tail -1)
+          echo "$FF"; echo "$MI"
+          # Fail on a stale or wrong binary instead of only printing it.
+          echo "$FF" | grep -q "version 9\.0\.2" || { echo "::error::unexpected ffmpeg version"; exit 1; }
+          echo "$MI" | grep -q "v26\.10"         || { echo "::error::unexpected MediaInfo version"; exit 1; }
 
       # ── npm ───────────────────────────────────────────────────────────────
       - name: npm install
@@ -143,21 +165,29 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download sidecar binaries
         run: bash scripts/download_sidecars.sh
 
+      # The tag goes through an environment variable, never interpolated
+      # into the script text (a crafted manual input could inject commands).
       - name: Resolve package version
         id: ver
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           RAW="${TAG#v}"
           echo "pkgver=${RAW//-/.}" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set PKGBUILD version
+        env:
+          PKGVER: ${{ steps.ver.outputs.pkgver }}
         run: |
-          sed -i "s/^pkgver=.*/pkgver=${{ steps.ver.outputs.pkgver }}/" packaging/arch/PKGBUILD
+          case "$PKGVER" in *[!0-9.]*|"") echo "::error::bad version '$PKGVER'"; exit 1 ;; esac
+          sed -i "s/^pkgver=.*/pkgver=$PKGVER/" packaging/arch/PKGBUILD
 
       # makepkg refuses to run as root, so build as an unprivileged user.
       # `su - builder` (with the dash) resets $HOME to /home/builder — without
@@ -172,9 +202,11 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKGVER:   ${{ steps.ver.outputs.pkgver }}
+          TAG:      ${{ steps.ver.outputs.tag }}
+          REPO:     ${{ github.repository }}
         run: |
           pkg=$(find packaging/arch -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
-          asset="Bartleby_${{ steps.ver.outputs.pkgver }}_x86_64.pkg.tar.zst"
+          asset="Bartleby_${PKGVER}_x86_64.pkg.tar.zst"
           mv "$pkg" "$asset"
-          gh release upload "${{ steps.ver.outputs.tag }}" "$asset" \
-            --clobber --repo "${{ github.repository }}"
+          gh release upload "$TAG" "$asset" --clobber --repo "$REPO"
