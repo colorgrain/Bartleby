@@ -1610,9 +1610,13 @@ function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
             if (copyInProgress) return;
 
             var droppedPath = paths[0];
-            // The drop position is in physical pixels; the layout is in CSS
-            // pixels (they differ on HiDPI / scaled displays).
-            var dpr   = window.devicePixelRatio || 1;
+            // Tauri labels the drop position "physical", but only WebView2
+            // (Windows) really reports physical pixels. On Linux, wry passes
+            // the GTK widget coordinates, which are already CSS/logical pixels
+            // (dividing them by the scale factor shifted drops into the wrong
+            // column on scaled displays). Convert on Windows only.
+            var isWindows = /Windows/i.test(navigator.userAgent);
+            var dpr   = isWindows ? (window.devicePixelRatio || 1) : 1;
             var dropY = event.payload.position ? event.payload.position.y / dpr : 0;
 
             var jobCards  = Array.from(jobsContainer.querySelectorAll('.job-group'));
