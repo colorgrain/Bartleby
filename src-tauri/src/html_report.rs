@@ -72,7 +72,19 @@ fn ext_to_mime(ext: &str) -> &str {
 
 // ── Thumbnail generation ──────────────────────────────────────────────────────
 
+/// Thumbnails are shown at 76×48 CSS pixels: 152×96 keeps them sharp on
+/// HiDPI screens while weighing about 2.5× less than the 224×144 frames.
+const THUMB_MAX: (u32, u32) = (152, 96);
+
 fn rgba_to_png_uri(img: RgbaImage) -> Option<String> {
+    rgba_to_png_uri_max(img, THUMB_MAX)
+}
+
+/// Encodes as an inline PNG, downscaled (aspect kept) to fit `max`.
+fn rgba_to_png_uri_max(img: RgbaImage, max: (u32, u32)) -> Option<String> {
+    let img = if img.width() > max.0 || img.height() > max.1 {
+        ::image::DynamicImage::ImageRgba8(img).resize(max.0, max.1, FilterType::Triangle).into_rgba8()
+    } else { img };
     let mut buf: Vec<u8> = Vec::new();
     ::image::DynamicImage::ImageRgba8(img)
         .write_to(&mut std::io::Cursor::new(&mut buf), ::image::ImageFormat::Png)
@@ -155,7 +167,9 @@ fn logo_data_uri(path: &str) -> Option<String> {
     if path.is_empty() { return None; }
     let p = Path::new(path);
     let rgba = ::image::open(p).ok()?.into_rgba8();
-    rgba_to_png_uri(rgba)
+    // Shown at most 110×36 CSS px: a full-resolution logo would be embedded
+    // as is (often several MB) in every report.
+    rgba_to_png_uri_max(rgba, (330, 108))
 }
 
 // ── Hex colour parser ─────────────────────────────────────────────────────────
