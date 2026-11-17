@@ -2211,7 +2211,14 @@ fn generate_reports(
 
         // Checksum files (.md5, .xxh3, MHL) always land directly in dst.
         // Report files (CSV, PDF, HTML) go into an optional subfolder.
-        let report_dir_buf: PathBuf = if report_subfolder.is_empty() {
+        // The report subfolder must stay inside the destination.
+        let subfolder_ok = Path::new(report_subfolder).components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !report_subfolder.is_empty() && !subfolder_ok {
+            log(tx, &format!("△  report subfolder {:?} ignored (must be a plain relative folder)\n",
+                report_subfolder));
+        }
+        let report_dir_buf: PathBuf = if report_subfolder.is_empty() || !subfolder_ok {
             dst.to_path_buf()
         } else {
             let sub = dst.join(report_subfolder);

@@ -1847,7 +1847,43 @@ function confirmDialog(title, message, confirmLabel, cancelLabel, danger) {
 function joinPath(a, b) {
     if (!a) return b || '';
     if (!b) return a;
-    return a.replace(/[\/\\]+$/, '') + '/' + b.replace(/^[\/\\]+/, '');
+    // Keep the separator style of the base path (Windows "D:\\Shoot").
+    var sep = (a.indexOf('\\') >= 0 && a.indexOf('/') < 0) ? '\\' : '/';
+    if (sep === '\\') b = b.replace(/\//g, '\\');
+    return a.replace(/[\/\\]+$/, '') + sep + b.replace(/^[\/\\]+/, '');
+}
+
+// Characters refused by exFAT / NTFS / FAT32 (and control characters), which
+// can come from a project title, a variable or a date format such as %H:%M.
+function sanitizeSegment(seg) {
+    return String(seg).replace(/[<>:"|?*\x00-\x1f]/g, '_')
+                      .replace(/[. ]+$/, '');   // Windows drops trailing dots/spaces
+}
+
+// Replace %name tokens: the LONGEST known variable name wins (so %cam_a and
+// %cam2 work, not only letters), case-insensitive. Unknown tokens are kept
+// literally and reported through onUnknown.
+function replaceVars(text, vars, onUnknown) {
+    var names = Object.keys(vars).sort(function(x, y) { return y.length - x.length; });
+    var out = '';
+    var i = 0;
+    while (i < text.length) {
+        if (text[i] !== '%') { out += text[i++]; continue; }
+        var rest = text.slice(i + 1).toLowerCase();
+        var hit = null;
+        for (var k = 0; k < names.length; k++) {
+            if (names[k] && rest.indexOf(names[k]) === 0) { hit = names[k]; break; }
+        }
+        if (hit !== null) {
+            out += onUnknown(text.substr(i, hit.length + 1), vars[hit]);
+            i += hit.length + 1;
+        } else {
+            var m = /^[A-Za-z][A-Za-z0-9_-]*/.exec(text.slice(i + 1));
+            if (m) { out += onUnknown('%' + m[0], null); i += m[0].length + 1; }
+            else   { out += '%'; i++; }
+        }
+    }
+    return out;
 }
 
 function baseName(p) {
@@ -1861,7 +1897,10 @@ function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 // Minimal strftime — supports the tokens a DIT folder name realistically uses.
 function formatStrftime(fmt) {
     var d = new Date();
-    var doy = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+    // Day of year computed on UTC dates: local midnight-to-midnight spans are
+    // 23 or 25 h around DST changes, which shifted %j by one between 00:00 and 01:00.
+    var doy = Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) -
+                          Date.UTC(d.getFullYear(), 0, 0)) / 86400000);
     var map = {
         Y: '' + d.getFullYear(),
         y: ('' + d.getFullYear()).slice(-2),
@@ -1911,17 +1950,18 @@ function resolveTemplate(job) {
         vars[fv.name.toLowerCase()] = jobvars[fv.name.toLowerCase()] || '';
     });
 
-    var out = tmpl.replace(/%([A-Za-z]+)/g, function(m, name) {
-        var key = name.toLowerCase();
-        if (key in vars) {
-            if (!vars[key]) { bad.push('%' + name); return '%' + name; }
-            return vars[key];
-        }
-        bad.push('%' + name);
-        return '%' + name;
+    var out = replaceVars(tmpl, vars, function(tok, value) {
+        if (!value) { bad.push(tok); return tok; }
+        return value;
     });
 
     out = out.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
+    // Per folder level: no characters the destination file system refuses,
+    // and no "." / ".." (the folder must stay inside the destination).
+    out = out.split('/').filter(function(seg) {
+        if (seg === '.' || seg === '..') { bad.push(seg); return false; }
+        return true;
+    }).map(sanitizeSegment).filter(function(seg) { return seg !== ''; }).join('/');
     bad = bad.filter(function(v, i) { return bad.indexOf(v) === i; });
     return { path: out, bad: bad };
 }
@@ -1947,11 +1987,10 @@ function resolveNameTemplate(template, srcName) {
         project: (currentSettings && currentSettings.project_title) || '',
         source:  srcName || '',
     };
-    var out = raw.replace(/%([A-Za-z]+)/g, function(m, name) {
-        var key = name.toLowerCase();
-        return (key in vars) ? vars[key] : m;
+    var out = replaceVars(raw, vars, function(tok, value) {
+        return value === null ? tok : value;
     });
-    return out.replace(/[\/\\]/g, '_').trim();
+    return sanitizeSegment(out.replace(/[\/\\]/g, '_').trim());
 }
 
 // ── Job selection ─────────────────────────────────────────────────────────────
