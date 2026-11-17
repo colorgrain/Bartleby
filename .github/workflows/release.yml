@@ -238,7 +238,11 @@ jobs:
           TAG:      ${{ steps.ver.outputs.tag }}
           REPO:     ${{ github.repository }}
         run: |
-          pkg=$(find packaging/arch -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
+          # makepkg may also build a bartleby-debug package (symbols only):
+          # pick the application package and make sure it holds the binary.
+          pkg=$(find packaging/arch -maxdepth 1 -name 'bartleby-*.pkg.tar.zst' ! -name 'bartleby-debug-*' -print -quit)
+          [ -n "$pkg" ] || { echo "::error::no application package built"; ls packaging/arch; exit 1; }
+          tar --zstd -tf "$pkg" | grep -qx 'usr/bin/bartleby' || { echo "::error::$pkg has no usr/bin/bartleby"; exit 1; }
           asset="Bartleby_${PKGVER}_x86_64.pkg.tar.zst"
           mv "$pkg" "$asset"
           gh release upload "$TAG" "$asset" --clobber --repo "$REPO"

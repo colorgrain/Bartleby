@@ -20,7 +20,7 @@ depends=('webkit2gtk-4.1' 'gtk3')
 optdepends=('libnotify: desktop notification when a copy ends (notify-send)'
             'python-gobject: file-type icons in the PDF/HTML reports')
 makedepends=('rust' 'nodejs' 'npm' 'librsvg' 'patchelf')
-options=('!lto')
+options=('!lto' '!debug')  # no separate bartleby-debug package
 source=()
 
 _root() {
