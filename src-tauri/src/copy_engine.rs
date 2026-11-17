@@ -1105,6 +1105,7 @@ pub fn run(
                          &comment, &mhl_comment, &location,
                          &checksum_name_override, &report_name_override, &report_subfolder,
                          &settings);
+        restore_dir_mtimes(&src, &destinations, copy_as_subfolder, &src_name);
         log_failed_copies(&tx, &copy_failed, flush_errors);
         let _ = tx.send(Msg::Progress(1.0, "Done".into(), None));
         let total_errors = copy_errors + flush_errors;
@@ -1323,6 +1324,7 @@ pub fn run(
         }
         log(&tx, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     }
+    restore_dir_mtimes(&src, &destinations, copy_as_subfolder, &src_name);
     log_failed_copies(&tx, &copy_failed, flush_errors);
 
     let total_errors = copy_errors + flush_errors + verify_errors;
@@ -1430,6 +1432,55 @@ pub(crate) fn hash_file_verified(path: &Path, algo: HashAlgo, pc: &Arc<PauseCanc
 /// so the next prompt gets the user's answer to THAT prompt.
 fn drain_replies(reply_rx: &std::sync::mpsc::Receiver<Reply>) {
     while reply_rx.try_recv().is_ok() {}
+}
+
+/// Gives every copied folder the modification date of its source folder
+/// (files already keep theirs). Done at the very end of the job: creating
+/// files, checksum files or the ascmhl/ history inside a folder updates its
+/// date. The destination root itself is left alone when copying without a
+/// subfolder (it is the user's folder, not a copy of the source).
+fn restore_dir_mtimes(src: &Path, destinations: &[PathBuf], copy_as_subfolder: bool, src_name: &str) {
+    let mut dirs: Vec<PathBuf> = collect_dirs(src).unwrap_or_default();
+    if copy_as_subfolder { dirs.push(src.to_path_buf()); }
+    for src_dir in &dirs {
+        let Some(mtime) = fs::metadata(src_dir).ok().and_then(|m| m.modified().ok()) else { continue };
+        let rel = src_dir.strip_prefix(src).unwrap_or(Path::new(""));
+        for dst in destinations {
+            let base = if copy_as_subfolder { dst.join(src_name) } else { dst.clone() };
+            let dst_dir = if rel.as_os_str().is_empty() { base } else { base.join(rel) };
+            if dst_dir.is_dir() { set_dir_mtime(&dst_dir, mtime); }
+        }
+    }
+}
+
+/// Sets a directory's modification time (best effort).
+fn set_dir_mtime(path: &Path, mtime: std::time::SystemTime) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path_c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return };
+        let dur = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let times = [
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+            libc::timespec { tv_sec: dur.as_secs() as libc::time_t, tv_nsec: dur.subsec_nanos() as _ },
+        ];
+        unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0); }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A directory handle needs FILE_FLAG_BACKUP_SEMANTICS; FILE_WRITE_ATTRIBUTES
+        // is enough to change its times.
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        if let Ok(f) = fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+        {
+            let _ = f.set_modified(mtime);
+        }
+    }
 }
 
 /// Logs the files that could not be copied and any destination flush failure,
@@ -3152,6 +3203,24 @@ mod tests {
         fs::set_permissions(src.join("a.bin"), fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!ok, "{logs}");
         assert_eq!(fs::read(dst.join("a.bin")).unwrap(), b"older good copy");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn folder_dates_are_preserved() {
+        let root = tmp_dir("dirtime");
+        let src = make_source(&root);
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        set_dir_mtime(&src.join("sub"), old);
+        set_dir_mtime(&src, old + std::time::Duration::from_secs(60));
+        let dst = root.join("dst");
+        let (ok, summary, _) = run_job_full(&src, vec![dst.clone()], HashAlgo::Xxh64, true, true,
+                                            || Reply::Continue);
+        assert!(ok, "{summary}");
+        let mt = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(mt(&dst.join("A001").join("sub")), old);
+        // The card folder holds the new ascmhl/ generation, yet keeps its date.
+        assert_eq!(mt(&dst.join("A001")), old + std::time::Duration::from_secs(60));
         let _ = fs::remove_dir_all(&root);
     }
 
