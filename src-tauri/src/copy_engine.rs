@@ -1635,6 +1635,50 @@ fn open_direct(path: &Path) -> io::Result<fs::File> {
 // return value. The reader thread terminates cleanly (drop closes the sender,
 // which causes the hasher's recv() to return Err, exiting its loop).
 
+/// Page-aligned (4096 bytes), zero-initialised heap buffer. Direct I/O
+/// (O_DIRECT, FILE_FLAG_NO_BUFFERING) needs sector-aligned memory; zeroing
+/// it means no slice ever points at uninitialised bytes.
+struct AlignedBuf {
+    ptr:    *mut u8,
+    layout: std::alloc::Layout,
+}
+// SAFETY: the buffer is plain owned memory; it is used by one thread at a
+// time (moved through the channels, never shared).
+unsafe impl Send for AlignedBuf {}
+impl AlignedBuf {
+    fn new(len: usize) -> io::Result<Self> {
+        let layout = std::alloc::Layout::from_size_align(len, 4096)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        // SAFETY: layout has a non-zero size (HASH_CHUNK).
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            return Err(io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"));
+        }
+        Ok(Self { ptr, layout })
+    }
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: ptr is valid for layout.size() initialised bytes.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.layout.size()) }
+    }
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and &mut self guarantees exclusive access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+    }
+}
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new` with this exact layout.
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) }
+    }
+}
+
+/// Message of the read → hash pipeline. `Eof` is explicit so a reader that
+/// dies mid-file can never be mistaken for a complete read.
+enum Chunk {
+    Data(AlignedBuf, usize),
+    Eof,
+}
+
 /// Hashes a file using a read/hash pipeline with native platform MD5.
 ///
 /// ## Architecture — pipelined read/hash
@@ -1667,123 +1711,59 @@ fn hash_buffered_file(
     use twox_hash::xxhash64::Hasher    as Xxh64Hasher;
     use std::sync::mpsc;
 
-    // Pipeline channel — bounded to 2 slots (one being hashed, one being read)
-    let (tx, rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(2);
+    // Pipeline: the reader thread fills page-aligned buffers and sends them;
+    // the hasher hashes each one and hands it back for reuse. Three buffers
+    // allocated once per file: one being read, one queued, one being hashed.
+    // No per-chunk allocation and no copy of the data.
+    let (tx, rx) = mpsc::sync_channel::<io::Result<Chunk>>(2);
+    let (free_tx, free_rx) = mpsc::channel::<AlignedBuf>();
+    for _ in 0..3 { let _ = free_tx.send(AlignedBuf::new(HASH_CHUNK)?); }
 
-    // Reader thread — reads chunks and sends them through the channel
     std::thread::spawn(move || {
         let mut file = file;
         // FILE_FLAG_NO_BUFFERING requires every ReadFile call to request a
-        // multiple of the sector size. For intermediate chunks this is already
-        // satisfied (HASH_CHUNK = 4 MiB is a multiple of 4096). For the last
-        // partial chunk we compute a padded request size and discard the surplus
-        // after ReadFile returns the actual byte count.
+        // multiple of the sector size. Intermediate chunks already are
+        // (HASH_CHUNK = 4 MiB); the last one is padded up to the next 4096-byte
+        // boundary and ReadFile returns the actual byte count.
         #[cfg(target_os = "windows")]
-        let win_file_size: u64 = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let win_file_size: u64 = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => { tx.send(Err(e)).ok(); return; }
+        };
         #[cfg(target_os = "windows")]
         let mut win_bytes_read: u64 = 0;
         loop {
-            // ── Aligned buffer allocation via aligned-vec ────────────────────
-            //
-            // O_DIRECT requires buffers aligned to the disk sector size.
-            // Standard Vec<u8> aligns to 8–16 bytes — insufficient.
-            //
-            // aligned_vec::AVec<u8> guarantees configurable alignment.
-            // ALIGN = 4096 bytes (one memory page) satisfies all sector sizes:
-            //   512-byte sectors  (legacy HDD, some SSD)  ✓
-            //   4096-byte sectors (modern NVMe, AF drives) ✓
-            //
-            // AVec<u8> is passed directly to io::Read::read() via DerefMut<[u8]>
-            // — zero-copy: data goes straight from kernel to this aligned buffer,
-            // then straight to the hash function. No intermediate copies.
-            //
-            // The buffer is allocated fresh each chunk. For the double-buffer
-            // optimisation (allocate once, reuse), see the future roadmap.
-            // ── 4096-byte aligned buffer via posix_memalign ─────────────────
-            // O_DIRECT requires buffers aligned to the disk sector size.
-            // posix_memalign() guarantees 4096-byte alignment on Linux/macOS.
-            // On Windows we use _aligned_malloc(). On other platforms we use
-            // a standard Vec<u8> (O_DIRECT is Linux/macOS/Windows specific).
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let (ptr, buf_len) = {
-                let mut ptr: *mut libc::c_void = std::ptr::null_mut();
-                let ret = unsafe {
-                    libc::posix_memalign(&mut ptr, 4096, HASH_CHUNK)
-                };
-                if ret != 0 || ptr.is_null() {
-                    tx.send(Err(io::Error::from_raw_os_error(ret))).ok();
-                    break;
-                }
-                (ptr, HASH_CHUNK)
-            };
+            // A closed free list means the hasher stopped (error): just exit.
+            let Ok(mut buf) = free_rx.recv() else { break };
 
-            // Windows: compute sector-padded size for FILE_FLAG_NO_BUFFERING.
-            // For full chunks: wanted == HASH_CHUNK (already sector-aligned), padded == HASH_CHUNK.
-            // For the last partial chunk: padded rounds up to the next 4096-byte boundary.
-            // ReadFile succeeds (aligned request) and returns the actual file byte count in `n`.
             #[cfg(target_os = "windows")]
-            let (ptr, buf_len) = {
-                let wanted = (win_file_size - win_bytes_read).min(HASH_CHUNK as u64) as usize;
-                if wanted == 0 { break; } // all file bytes accounted for
-                let padded = (wanted + 4095) & !4095;
-                let layout = std::alloc::Layout::from_size_align(padded, 4096).unwrap();
-                let raw = unsafe { std::alloc::alloc_zeroed(layout) };
-                if raw.is_null() {
-                    tx.send(Err(io::Error::new(io::ErrorKind::OutOfMemory, "alloc failed"))).ok();
-                    break;
+            let req = {
+                let wanted = win_file_size.saturating_sub(win_bytes_read).min(HASH_CHUNK as u64) as usize;
+                if wanted == 0 { tx.send(Ok(Chunk::Eof)).ok(); break; }
+                (wanted + 4095) & !4095
+            };
+            #[cfg(not(target_os = "windows"))]
+            let req = HASH_CHUNK;
+
+            // Retry reads interrupted by a signal (EINTR): not an error.
+            let read_result = loop {
+                match io::Read::read(&mut file, &mut buf.as_mut_slice()[..req]) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    r => break r,
                 }
-                (raw, padded)
             };
-
-            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            let (ptr, buf_len) = {
-                let layout = std::alloc::Layout::from_size_align(HASH_CHUNK, 4096).unwrap();
-                let raw = unsafe { std::alloc::alloc_zeroed(layout) };
-                if raw.is_null() {
-                    tx.send(Err(io::Error::new(io::ErrorKind::OutOfMemory, "alloc failed"))).ok();
-                    break;
-                }
-                (raw, HASH_CHUNK)
-            };
-
-            // Wrap the raw pointer in a slice for reading.
-            // SAFETY: ptr is valid, aligned, and exclusively owned by this thread.
-            let buf_slice = unsafe {
-                std::slice::from_raw_parts_mut(ptr as *mut u8, buf_len)
-            };
-
-            let read_result = io::Read::read(&mut file, buf_slice);
-
             match read_result {
-                Ok(0) => {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    unsafe { libc::free(ptr); }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
-                    break; // EOF
-                }
+                Ok(0) => { tx.send(Ok(Chunk::Eof)).ok(); break; }
                 Ok(n) => {
-                    let chunk = buf_slice[..n].to_vec();
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    unsafe { libc::free(ptr); }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
                     #[cfg(target_os = "windows")]
                     { win_bytes_read += n as u64; }
-                    if tx.send(Ok(chunk)).is_err() { break; }
+                    if tx.send(Ok(Chunk::Data(buf, n))).is_err() { break; }
                     if pc.wait_if_paused().is_err() {
                         tx.send(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))).ok();
                         break;
                     }
                 }
-                Err(e) => {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    unsafe { libc::free(ptr); }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(buf_len, 4096).unwrap()); }
-                    tx.send(Err(e)).ok();
-                    break;
-                }
+                Err(e) => { tx.send(Err(e)).ok(); break; }
             }
         }
     });
@@ -1809,17 +1789,23 @@ fn hash_buffered_file(
 
     loop {
         match rx.recv() {
-            Ok(Ok(chunk)) => {
-                if let Some(ref mut h) = md5_h    { h.update(&chunk)?; }
-                if let Some(ref mut h) = sha1_h   { sha1::Digest::update(h, &chunk); }
-                if let Some(ref mut h) = xxh64_h  { std::hash::Hasher::write(h, &chunk); }
-                if let Some(ref mut h) = xxh3_h   { std::hash::Hasher::write(h, &chunk); }
-                if let Some(ref mut h) = xxh128_h { h.write(&chunk); }
-                if let Some(ref mut h) = sha512_h { sha2::Digest::update(h, &chunk); }
-                bytes_out.add(chunk.len() as u64);
+            Ok(Ok(Chunk::Data(buf, n))) => {
+                let chunk = &buf.as_slice()[..n];
+                if let Some(ref mut h) = md5_h    { h.update(chunk)?; }
+                if let Some(ref mut h) = sha1_h   { sha1::Digest::update(h, chunk); }
+                if let Some(ref mut h) = xxh64_h  { std::hash::Hasher::write(h, chunk); }
+                if let Some(ref mut h) = xxh3_h   { std::hash::Hasher::write(h, chunk); }
+                if let Some(ref mut h) = xxh128_h { h.write(chunk); }
+                if let Some(ref mut h) = sha512_h { sha2::Digest::update(h, chunk); }
+                bytes_out.add(n as u64);
+                let _ = free_tx.send(buf); // back to the reader
             }
+            Ok(Ok(Chunk::Eof)) => break,
             Ok(Err(e)) => return Err(e),
-            Err(_)     => break,
+            // The reader ended without an explicit end-of-file (it panicked):
+            // the digest would cover only part of the file — fail.
+            Err(_) => return Err(io::Error::new(io::ErrorKind::Other,
+                "read pipeline stopped before the end of the file")),
         }
     }
 
