@@ -27,10 +27,15 @@ jobs:
     strategy:
       fail-fast: false  # if one platform fails, the others keep running
       matrix:
-        platform:
-          - ubuntu-22.04
-          - windows-latest
-          - macos-latest
+        include:
+          - platform: ubuntu-22.04
+            args: ''
+          - platform: windows-latest
+            args: ''
+          # One universal .app / .dmg (Apple Silicon + Intel) instead of an
+          # arm64-only build: macos-latest runners are arm64.
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
 
     runs-on: ${{ matrix.platform }}
 
@@ -59,6 +64,9 @@ jobs:
       # ── Rust ─────────────────────────────────────────────────────────────────
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both macOS architectures are needed for the universal build.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust build cache
         uses: swatinem/rust-cache@v2
@@ -90,6 +98,29 @@ jobs:
       - name: Download sidecar binaries (Linux / macOS)
         if: runner.os != 'Windows'
         run: bash scripts/download_sidecars.sh
+
+      # A universal Tauri build looks for sidecars named
+      # *-universal-apple-darwin: merge the two architectures with lipo
+      # (a binary that is already universal is copied as is).
+      - name: Universal macOS sidecars
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd src-tauri/binaries
+          for tool in bartleby-ffmpeg bartleby-mediainfo; do
+            arm="$tool-aarch64-apple-darwin"; x86="$tool-x86_64-apple-darwin"
+            out="$tool-universal-apple-darwin"
+            archs=$(lipo -archs "$arm")
+            if [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]; then
+              cp "$arm" "$out"
+            else
+              lipo -create -output "$out" "$x86" "$arm"
+            fi
+            chmod +x "$out"
+            echo "$out: $(lipo -archs "$out")"
+            lipo -archs "$out" | grep -q x86_64 && lipo -archs "$out" | grep -q arm64 \
+              || { echo "::error::$out is not universal"; exit 1; }
+          done
 
       - name: Download sidecar binaries (Windows)
         if: runner.os == 'Windows'
@@ -139,6 +170,7 @@ jobs:
           releaseName:  'Bartleby ${{ github.event.inputs.tag || github.ref_name }}'
           releaseDraft: true
           prerelease:   false
+          args:         ${{ matrix.args }}
 
   # Arch Linux / pacman package. Built separately from the tauri-action matrix
   # above because it needs to run inside an Arch container to produce a native
