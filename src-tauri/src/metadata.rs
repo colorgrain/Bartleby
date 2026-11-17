@@ -767,7 +767,10 @@ pub fn write_csv(
     } else {
         dst_dir.join(format!("{}_{}.csv", report_name, timestamp))
     };
-    let mut f = std::fs::File::create(path)?;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    // UTF-8 byte-order mark: without it Excel reads the file as ANSI and
+    // shows accented names (and the "–" below) as mojibake.
+    write!(f, "\u{FEFF}")?;
 
     write_custom_header_csv(&mut f, settings, src_path, src_total_bytes, destinations, comment, location)?;
 
@@ -797,7 +800,7 @@ pub fn write_csv(
     for (meta, hash, ok) in entries {
         let mut cols: Vec<String> = Vec::new();
         if settings.col_name        { cols.push(csv_escape(&meta.name)); }
-        if settings.col_type        { cols.push(meta.file_type.clone()); }
+        if settings.col_type        { cols.push(csv_escape(&meta.file_type)); }
         if settings.col_size        { cols.push(meta.size_human.clone()); }
         if settings.col_resolution  { cols.push(meta.resolution.clone()); }
         if settings.col_codec       { cols.push(csv_escape(&meta.codec)); }
@@ -824,7 +827,7 @@ pub fn write_csv(
 }
 
 fn write_custom_header_csv(
-    f:               &mut std::fs::File,
+    f:               &mut impl std::io::Write,
     s:               &Settings,
     src_path:        &Path,
     src_total_bytes: u64,
@@ -852,7 +855,7 @@ fn write_custom_header_csv(
     }
 
     let size_str = format_size(src_total_bytes);
-    writeln!(f, "# Source,{} – {}", csv_escape(&src_path.to_string_lossy()), size_str)?;
+    writeln!(f, "# Source,{}", csv_escape(&format!("{} – {}", src_path.to_string_lossy(), size_str)))?;
     for (i, dst) in destinations.iter().enumerate() {
         writeln!(f, "# Destination {},{}",
             i + 1, csv_escape(&dst.to_string_lossy()))?;
@@ -1037,17 +1040,36 @@ fn friendly_codec(raw: &str) -> String {
 /// - `"Studio, Nord"` → `"\"Studio, Nord\""` (comma → needs quoting)
 /// - `"Title: \"Film\""` → `"\"Title: \"\"Film\"\""` (quotes → doubled)
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    // Spreadsheet formula injection: a file or folder name starting with
+    // = + - @ (or tab / CR) would be evaluated by Excel / LibreOffice.
+    // A leading apostrophe makes it plain text. Plain numbers are kept.
+    let s: std::borrow::Cow<str> = match s.chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r') if s.parse::<f64>().is_err() =>
+            format!("'{}", s).into(),
+        _ => s.into(),
+    };
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         // `.replace('"', "\"\"")` : each " is replaced by ""
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
-        s.to_string()
+        s.into_owned()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_escape_quotes_and_neutralises_formulas() {
+        assert_eq!(csv_escape("A001,C002"), "\"A001,C002\"");
+        assert_eq!(csv_escape(r#"say "hi""#), r#""say ""hi""""#);
+        assert_eq!(csv_escape("a\rb"), "\"a\rb\"");
+        assert_eq!(csv_escape("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
+        assert_eq!(csv_escape("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(csv_escape("-3.5"), "-3.5");
+        assert_eq!(csv_escape("clip.mov"), "clip.mov");
+    }
 
     #[test]
     fn unknown_ul_never_hides_a_known_name() {
