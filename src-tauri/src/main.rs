@@ -91,6 +91,7 @@
 // the full path regardless.
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 //              ─────  ───
 //              │      └─ "multiple producer / single consumer" channels (std::sync::mpsc)
 //              └─ Mutual exclusion lock — only one thread can hold a Mutex at a time.
@@ -184,6 +185,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Rust defaults to private visibility for items not marked `pub`. `AppState` is
 /// only ever constructed in `main()` and referenced via `State<AppState>` in the
 /// same file. No other crate or module needs to name its type directly.
+/// Clears an "engine running" flag when dropped — including when the engine
+/// thread panics — so a crash never blocks every later copy / verification.
+struct ClearOnDrop(Arc<AtomicBool>);
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
 struct AppState {
     /// The live user preferences, protected by a mutex.
     ///
@@ -201,6 +209,13 @@ struct AppState {
     /// Pause/cancel handle for an active verification.
     /// `None` when no verification is running.
     verify_pc: Mutex<Option<Arc<copy_engine::PauseCancel>>>,
+
+    /// True while a copy engine thread runs. A second `start_copy` would
+    /// replace `pause_cancel` / `reply_tx` and leave the first copy without
+    /// any way to pause, cancel or answer its prompts.
+    copy_running: Arc<AtomicBool>,
+    /// Same for the verification engine.
+    verify_running: Arc<AtomicBool>,
 
     /// One-shot reply channel for interactive copy-engine prompts.
     ///
@@ -292,6 +307,8 @@ fn main() {
             verify_pc: Mutex::new(None),
             // No copy is running yet, so no reply channel exists.
             reply_tx: Mutex::new(None),
+            copy_running: Arc::new(AtomicBool::new(false)),
+            verify_running: Arc::new(AtomicBool::new(false)),
         })
 
         // Register all Tauri commands callable from JavaScript.
@@ -698,6 +715,12 @@ fn start_copy(
     if args.destinations.is_empty() {
         return Err("Please add at least one destination.".into());
     }
+    // One copy at a time (see AppState::copy_running). Cleared by the copy
+    // thread when copy_engine::run returns.
+    if state.copy_running.swap(true, Ordering::SeqCst) {
+        return Err("A copy is already running.".into());
+    }
+    let copy_running = ClearOnDrop(state.copy_running.clone());
 
     // ── Path conversion: String → PathBuf ─────────────────────────────────────
     // JavaScript sends paths as plain strings (e.g. "/media/usb/SHOOT_2024").
@@ -798,6 +821,7 @@ fn start_copy(
             reply_rx,
             pc,
         );
+        drop(copy_running); // also cleared if run() panics (Drop runs on unwind)
         // When run() returns, `tx` is dropped. This signals the forwarding thread
         // that no more messages will arrive (Receiver::recv() will return Err).
     });
@@ -951,8 +975,12 @@ fn prompt_reply(state: State<AppState>, reply: String) -> Result<(), String> {
     // Acquire the lock, get an Option<&SyncSender<Reply>>, and send if Some.
     // `let _ = tx.send(r)` discards the Result — a send failure here means the
     // copy thread has already finished (Reply would be spurious anyway).
+    // try_send, never send: this command runs on the main thread, and a reply
+    // with no prompt waiting (double click, late answer) would block it on the
+    // full channel and freeze the UI. Such a stale reply is dropped; the
+    // engine also drains leftovers before each prompt.
     if let Some(tx) = state.reply_tx.lock().unwrap().as_ref() {
-        let _ = tx.send(r);
+        let _ = tx.try_send(r);
     }
     Ok(())
 }
@@ -982,6 +1010,11 @@ fn resume_copy(window: WebviewWindow, state: State<AppState>) {
 fn cancel_copy(state: State<AppState>) {
     if let Some(ref pc) = *state.pause_cancel.lock().unwrap() {
         pc.cancel();
+    }
+    // If the engine is waiting on a prompt, it does not look at `pc`:
+    // answer the prompt with Cancel so it stops right away.
+    if let Some(tx) = state.reply_tx.lock().unwrap().as_ref() {
+        let _ = tx.try_send(copy_engine::Reply::Cancel);
     }
 }
 
@@ -1574,7 +1607,9 @@ fn vol_label_type(_path: &str) -> (String, String) {
     (String::new(), "Unknown".to_string())
 }
 
-#[tauri::command]
+// async: runs off the main thread — walking a large card or calling
+// lsblk / statvfs on a slow drive must not freeze the UI.
+#[tauri::command(async)]
 fn get_volume_info(path: String) -> VolumeInfo {
     let none = VolumeInfo { ok: false, label: String::new(), media_type: String::new(), total_bytes: 0, free_bytes: 0 };
     let probe = match nearest_existing(&path) { Some(p) => p, None => return none };
@@ -1583,7 +1618,9 @@ fn get_volume_info(path: String) -> VolumeInfo {
     VolumeInfo { ok: true, label, media_type, total_bytes: total, free_bytes: free }
 }
 
-#[tauri::command]
+// async: runs off the main thread — walking a large card or calling
+// lsblk / statvfs on a slow drive must not freeze the UI.
+#[tauri::command(async)]
 fn get_source_size(path: String) -> u64 {
     fn walk(p: &std::path::Path) -> u64 {
         let mut total = 0u64;
@@ -1645,7 +1682,9 @@ struct StatusQuery {
 ///   removable-media mount roots (`/media/$USER`, `/run/media/$USER`, `/mnt`).
 /// - **macOS**: entries under `/Volumes`.
 /// - **Windows**: every drive letter reported by `GetLogicalDrives`.
-#[tauri::command]
+// async: runs off the main thread — walking a large card or calling
+// lsblk / statvfs on a slow drive must not freeze the UI.
+#[tauri::command(async)]
 fn list_volumes() -> Vec<VolumeEntry> {
     let mut vols: Vec<VolumeEntry> = Vec::new();
 
@@ -1848,10 +1887,17 @@ fn parse_verification_file(file_path: String) -> Result<verify_engine::FileListR
 /// Progress and results are emitted as `"verify-progress"` / `"verify-done"` /
 /// `"verify-error"` events on the verifier window.
 #[tauri::command]
-fn start_verification(window: tauri::WebviewWindow, state: State<AppState>, file_path: String) {
+fn start_verification(window: tauri::WebviewWindow, state: State<AppState>, file_path: String)
+    -> Result<(), String>
+{
+    if state.verify_running.swap(true, Ordering::SeqCst) {
+        return Err("A verification is already running.".into());
+    }
     let pc = copy_engine::PauseCancel::new();
     *state.verify_pc.lock().unwrap() = Some(pc.clone());
-    verify_engine::run(std::path::PathBuf::from(file_path), window, pc);
+    verify_engine::run(std::path::PathBuf::from(file_path), window, pc,
+                       state.verify_running.clone());
+    Ok(())
 }
 
 #[tauri::command]

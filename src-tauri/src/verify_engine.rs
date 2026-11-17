@@ -228,8 +228,16 @@ fn build_mhl_chain(mhl_path: &Path) -> Vec<MhlMeta> {
 /// - `"verify-progress"` → `VerifyProgress` (fraction 0.0–1.0, label)
 /// - `"verify-done"`     → `VerifyResult`
 /// - `"verify-error"`    → String error message
-pub fn run(file_path: PathBuf, win: tauri::WebviewWindow, pc: Arc<PauseCancel>) {
+/// `running` is cleared when the thread ends (see AppState::verify_running).
+pub fn run(file_path: PathBuf, win: tauri::WebviewWindow, pc: Arc<PauseCancel>,
+           running: Arc<std::sync::atomic::AtomicBool>) {
     std::thread::spawn(move || {
+        // Cleared when this closure ends, even on panic.
+        struct Clear(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Clear {
+            fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); }
+        }
+        let _clear = Clear(running);
         let ext = file_path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
@@ -292,7 +300,7 @@ fn algo_from_ext(ext: &str) -> HashAlgo {
     }
 }
 
-fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel) -> io::Result<VerifyResult> {
+fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<PauseCancel>) -> io::Result<VerifyResult> {
     let ext  = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let algo = algo_from_ext(&ext);
     if algo == HashAlgo::None {
@@ -301,6 +309,11 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseC
     }
 
     let raw = parse_checksum_file(file_path)?;
+    if raw.is_empty() {
+        // Never report "0 failures" for a file we could not read any entry from.
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            "No usable entry in this checksum file (empty, or a format Bartleby does not read)."));
+    }
     // Files are resolved relative to the checksum file's parent directory
     let root = file_path.parent().unwrap_or(Path::new("."));
     let total = raw.len();
@@ -317,7 +330,8 @@ fn run_checksum_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseC
         let rel_native = raw_e.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
         let abs = root.join(&rel_native);
 
-        let (computed, file_size, status) = match crate::copy_engine::hash_file_path(&abs, algo) {
+        let (computed, file_size, status) = match crate::copy_engine::hash_file_verified(&abs, algo, pc) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
             Ok(hash) => {
                 let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
                 let ok   = hash.eq_ignore_ascii_case(&raw_e.expected);
@@ -482,7 +496,7 @@ fn parse_mhl_file(path: &Path) -> io::Result<MhlDoc> {
     Ok(MhlDoc { meta, entries, algo: doc_algo })
 }
 
-fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel) -> io::Result<VerifyResult> {
+fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &Arc<PauseCancel>) -> io::Result<VerifyResult> {
     let doc = parse_mhl_file(file_path)?;
     // Files are resolved relative to the MHL's parent-parent directory
     // (MHL lives in `{dst}/ascmhl/file.mhl`, files live in `{dst}/`)
@@ -491,6 +505,10 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel
         .unwrap_or(Path::new("."));
 
     let total = doc.entries.len();
+    if total == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            "No usable entry in this MHL (empty, or not an ASC MHL v2.0 file)."));
+    }
     let mut entries = Vec::with_capacity(total);
 
     for (i, raw) in doc.entries.iter().enumerate() {
@@ -528,7 +546,8 @@ fn run_mhl_verify(file_path: &Path, win: &tauri::WebviewWindow, pc: &PauseCancel
         let (computed, status) = if meta_result.is_err() {
             (String::new(), "missing".to_string())
         } else {
-            match crate::copy_engine::hash_file_path(&abs, raw.algo) {
+            match crate::copy_engine::hash_file_verified(&abs, raw.algo, pc) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
                 Ok(hash) => {
                     let ok = hash.eq_ignore_ascii_case(&raw.expected_hash);
                     (hash, if ok { "ok" } else { "mismatch" }.to_string())

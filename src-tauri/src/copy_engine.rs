@@ -512,6 +512,7 @@ pub fn run(
         .map(|d| d.to_string_lossy().to_string())
         .collect();
     if !non_empty.is_empty() {
+        drain_replies(&reply_rx);
         let _ = tx.send(Msg::NonEmptyDest(non_empty));
         match reply_rx.recv().unwrap_or(Reply::Cancel) {
             Reply::Cancel => {
@@ -568,6 +569,7 @@ pub fn run(
         std::collections::HashSet::new();
 
     if !conflict_entries.is_empty() {
+        drain_replies(&reply_rx);
         let _ = tx.send(Msg::Conflicts(conflict_infos));
         match reply_rx.recv().unwrap_or(Reply::Cancel) {
             Reply::Cancel => {
@@ -1403,6 +1405,24 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
             _ => false,
         }
     }
+}
+
+/// Hashes one file for the Verifier the same way Phase 2 does: cache-bypassing
+/// read (O_DIRECT / F_NOCACHE / NO_BUFFERING, buffered fallback only when
+/// direct I/O is unavailable), pausable and cancellable inside the file
+/// (`ErrorKind::Interrupted` on cancel).
+pub(crate) fn hash_file_verified(path: &Path, algo: HashAlgo, pc: &Arc<PauseCancel>) -> io::Result<String> {
+    let total  = AtomicU64::new(0);
+    let device = AtomicU64::new(0);
+    let tally  = ByteTally { total: &total, device: &device };
+    let (h, _buffered) = hash_direct(path, algo, pc, &tally)?;
+    h.hash.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no digest computed"))
+}
+
+/// Discards replies left over from an earlier prompt (e.g. a double click),
+/// so the next prompt gets the user's answer to THAT prompt.
+fn drain_replies(reply_rx: &std::sync::mpsc::Receiver<Reply>) {
+    while reply_rx.try_recv().is_ok() {}
 }
 
 /// Logs the files that could not be copied and any destination flush failure,
@@ -3020,6 +3040,37 @@ mod tests {
         let sums = read_checksum(&dst, "xxh64");
         assert!(!sums.contains("ascmhl"), "{sums}");
         assert!(sums.contains("A001/sub/x.bin"), "{sums}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // A reply sent when no prompt was waiting (double click, late answer)
+    // must not be taken as the answer to the next prompt.
+    #[test]
+    fn stale_reply_is_not_used_for_the_next_prompt() {
+        let root = tmp_dir("stale");
+        let src = make_source(&root);
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("other.txt"), b"x").unwrap(); // non-empty -> prompt
+        let (tx, rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        reply_tx.send(Reply::Cancel).unwrap(); // stale
+        let pc = PauseCancel::new();
+        let h = std::thread::spawn(move || {
+            run(src, vec![dst], HashAlgo::None, false, false, false, false, false,
+                String::new(), String::new(), String::new(),
+                String::new(), String::new(), String::new(),
+                Settings::default(), tx, reply_rx, pc)
+        });
+        let ok = loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                Msg::Done(ok, _) => break ok,
+                Msg::NonEmptyDest(_) | Msg::Conflicts(_) => reply_tx.send(Reply::Continue).unwrap(),
+                _ => {}
+            }
+        };
+        h.join().unwrap();
+        assert!(ok, "the stale Cancel was used as the answer");
         let _ = fs::remove_dir_all(&root);
     }
 
