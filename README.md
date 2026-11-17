@@ -1,12 +1,14 @@
 # Bartleby
 <img width="128" height="128" alt="128x128" src="https://github.com/user-attachments/assets/2e68bce0-2450-491d-8247-1d56ef56f638" />
 
-
-<img width="2200" height="1464" alt="B1" src="https://github.com/user-attachments/assets/0faa0e1e-5259-42b0-b046-8cedd50752f7" />
-<img width="2200" height="1464" alt="B2" src="https://github.com/user-attachments/assets/c0631d5e-32f2-49ad-9039-ab6ad203f121" />
-<img width="1960" height="1464" alt="B3" src="https://github.com/user-attachments/assets/61d521d8-b2e8-468a-878b-0edc2c888818" />
-
-
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144146" src="https://github.com/user-attachments/assets/fdc9d2f1-d52c-41cb-8a80-93b20f1e8493" />
+<img width="1225" height="875" alt="Capture d&#39;écran_20261117_144255" src="https://github.com/user-attachments/assets/5bd15524-0107-4632-862e-7a64997dd458" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144431" src="https://github.com/user-attachments/assets/be688a87-613f-47a5-9240-e962b4115e5e" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144423" src="https://github.com/user-attachments/assets/9768e1bf-433f-4329-b0d2-b0e65fa6f335" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144405" src="https://github.com/user-attachments/assets/abe45fd9-9f36-44e9-b79b-df191d970333" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144356" src="https://github.com/user-attachments/assets/b10ebee6-fabe-4604-9356-8d4b2ea7ccd5" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144347" src="https://github.com/user-attachments/assets/aaedfd25-5711-42c9-a78b-69833a2b62d7" />
+<img width="1825" height="1095" alt="Capture d&#39;écran_20261117_144319" src="https://github.com/user-attachments/assets/43209d1e-da4a-44a6-ba53-d73ae1161bc2" />
 
 
 > **Beta software** — Bartleby is under active development. Expect rough edges, missing features, and breaking changes between releases. Use at your own risk in production workflows.
