@@ -213,7 +213,6 @@ dirs = "5"
 #               API: Md5::new() / .update() / .finalize()
 # Output format is identical: 32-char lowercase hex string.
 # The `digest` feature enables the `Digest` trait required by the new API.
-md-5 = { version = "0.10", features = ["oid"] }
 
 # ── xxhash-rust: XXH3-128 hash algorithm ─────────────────────────────────────
 #
@@ -416,3 +415,10 @@ openssl = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+# md-5: pure-Rust MD5, used only on platforms without a native MD5 API
+# (Linux = OpenSSL, macOS = CommonCrypto, Windows = CNG; see NativeMd5 in
+# copy_engine.rs). Target-specific so Linux/macOS/Windows builds do not pull
+# an unused crate.
+[target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))'.dependencies]
+md-5 = { version = "0.10", features = ["oid"] }

@@ -835,7 +835,6 @@ fn write_custom_header_csv(
     comment:         &str,
     location:        &str,
 ) -> std::io::Result<()> {
-    use std::io::Write;
 
     let now = Local::now().format("%Y-%m-%d at %H:%M:%S").to_string();
     writeln!(f, "# Backup report")?;

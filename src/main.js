@@ -298,6 +298,9 @@ async function persistSettings() {
         await invoke('save_settings', { newSettings: currentSettings });
     } catch(e) {
         console.error('save_settings:', e);
+        // Settings could not be written (read-only or full disk…): say so,
+        // otherwise the changes silently vanish at the next launch.
+        alert('Settings could not be saved: ' + e);
     }
 }
 
@@ -616,7 +619,8 @@ if (logoClear) {
         if (currentSettings) currentSettings.logo_path = '';
         var logoEl = document.getElementById('s-logo');
         if (logoEl) logoEl.value = '';
-        await invoke('save_settings', { newSettings: currentSettings });
+        await invoke('save_settings', { newSettings: currentSettings })
+            .catch(function(e) { console.error('save_settings:', e); });
     });
 }
 

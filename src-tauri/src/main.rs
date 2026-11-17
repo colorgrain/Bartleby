@@ -289,7 +289,25 @@ struct AppState {
 /// if the result is `Err(…)`. This is appropriate here because a failure to start
 /// the event loop is a fatal, unrecoverable error — there is nothing sensible to
 /// do except crash with a clear message.
+/// Persistent log: `bartleby.log` next to settings.json (rotated to
+/// `bartleby.log.old` above 5 MB). Before this, log::warn!/error! calls went
+/// nowhere because no logger was installed.
+fn init_logging() {
+    let dir = Settings::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("bartleby.log");
+    if std::fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("bartleby.log.old"));
+    }
+    if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = simplelog::WriteLogger::init(
+            simplelog::LevelFilter::Info, simplelog::Config::default(), file);
+        log::info!("Bartleby {} started", VERSION);
+    }
+}
+
 fn main() {
+    init_logging();
     tauri::Builder::default()
         // Register the dialog plugin (enables window.__TAURI__.dialog in JavaScript).
         // Without this, folder picker dialogs cannot be opened from JS.
@@ -493,11 +511,9 @@ fn save_settings(state: State<AppState>, new_settings: Settings) -> Result<(), S
     let mut s = state.settings.lock().unwrap();
     // Replace the entire Settings value in one move (no field-by-field copy)
     *s = new_settings;
-    // Write the new settings to ~/.config/bartleby/settings.json
-    // (errors are silently discarded inside save() — see settings.rs)
-    s.save();
-    // Signal success to JavaScript (the await in JS resolves without a value)
-    Ok(())
+    // Write the new settings to ~/.config/bartleby/settings.json; a failure
+    // (read-only or full disk…) is reported to JavaScript instead of ignored.
+    s.save()
 }
 
 // ── Event payload structs ──────────────────────────────────────────────────────

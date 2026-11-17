@@ -461,28 +461,30 @@ impl Settings {
     /// `create_dir_all` creates all missing path components in one call
     /// (equivalent to `mkdir -p` on the command line). It is idempotent:
     /// calling it on an already-existing directory is a no-op (returns Ok).
-    pub fn save(&self) {
+    pub fn save(&self) -> Result<(), String> {
         let path = config_path();
 
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
         }
 
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            // Atomic write: write to a sibling .tmp file first, then rename.
-            // rename() is atomic on the same filesystem (POSIX guarantee), so a
-            // crash or power loss mid-write can never leave settings.json truncated
-            // or empty — the old file stays intact until the rename succeeds.
-            let tmp = path.with_extension("tmp");
-            if let Err(e) = std::fs::write(&tmp, &json) {
-                log::warn!("Settings save failed (write temp): {}", e);
-                return;
-            }
-            if let Err(e) = std::fs::rename(&tmp, &path) {
-                log::warn!("Settings save failed (rename): {}", e);
-                let _ = std::fs::remove_file(&tmp);
-            }
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        // Atomic write: write to a sibling .tmp file first, then rename.
+        // rename() is atomic on the same filesystem (POSIX guarantee), so a
+        // crash or power loss mid-write can never leave settings.json truncated
+        // or empty — the old file stays intact until the rename succeeds.
+        let tmp = path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            log::warn!("Settings save failed (write temp): {}", e);
+            return Err(format!("cannot write settings: {}", e));
         }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            log::warn!("Settings save failed (rename): {}", e);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot write settings: {}", e));
+        }
+        Ok(())
     }
 
     /// Loads settings from `settings.json`, returning `Settings::default()` on
@@ -522,16 +524,27 @@ impl Settings {
     /// settings the user had configured are preserved.
     pub fn load() -> Self {
         let path = config_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Settings::default(); // first launch: no file yet
+        };
+        match serde_json::from_str::<Settings>(&text) {
+            Ok(mut st) => { st.skin = migrate_skin(&st.skin).to_string(); st }
+            Err(e) => {
+                // The next save would overwrite the user's settings (contact,
+                // company, custom themes…) with defaults: keep a copy first.
+                let backup = path.with_extension(format!(
+                    "json.corrupt-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+                let _ = std::fs::copy(&path, &backup);
+                log::error!("settings.json unreadable ({}); defaults used, copy kept at {}",
+                            e, backup.display());
+                Settings::default()
+            }
+        }
+    }
 
-        std::fs::read_to_string(&path)  // read entire file into a String
-            .ok()                       // Err (file not found, etc.) → None
-            .and_then(|s| {
-                // Attempt to deserialise the JSON string into a Settings struct.
-                // `.ok()` converts serde_json::Error into None on any parse failure.
-                serde_json::from_str(&s).ok()
-            })
-            .map(|mut st: Settings| { st.skin = migrate_skin(&st.skin).to_string(); st })
-            .unwrap_or_default()        // None → Settings::default()
+    /// Folder holding settings.json and bartleby.log.
+    pub fn config_dir() -> std::path::PathBuf {
+        config_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into())
     }
 }
 
