@@ -2360,7 +2360,7 @@ fn generate_reports(
             } else {
                 checksum_dir.join(format!("{}_{}.{}", checksum_label, cs_ts, ext))
             };
-            match write_checksum(&p, meta_entries, hashes, &path_prefix) {
+            match write_checksum(&p, meta_entries, hashes, &path_prefix, hash_algo) {
                 Ok(_)  => log(tx, &format!("◈  {} : {}\n", col_label, p.display())),
                 Err(e) => log(tx, &format!("✖  {} sidecar error: {}\n", col_label, e)),
             }
@@ -2489,8 +2489,13 @@ fn write_checksum(
     entries: &[(String, metadata::FileMeta)],
     hashes:  &[(FileHashes, bool)],
     prefix:  &str,
+    algo:    HashAlgo,
 ) -> io::Result<()> {
     use std::io::Write;
+    // xxhsum (0.8) marks XXH3-64 digests with "XXH3_" — without it, a 16-digit
+    // digest is read as XXH64 and `xxhsum -c` fails every line. The Verifier
+    // accepts both forms, so older .xxh3 files keep verifying.
+    let tag = if algo == HashAlgo::Xxh3_64 { "XXH3_" } else { "" };
     let mut f = fs::File::create(path)?;
     for ((rel, _), (fh, ok)) in entries.iter().zip(hashes.iter()) {
         // The card's own ascmhl/ history is not media; its chain file changes
@@ -2503,7 +2508,7 @@ fn write_checksum(
             continue;
         }
         match &fh.hash {
-            Some(hash) => writeln!(f, "{}  {}{}", hash, prefix, rel)?,
+            Some(hash) => writeln!(f, "{}{}  {}{}", tag, hash, prefix, rel)?,
             // No digest could be computed (read error during verification).
             // Emit a commented marker rather than omitting the file entirely, so
             // the sidecar is not silently incomplete. Lines starting with '#' are
@@ -3321,6 +3326,20 @@ mod tests {
             .find(|e| e.path().extension().map_or(false, |x| x == ext)).unwrap().path();
         assert_eq!(fs::read(find(&d1, "pdf")).unwrap(), fs::read(find(&d2, "pdf")).unwrap());
         assert!(find(&d2, "html").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // .xxh3 files must be readable by `xxhsum -c` (XXH3_ prefix) and by the
+    // Verifier.
+    #[test]
+    fn xxh3_checksum_file_uses_xxhsum_prefix() {
+        let root = tmp_dir("xxh3");
+        let src = make_source(&root);
+        let dst = root.join("dst");
+        let (ok, summary, _) = run_job(&src, vec![dst.clone()], HashAlgo::Xxh3_64);
+        assert!(ok, "{summary}");
+        let sums = read_checksum(&dst, "xxh3");
+        assert!(sums.lines().filter(|l| !l.starts_with('#')).all(|l| l.starts_with("XXH3_")), "{sums}");
         let _ = fs::remove_dir_all(&root);
     }
 
