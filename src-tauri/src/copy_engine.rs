@@ -2254,6 +2254,9 @@ fn generate_reports(
     let now_utc   = chrono::Utc::now();
     let timestamp = format!("{}_{}", now_utc.format("%Y-%m-%d"), now_utc.format("%H%M%SZ"));
 
+    // Reports already written in this job: (kind, title, per-file statuses, path).
+    let mut generated: Vec<(&str, String, Vec<bool>, PathBuf)> = Vec::new();
+
     for (dst_idx, dst) in destinations.iter().enumerate() {
         // This destination's view: source hash + whether the file is complete
         // (and, when verified, matching) HERE. A file that failed on this
@@ -2380,34 +2383,48 @@ fn generate_reports(
                 Err(e) => log(tx, &format!("✖  CSV error: {}\n", e)),
             }
         }
-        if gen_pdf {
-            let pdf_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
-                meta_entries.iter().zip(hashes.iter())
-                    .map(|((rel, meta), (fh, ok))| {
-                        (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(), status(*ok))
-                    })
-                    .collect();
-            log(tx, "◎  Generating PDF report…\n");
-            match pdf_report::write_pdf(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
-                                        &pdf_entries, settings, col_label, comment, location) {
-                Ok(_)  => log(tx, &format!("◈  PDF : {}\n",
-                    report_dir.join(if rpt_ts.is_empty() { format!("{}.pdf", report_label) } else { format!("{}_{}.pdf", report_label, rpt_ts) }).display())),
-                Err(e) => log(tx, &format!("✖  PDF error: {}\n", e)),
+        // PDF / HTML: the heavy part (thumbnails, waveforms) does not depend on
+        // the destination. A report already generated for an earlier
+        // destination with the same title and the same per-file statuses has
+        // identical content: it is copied instead of being generated again.
+        let status_key: Vec<bool> = hashes.iter().map(|(_, ok)| *ok).collect();
+        let report_path = |ext: &str| report_dir.join(if rpt_ts.is_empty() {
+            format!("{}.{}", report_label, ext)
+        } else {
+            format!("{}_{}.{}", report_label, rpt_ts, ext)
+        });
+        for (kind, enabled) in [("pdf", gen_pdf), ("html", gen_html)] {
+            if !enabled { continue; }
+            let target = report_path(kind);
+            let label = if kind == "pdf" { "PDF " } else { "HTML" };
+            if let Some((_, _, _, prev)) = generated.iter()
+                .find(|(k, l, st, _)| *k == kind && l == report_label && *st == status_key)
+            {
+                match fs::copy(prev, &target) {
+                    Ok(_) => { log(tx, &format!("◈  {}: {} (same report as {})\n", label, target.display(), prev.display())); continue; }
+                    Err(e) => log(tx, &format!("△  could not copy {} ({}), generating it again\n", prev.display(), e)),
+                }
             }
-        }
-        if gen_html {
-            let html_entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
+            let entries: Vec<(metadata::FileMeta, String, String, Option<bool>)> =
                 meta_entries.iter().zip(hashes.iter())
                     .map(|((rel, meta), (fh, ok))| {
                         (meta.clone(), fh.hash.clone().unwrap_or_default(), rel.clone(), status(*ok))
                     })
                     .collect();
-            log(tx, "◎  Generating HTML report…\n");
-            match html_report::write_html(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
-                                          &html_entries, settings, col_label, comment, location) {
-                Ok(_)  => log(tx, &format!("◈  HTML: {}\n",
-                    report_dir.join(if rpt_ts.is_empty() { format!("{}.html", report_label) } else { format!("{}_{}.html", report_label, rpt_ts) }).display())),
-                Err(e) => log(tx, &format!("✖  HTML error: {}\n", e)),
+            log(tx, &format!("◎  Generating {} report…\n", label.trim()));
+            let res = if kind == "pdf" {
+                pdf_report::write_pdf(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
+                                      &entries, settings, col_label, comment, location)
+            } else {
+                html_report::write_html(report_dir, report_label, rpt_ts, src, total_bytes, destinations,
+                                        &entries, settings, col_label, comment, location)
+            };
+            match res {
+                Ok(_)  => {
+                    log(tx, &format!("◈  {}: {}\n", label, target.display()));
+                    generated.push((kind, report_label.to_string(), status_key.clone(), target));
+                }
+                Err(e) => log(tx, &format!("✖  {} error: {}\n", label.trim(), e)),
             }
         }
     }
@@ -3243,6 +3260,37 @@ mod tests {
         assert_eq!(mt(&dst.join("A001").join("sub")), old);
         // The card folder holds the new ascmhl/ generation, yet keeps its date.
         assert_eq!(mt(&dst.join("A001")), old + std::time::Duration::from_secs(60));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn identical_reports_are_generated_once() {
+        let root = tmp_dir("rep");
+        let src = make_source(&root);
+        let (d1, d2) = (root.join("d1"), root.join("d2"));
+        let (tx, rx) = mpsc::channel();
+        let (_reply_tx, reply_rx) = mpsc::channel();
+        let (s, a, b) = (src.clone(), d1.clone(), d2.clone());
+        let h = std::thread::spawn(move || run(s, vec![a, b], HashAlgo::Xxh64,
+            false, true, true, false, true,
+            String::new(), String::new(), String::new(), String::new(), String::new(), String::new(),
+            Settings::default(), tx, reply_rx, PauseCancel::new()));
+        let mut logs = String::new();
+        let ok = loop {
+            match rx.recv_timeout(Duration::from_secs(120)).unwrap() {
+                Msg::Log(l) => logs.push_str(&l),
+                Msg::Done(ok, _) => break ok,
+                _ => {}
+            }
+        };
+        h.join().unwrap();
+        assert!(ok, "{logs}");
+        assert_eq!(logs.matches("Generating PDF report").count(), 1, "{logs}");
+        assert_eq!(logs.matches("Generating HTML report").count(), 1, "{logs}");
+        let find = |d: &Path, ext: &str| fs::read_dir(d).unwrap().flatten()
+            .find(|e| e.path().extension().map_or(false, |x| x == ext)).unwrap().path();
+        assert_eq!(fs::read(find(&d1, "pdf")).unwrap(), fs::read(find(&d2, "pdf")).unwrap());
+        assert!(find(&d2, "html").exists());
         let _ = fs::remove_dir_all(&root);
     }
 
