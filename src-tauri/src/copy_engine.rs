@@ -477,7 +477,8 @@ pub fn run(
 
     // ── Scan source ───────────────────────────────────────────────────────────
     let _ = tx.send(Msg::Progress(0.0, "Scanning source directory…".into(), None));
-    let files = match collect_files(&src) {
+    let mut skipped: Vec<String> = Vec::new();
+    let files = match collect_files(&src, &mut skipped) {
         Ok(f) => f,
         Err(e) => {
             log(&tx, &format!("✖  Cannot read source: {}\n", e));
@@ -490,7 +491,13 @@ pub fn run(
         let _ = tx.send(Msg::Done(false, "△  Source directory is empty.".into()));
         return;
     }
-    log(&tx, &format!("◎  {} file(s) found\n\n", files.len()));
+    log(&tx, &format!("◎  {} file(s) found\n", files.len()));
+    if !skipped.is_empty() {
+        log(&tx, &format!("△  {} item(s) not copied:\n", skipped.len()));
+        for s in skipped.iter().take(50) { log(&tx, &format!("   ↷  {}\n", s)); }
+        if skipped.len() > 50 { log(&tx, &format!("   … and {} more\n", skipped.len() - 50)); }
+    }
+    log(&tx, "\n");
 
     for dst in &destinations {
         if let Err(e) = fs::create_dir_all(dst) {
@@ -2431,31 +2438,50 @@ fn is_os_system_entry(name: &str) -> bool {
 /// `collect_files` is the public entry point that initialises the accumulator.
 /// `collect_recursive` is the private recursive helper that does the actual work.
 /// This avoids exposing `out: &mut Vec<PathBuf>` in the public API.
-fn collect_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+fn collect_files(dir: &Path, skipped: &mut Vec<String>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    collect_recursive(dir, &mut out)?;
+    collect_recursive(dir, dir, &mut out, skipped)?;
     Ok(out)
 }
 
-/// Recursive implementation of `collect_files`.
-///
-/// `out: &mut Vec<PathBuf>` : mutable reference to the accumulator in the caller.
-/// `&mut` : we borrow the Vec mutably (can push to it) but don't own it.
-/// The `?` operator on `fs::read_dir(dir)?` : if reading fails (permission
-/// denied, etc.), return `Err(e)` immediately — propagates up the call stack.
-/// `entry?.path()` : `entry` is `io::Result<DirEntry>`, `?` unwraps or returns.
-fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+/// What the scan does with one directory entry.
+enum ScanKind { File, Dir, Skip(&'static str) }
+
+/// Classifies an entry of the source tree. OS system folders (`.Trashes`,
+/// `System Volume Information`…) are skipped only at the source root, where
+/// the OS creates them: deeper down, a folder with such a name is user data.
+/// Symlinks are skipped (cycles, data outside the source tree) and so are
+/// FIFOs, sockets and devices (reading a FIFO would block the copy forever).
+fn scan_kind(root: &Path, dir: &Path, entry: &fs::DirEntry) -> ScanKind {
+    if dir == root && is_os_system_entry(&entry.file_name().to_string_lossy()) {
+        return ScanKind::Skip("system folder");
+    }
+    match entry.file_type() {
+        Ok(ft) if ft.is_symlink() => ScanKind::Skip("symbolic link"),
+        Ok(ft) if ft.is_dir()     => ScanKind::Dir,
+        Ok(ft) if ft.is_file()    => ScanKind::File,
+        Ok(_)                     => ScanKind::Skip("special file (FIFO, socket or device)"),
+        Err(_)                    => ScanKind::Skip("unreadable entry"),
+    }
+}
+
+/// Recursive implementation of `collect_files`. Every entry that is not
+/// copied is reported in `skipped` ("path — reason"), so the log says what
+/// was left out instead of calling the copy complete.
+fn collect_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, skipped: &mut Vec<String>)
+    -> io::Result<()>
+{
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
-        // Skip symlinks. Following them risks infinite recursion (a link that
-        // points back into its own ancestry) and would pull in data outside the
-        // source tree. `get_source_size()` in main.rs skips them too, so the set
-        // of files copied here matches the pre-copy size/ETA estimate shown in the UI.
-        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) { continue; }
         let path = entry.path();
-        if path.is_dir() { collect_recursive(&path, out)?; }
-        else             { out.push(path); }
+        match scan_kind(root, dir, &entry) {
+            ScanKind::File => out.push(path),
+            ScanKind::Dir  => collect_recursive(root, &path, out, skipped)?,
+            ScanKind::Skip(why) => {
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+                skipped.push(format!("{} — {}", rel, why));
+            }
+        }
     }
     Ok(())
 }
@@ -2463,21 +2489,17 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
 /// Collects all subdirectories under `dir` recursively (not including `dir` itself).
 fn collect_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    collect_dirs_recursive(dir, &mut out)?;
+    collect_dirs_recursive(dir, dir, &mut out)?;
     Ok(out)
 }
 
-fn collect_dirs_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+fn collect_dirs_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if is_os_system_entry(&entry.file_name().to_string_lossy()) { continue; }
-        // Skip symlinks — see collect_recursive() for the rationale (cycle safety
-        // and staying within the source tree).
-        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) { continue; }
-        let path = entry.path();
-        if path.is_dir() {
+        if let ScanKind::Dir = scan_kind(root, dir, &entry) {
+            let path = entry.path();
             out.push(path.clone());
-            collect_dirs_recursive(&path, out)?;
+            collect_dirs_recursive(root, &path, out)?;
         }
     }
     Ok(())
@@ -2507,6 +2529,32 @@ fn copy_file(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &ByteTally) ->
         return Err(io::Error::new(io::ErrorKind::InvalidInput,
             "destination is the source file itself — not overwritten"));
     }
+    let expected = fs::metadata(src)?.len();
+    // State of an existing destination file before we touch it, to know
+    // afterwards whether a failed attempt modified it.
+    let before = fs::metadata(dst).ok().map(|m| (m.len(), m.modified().ok()));
+    let result = match copy_file_inner(src, dst, pc, bytes_out) {
+        // The byte count must match the source size seen before the copy: a
+        // short copy or a source that changed meanwhile is an error, not a
+        // file left to be caught (or not) by verification.
+        Ok(n) if n != expected => Err(io::Error::new(io::ErrorKind::Other, format!(
+            "copied {} bytes but the source has {} (source changed during the copy?)", n, expected))),
+        other => other,
+    };
+    if result.is_err() {
+        // Never leave a partial file behind (error or cancel): it would look
+        // like a complete copy to anyone browsing the drive. But only remove
+        // what this attempt created or rewrote: an existing file the copy
+        // never opened (unreadable source, no write permission) is kept.
+        let after = fs::metadata(dst).ok().map(|m| (m.len(), m.modified().ok()));
+        if after.is_some() && (before.is_none() || after != before) {
+            let _ = fs::remove_file(dst);
+        }
+    }
+    result
+}
+
+fn copy_file_inner(src: &Path, dst: &Path, pc: &PauseCancel, bytes_out: &ByteTally) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -3071,6 +3119,46 @@ mod tests {
         };
         h.join().unwrap();
         assert!(ok, "the stale Cancel was used as the answer");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Entries that are not copied are reported, and a FIFO in the source
+    // does not block the copy.
+    #[cfg(unix)]
+    #[test]
+    fn skipped_entries_are_reported() {
+        let root = tmp_dir("skip");
+        let src = make_source(&root);
+        std::os::unix::fs::symlink(src.join("a.bin"), src.join("link.bin")).unwrap();
+        let fifo = std::ffi::CString::new(src.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        unsafe { libc::mkfifo(fifo.as_ptr(), 0o644); }
+        fs::create_dir_all(src.join("sub").join(".Trashes")).unwrap(); // user data, not root
+        fs::write(src.join("sub").join(".Trashes").join("keep.txt"), b"k").unwrap();
+        let dst = root.join("dst");
+        let (ok, summary, logs) = run_job(&src, vec![dst.clone()], HashAlgo::Xxh64);
+        assert!(ok, "{summary}\n{logs}");
+        assert!(logs.contains("link.bin — symbolic link"), "{logs}");
+        assert!(logs.contains("pipe — special file"), "{logs}");
+        assert!(dst.join("sub/.Trashes/keep.txt").exists(), "nested system-like folder must be copied");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // A failed copy must not delete an existing destination file it never opened.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_source_keeps_existing_destination() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 { return; }
+        let root = tmp_dir("unread");
+        let src = make_source(&root);
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("a.bin"), b"older good copy").unwrap();
+        fs::set_permissions(src.join("a.bin"), fs::Permissions::from_mode(0o000)).unwrap();
+        let (ok, _, logs) = run_job(&src, vec![dst.clone()], HashAlgo::None);
+        fs::set_permissions(src.join("a.bin"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!ok, "{logs}");
+        assert_eq!(fs::read(dst.join("a.bin")).unwrap(), b"older good copy");
         let _ = fs::remove_dir_all(&root);
     }
 

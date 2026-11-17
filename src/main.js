@@ -268,7 +268,8 @@ async function loadSettings() {
         // Derive hash algorithm — handle old settings that stored gen_md5/gen_xxh booleans.
         var algo = currentSettings.hash_algo;
         if (!algo) algo = currentSettings.gen_xxh ? 'xxh128' : (currentSettings.gen_md5 ? 'md5' : 'none');
-        if (algo === 'xxh3') algo = 'xxh128'; // migrate renamed algo
+        // ('xxh3' used to be migrated to 'xxh128' here; it is a valid choice
+        // again — XXH3-64 — and must be kept as is.)
         defaultHashAlgo = algo;
         defaultGenCsv   = currentSettings.gen_csv  || false;
         defaultGenPdf   = currentSettings.gen_pdf  || false;
@@ -961,6 +962,11 @@ function addJob() {
         var disable  = hashSel.value === 'none' || hashSel.value === 'size';
         if (mhlChkEl) mhlChkEl.disabled = disable;
         if (mhlLblEl) mhlLblEl.classList.toggle('toggle-disabled', disable);
+        // Remember the choice for new jobs and the next launch, like the
+        // report toggles.
+        defaultHashAlgo = hashSel.value;
+        currentSettings.hash_algo = hashSel.value;
+        invoke('save_settings', { newSettings: currentSettings }).catch(function(){});
     });
 
     var commentBtn = document.createElement('button');

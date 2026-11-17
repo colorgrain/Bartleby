@@ -731,6 +731,11 @@ fn start_copy(
     if args.destinations.is_empty() {
         return Err("Please add at least one destination.".into());
     }
+    // An unrecognised value would fall back to "none" (no verification at
+    // all) without anyone noticing: refuse it.
+    if !["none", "size", "md5", "sha1", "xxh64", "xxh3", "xxh128", "c4"].contains(&args.hash_algo.as_str()) {
+        return Err(format!("Unknown hash algorithm: {:?}", args.hash_algo));
+    }
     // One copy at a time (see AppState::copy_running). Cleared by the copy
     // thread when copy_engine::run returns.
     if state.copy_running.swap(true, Ordering::SeqCst) {
