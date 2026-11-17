@@ -10,7 +10,7 @@
 #   npm install && bash scripts/download_sidecars.sh
 # then `cd packaging/arch && makepkg -f`.
 pkgname=bartleby
-pkgver=0.1.0.10
+pkgver=0.1.0.11
 pkgrel=1
 pkgdesc="Multi-destination media offload with checksum verification, ASC MHL and metadata reports"
 arch=('x86_64')
