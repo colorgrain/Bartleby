@@ -11,7 +11,7 @@
 
 > **Beta software** — Bartleby is under active development. Expect rough edges, missing features, and breaking changes between releases. Use at your own risk in production workflows.
 
-Bartleby is a desktop application for film and media production data management, designed primarily for **DITs (Digital Imaging Technicians)**. It handles multi-destination file offloading with end-to-end integrity verification (MD5, SHA-1, XXH3, and more), generates optional metadata reports (CSV, HTML, PDF with thumbnails), and produces ASC MHL v2.0 hash lists. A built-in verification tool lets you audit any checksum or MHL file independently.
+Bartleby is a desktop application for film and media production data management, designed primarily for **DITs (Digital Imaging Technicians)**. It handles multi-destination file offloading with end-to-end integrity verification (MD5, SHA-1, XXH3, and more), generates optional metadata reports (CSV, HTML, PDF with thumbnails and camera colour metadata), and produces ASC MHL v2.0 histories. A built-in verification tool lets you audit any checksum or MHL file independently.
 
 Built with [Tauri v2](https://tauri.app/) (Rust backend + plain HTML/CSS/JS frontend), Bartleby runs natively on Linux, macOS, and Windows from a single codebase, and is designed to look as native as possible on each platform. Developed with the assistance of [Claude Code](https://claude.ai/code).
 
@@ -20,16 +20,17 @@ Built with [Tauri v2](https://tauri.app/) (Rust backend + plain HTML/CSS/JS fron
 ## Features
 
 - **Multi-destination copy** with parallel writes to all destinations simultaneously
-- **End-to-end integrity verification**: MD5 · SHA-1 · XXH64 · XXH3-64 · XXH128 · C4 ID
-- **ASC MHL v2.0** hash list generation and multi-generation chain management
+- **End-to-end integrity verification**: MD5 · SHA-1 · XXH64 · XXH3-64 · XXH128 · C4 ID — every copy is re-read **from the disk** (page cache bypassed), and a job is only reported successful when every file is complete and matching on every destination
+- **Checksum files** compatible with `md5sum -c`, `sha1sum -c` and `xxhsum -c`
+- **ASC MHL v2.0 histories** that travel with the card (`{card}/ascmhl/`): generations, `ascmhl_chain.xml`, append-only; a card's existing history is continued (`verified` / `failed` / `original`). Output validated with the reference `ascmhl` tool
 - **Standalone verification window**: verify any checksum or MHL file with live per-file results, pause/resume/cancel, HTML report export, and post-verification MHL generation
-- **Metadata reports**: CSV table, self-contained HTML report, PDF with thumbnails — all optional, configurable per job
+- **Metadata reports**: CSV, self-contained HTML, PDF with thumbnails — all optional, configurable per job; full hashes, Unicode file names, camera gamut / log read from MXF, Sony XML and RED R3D metadata
+- **Safety guards**: a destination equal to (or inside) the source is refused, existing files are never silently overwritten, skipped items are listed, partial files are removed after an error
 - **Multi-job queue**: run several independent copy jobs in sequence, each with its own source, destinations, and options — with a per-job status badge (idle / running / done / failed)
 - **Conflict detection**: interactive prompts for non-empty destinations and file conflicts, with size and date comparison
 - **Disk explorer**: browse the machine's mounted volumes, auto-refreshed as media is plugged in or unplugged
 - **Live progress**: per-job progress bar with per-disk transfer speed, phase-aware ETA, and current filename
-- **Light / dark mode** and multiple UI skins (Mint-Y Aqua, Adwaita, macOS, Windows 11)
-- **Native window decorations** synced to the active theme on all platforms
+- **Window styles** (Breeze, Adwaita, macOS, Windows) with light / dark mode and custom colour themes
 
 ---
 
@@ -41,23 +42,36 @@ mediainfo and ffmpeg are bundled in all installers — no separate installation 
 
 ### Linux
 
-Install the `.deb` package (Debian/Ubuntu) or run the `.AppImage` directly:
+Install the `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE) or Arch package, or run the `.AppImage` directly:
 
 ```bash
 # .deb
-sudo dpkg -i bartleby_*.deb
+sudo dpkg -i Bartleby_*.deb
+
+# .rpm
+sudo rpm -i Bartleby-*.rpm
+
+# Arch Linux
+sudo pacman -U Bartleby_*_x86_64.pkg.tar.zst
 
 # .AppImage
 chmod +x Bartleby_*.AppImage && ./Bartleby_*.AppImage
 ```
 
-### macOS
+### macOS (Apple Silicon and Intel)
 
-Open the `.dmg`, drag **Bartleby** to `/Applications`. On first launch, right-click the app → **Open** to bypass Gatekeeper (the app is not notarised yet).
+With [Homebrew](https://brew.sh) — the app is not notarised, so install without quarantine:
+
+```bash
+brew tap colorgrain/bartleby
+brew install --cask --no-quarantine bartleby
+```
+
+Or open the universal `.dmg` and drag **Bartleby** to `/Applications`. On first launch, right-click the app → **Open** to bypass Gatekeeper.
 
 ### Windows
 
-Run the `.msi` installer and follow the prompts.
+Run the `.msi` or `-setup.exe` installer and follow the prompts.
 
 ---
 
@@ -110,10 +124,12 @@ npm run dev
 npm run build
 ```
 
-> **Note for distribution builds**: `src-tauri/.cargo/cargo_config.toml` sets `target-cpu=native` to enable local SIMD optimisations. Override it when building for distribution so the binary runs on all CPUs:
+> **Note for distribution builds**: never ship a binary built with `target-cpu=native` (see the inactive `src-tauri/.cargo/cargo_config.toml`, meant for local benchmarking only). Distribution builds use an empty `RUSTFLAGS`:
 > ```bash
-> cd src-tauri && RUSTFLAGS="" cargo build --release
+> RUSTFLAGS="" npm run build
 > ```
+>
+> On Arch-based systems, building the AppImage locally needs `NO_STRIP=true` (linuxdeploy's bundled `strip` does not understand recent binaries).
 
 ---
 
