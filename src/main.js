@@ -773,11 +773,32 @@ function addJob() {
     removeJobBtn.className = 'icon-btn icon-btn-danger job-remove-btn';
     removeJobBtn.title = 'Remove this job';
     removeJobBtn.innerHTML = '<svg width="14" height="14"><use href="#ico-close"/></svg>';
-    removeJobBtn.style.display = 'none';
-    removeJobBtn.addEventListener('click', function(e) {
+    removeJobBtn.addEventListener('click', async function(e) {
         e.stopPropagation();
+        if (copyInProgress) return;
+        // Ask before discarding a job that has been set up (source or a
+        // destination filled in); an empty job goes without a question.
+        var srcEl = jobCard.querySelector('.job-src-input');
+        var configured = (srcEl && srcEl.value.trim() !== '') ||
+            Array.prototype.some.call(jobCard.querySelectorAll('.job-dest-list input[type="text"]'),
+                function(i) { return i.value.trim() !== ''; });
+        if (configured) {
+            var only = jobsContainer.querySelectorAll('.job-group').length <= 1;
+            var name = (jobCard.querySelector('.job-label') || {}).value || '';
+            var ok = await confirmDialog(
+                only ? 'Clear this job?' : 'Remove this job?',
+                (name ? '"' + name + '"\n\n' : '') +
+                (only ? 'Its source, destinations and options will be cleared.'
+                      : 'It will be removed from the list with its source, destinations and options.'),
+                only ? 'Clear' : 'Remove', 'Cancel', true);
+            if (!ok || copyInProgress) return;
+        }
         var wasSelected = jobCard.classList.contains('job-selected');
+        var wasLast = jobsContainer.querySelectorAll('.job-group').length <= 1;
         jobCard.remove();
+        // The list never stays empty: removing the only job (badly set up,
+        // or already done) leaves a fresh empty one in its place.
+        if (wasLast) { addJob(); return; }
         renumberJobs();
         if (wasSelected) {
             setSelectedJob(jobsContainer.querySelector('.job-group') || null);
@@ -1045,8 +1066,9 @@ function renumberJobs() {
     cards.forEach(function(card, idx) {
         var lbl = card.querySelector('.job-label');
         if (lbl) lbl.placeholder = count > 1 ? 'Job ' + (idx + 1) : 'Job';
+        // Always available; on the only job it clears it (see addJob).
         var btn = card.querySelector('.job-remove-btn');
-        if (btn) btn.style.display = count > 1 ? '' : 'none';
+        if (btn) btn.title = count > 1 ? 'Remove this job' : 'Clear this job';
     });
 }
 
