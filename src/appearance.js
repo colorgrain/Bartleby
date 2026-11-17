@@ -6,7 +6,7 @@
  * Bartleby's windows are undecorated and transparent (tauri.conf.json /
  * WebviewWindowBuilder in main.rs): the OS draws nothing, so the title bar,
  * the minimise / maximise / close buttons, the rounded corners and the resize
- * edges are all drawn here, in one of three styles chosen in Settings:
+ * edges are all drawn here, in one of four styles chosen in Settings:
  *
  *   adwaita — GNOME/libadwaita: round grey buttons on the right, 12 px corners
  *   breeze  — KDE Plasma: chevron glyphs, circle on hover, red close, 6 px corners

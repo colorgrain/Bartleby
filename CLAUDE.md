@@ -142,7 +142,7 @@ Both windows are **undecorated and transparent** (`decorations: false`, `transpa
 
 ## Versioning
 
-The version must be kept in sync in `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` (format `0.1.0-N`) and `packaging/arch/PKGBUILD` (`pkgver=0.1.0.N`, also set by CI). Release notes go in `RELEASE_NOTES_v<version>.md`.
+The version must be kept in sync in `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package.json` / `package-lock.json` (format `0.1.0-N`; the release workflow fails if the tag differs from Cargo.toml / tauri.conf.json) and `packaging/arch/PKGBUILD` (`pkgver=0.1.0.N`, also set by CI). Release notes go in `RELEASE_NOTES_v<version>.md`.
 
 ## Key constraints
 

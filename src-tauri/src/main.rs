@@ -1328,7 +1328,7 @@ fn is_system_dark_mode() -> bool {
 ///
 /// `mode` is `"dark"` / `"light"` to force a variant, anything else (`"default"`)
 /// to follow the OS.
-fn apply_window_decoration_theme(win: &tauri::WebviewWindow, mode: &str) {
+fn apply_native_theme(win: &tauri::WebviewWindow, mode: &str) {
     let _ = win.set_theme(match mode {
         "dark"  => Some(Theme::Dark),
         "light" => Some(Theme::Light),
@@ -1342,13 +1342,13 @@ fn apply_window_decoration_theme(win: &tauri::WebviewWindow, mode: &str) {
 /// follow it. Hidden windows are skipped — calling `set_theme()` on a hidden
 /// WebView2 window crashes the application on Windows.
 ///
-/// Called by `applyTheme()` in JS whenever the user changes the theme.
+/// Called by `src/appearance.js` whenever the colour theme is applied.
 #[tauri::command]
 fn set_window_theme(app: tauri::AppHandle, theme: String) {
     for label in &["main", "verifier"] {
         if let Some(win) = app.get_webview_window(label) {
             if win.is_visible().unwrap_or(false) {
-                apply_window_decoration_theme(&win, &theme);
+                apply_native_theme(&win, &theme);
             }
         }
     }
@@ -1888,7 +1888,7 @@ fn open_verifier_window(app: tauri::AppHandle, state: State<AppState>) -> Result
     win.set_focus().map_err(|e| e.to_string())?;
 
     let mode = state.settings.lock().unwrap().theme.clone();
-    apply_window_decoration_theme(&win, &mode);
+    apply_native_theme(&win, &mode);
 
     // Ask verifier.js to refresh its skin / colour scheme — the theme may have
     // changed in the main window while this window was hidden.
